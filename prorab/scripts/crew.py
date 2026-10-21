@@ -31,7 +31,7 @@ REFERENCES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
                           "references")
 HANDOVER_MARKER = "HANDOVER READY"
 
-# The only drop decision: an act `ответ` starting with this line (see acts.md).
+# The only drop decision: an act `answer` starting with this line (see acts.md).
 DROP_MARKER = "[customer decision] drop"
 
 REPORT_SECTIONS = ("Summary", "Behaviour", "Changed files", "Verification", "Residual risks")
@@ -751,7 +751,7 @@ def answer(name, choice=None, text=None):
         pane = (herdr_cli.agent(name) or {}).get("pane_id") or journal.kv_get(_kv(name, "pane"))
         herdr_cli.run(["pane", "send-text", pane, text])
         herdr_cli.send_keys(name, ["enter"])
-        _record(work_order, "answer to crew %s (own text): %s" % (name, text))
+        _record(work_order, "answer to crew %s (free text): %s" % (name, text))
     return _status(name)
 
 

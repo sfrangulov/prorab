@@ -259,6 +259,8 @@ class TestStart(CrewBase):
                       self.calls())
         self.assertEqual(self.j.kv["crew.a1.work_order"], "N1")
         self.assertEqual(self.j.act_log[0][:2], ("N1", "answer"))
+        self.assertTrue(self.j.act_log[0][2].startswith("crew a1 started: pane w:p9, branch "))
+        self.assertIn(", session ", self.j.act_log[0][2])
 
     def test_start_without_worktree_is_distinct(self):
         repo = self.make_repo()
@@ -878,6 +880,7 @@ class TestAnswer(CrewBase):
         self.assertEqual(crew.answer("a1", choice=2), "working")
         self.assertIn("agent send-keys a1 down enter", self.calls())
         self.assertEqual(self.j.act_log[0][:2], ("N1", "answer"))
+        self.assertTrue(self.j.act_log[0][2].startswith("choice for crew a1: 2. "))
 
     def test_answer_moves_up_from_highlighted_option(self):
         shifted = DIALOG.replace("❯ 1.", "  1.").replace("  3. Вариант C", "❯ 3. Вариант C")
@@ -900,12 +903,14 @@ class TestAnswer(CrewBase):
         i_txt = calls.index("pane send-text w:p9 свой ответ")
         i_enter = calls.index("agent send-keys a1 enter")
         self.assertTrue(i_nav < i_txt < i_enter)
+        self.assertTrue(self.j.act_log[0][2].startswith("answer to crew a1 (free text): "))
 
     def test_answer_without_dialog_sends_text(self):
         self.route("agent read a1 --source visible", "just a prompt\n")
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
-        crew.answer("a1", text="продолжай")
-        self.assertIn("agent prompt a1 продолжай --wait --until working --until done --until blocked --timeout 60000", self.calls())
+        crew.answer("a1", text="go on")
+        self.assertEqual(self.j.act_log[0][2], "answer to crew a1: go on")
+        self.assertIn("agent prompt a1 go on --wait --until working --until done --until blocked --timeout 60000", self.calls())
 
     def test_answer_refuses_consent_prompt(self):
         for kind, screen in (

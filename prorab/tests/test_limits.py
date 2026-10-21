@@ -187,6 +187,52 @@ class TestLimits(unittest.TestCase):
         self._sess("fresh.json", 11.0, 1761060000)
         self.assertEqual(limits.read_sensor(self.sensor, 300)["five_hour"], 11.0)
 
+    def test_sensor_resets_at_tolerance(self):
+        T = 1761060000
+        self._sess("a.json", 17.0, T)
+        self._sess("b.json", 28.0, T + 120)
+        r = limits.read_sensor(self.sensor, 300)
+        self.assertEqual((r["five_hour"], r["five_hour_resets_at"]), (28.0, T + 120))
+        self._sess("b.json", 28.0, T + 600)
+        self.assertEqual(limits.read_sensor(self.sensor, 300)["five_hour"], 28.0)
+        self._sess("a.json", 28.0, T)
+        self._sess("b.json", 17.0, T + 120)  # same window: the maximum, not the latest file
+        r = limits.read_sensor(self.sensor, 300)
+        self.assertEqual((r["five_hour"], r["five_hour_resets_at"]), (28.0, T + 120))
+        self._sess("a.json", 17.0, T)
+        self._sess("b.json", 5.0, T + 601)
+        r = limits.read_sensor(self.sensor, 300)
+        self.assertEqual((r["five_hour"], r["five_hour_resets_at"]), (5.0, T + 601))
+
+    def test_sensor_previous_window_beyond_tolerance(self):
+        T = 1761060000
+        self._sess("old.json", 70.0, T - 3600)
+        self._sess("new.json", 5.0, T)
+        self.assertEqual(limits.read_sensor(self.sensor, 300)["five_hour"], 5.0)
+
+    def test_prune_sensor_deletes_only_old_files_in_dir(self):
+        old = time.time() - 90000
+        for name in ("old.json", ".tmp.123"):
+            self._write_sensor(name=name, age=90000)
+        self._write_sensor(name="new.json")
+        outside = os.path.join(self.tmp.name, "outside.json")
+        with open(outside, "w") as fh:
+            fh.write("{}")
+        os.utime(outside, (old, old))
+        os.makedirs(os.path.join(self.sensor, "sub"))
+        os.symlink(outside, os.path.join(self.sensor, "link.json"))
+        n = limits.prune_sensor(self.sensor, 86400, now=time.time())
+        self.assertEqual(n, 2)
+        self.assertEqual(sorted(os.listdir(self.sensor)), ["link.json", "new.json", "sub"])
+        self.assertTrue(os.path.exists(outside))
+        self.assertEqual(limits.prune_sensor(os.path.join(self.tmp.name, "nodir"), 1), 0)
+
+    def test_get_limits_prunes(self):
+        self._write_sensor(name="old.json", age=90000)
+        self._sess("new.json", 5.0, 1761060000)
+        limits.get_limits([], self.d)
+        self.assertEqual(os.listdir(self.sensor), ["new.json"])
+
 
 if __name__ == "__main__":
     unittest.main()

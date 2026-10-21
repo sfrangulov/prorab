@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 import time
 
@@ -45,11 +46,36 @@ def _countdown(m):
             + int(m.group(4) or 0) * 60)
 
 
+_WINDOW_TOLERANCE_S = 600
+
+
+def prune_sensor(path, retention_s, now=None):
+    """Delete regular files directly in `path` (never symlinks, never elsewhere) older
+    than `retention_s`. Returns how many were removed."""
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return 0
+    for name in names:
+        full = os.path.join(path, name)
+        try:
+            st = os.lstat(full)
+            if stat.S_ISREG(st.st_mode) and now - st.st_mtime > retention_s:
+                os.unlink(full)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def read_sensor(path, max_age_s, now=None):
     """Limits from the per-session sensor files in directory `path`.
 
     Only files fresher than `max_age_s` count. Per window the files are grouped by
-    `resets_at`; the group with the latest `resets_at` wins, its maximum percent is used.
+    `resets_at` (10-minute tolerance); the group with the latest `resets_at` wins, its
+    maximum percent is used.
     """
     now = time.time() if now is None else now
     try:
@@ -82,7 +108,10 @@ def read_sensor(path, max_age_s, now=None):
         if not rows:
             return None, None
         latest = max((r[0] for r in rows if r[0] is not None), default=None)
-        return max(p for at, p in rows if at == latest), latest
+        if latest is None:
+            return max(p for at, p in rows), None
+        return max(p for at, p in rows
+                   if at is not None and latest - at <= _WINDOW_TOLERANCE_S), latest
 
     f, f_at = pick(seen["five_hour"])
     s, s_at = pick(seen["seven_day"])
@@ -147,6 +176,7 @@ def _from_panes(pane_texts):
 
 def get_limits(pane_texts, d, now=None):
     lim = d["limits"]
+    prune_sensor(lim["sensor_dir"], lim["sensor_retention_s"])  # real clock
     r = read_sensor(lim["sensor_dir"], lim["sensor_max_age_s"], now)
     if r:
         return r

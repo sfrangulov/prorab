@@ -16,7 +16,7 @@ if SCRIPTS_DIR not in sys.path:
 
 import sensor  # noqa: E402
 
-TAP = os.path.join(SCRIPTS_DIR, "statusline_tap.py")
+TAP = os.path.join(SCRIPTS_DIR, "statusline_tap.sh")
 SENSOR_PY = os.path.join(SCRIPTS_DIR, "sensor.py")
 
 STATUS_LINE = {"type": "command", "command": "/home/user/.claude/statusline.sh",
@@ -130,7 +130,7 @@ class TestSensor(SensorCase):
     def test_tap_path_with_space_is_quoted(self):
         d = os.path.join(self.tmp, "my dir")
         os.makedirs(d)
-        tap = os.path.join(d, "statusline_tap.py")
+        tap = os.path.join(d, "statusline_tap.sh")
         shutil.copy(TAP, tap)
         os.chmod(tap, 0o755)
         self.write_settings(self.base())
@@ -155,7 +155,7 @@ class TestSensor(SensorCase):
     def test_cli_install_with_spaced_path_executes(self):
         d = os.path.join(self.tmp, "my dir")
         os.makedirs(d)
-        for name in ("sensor.py", "statusline_tap.py"):
+        for name in ("sensor.py", "statusline_tap.sh"):
             shutil.copy(os.path.join(SCRIPTS_DIR, name), os.path.join(d, name))
             os.chmod(os.path.join(d, name), 0o755)
         self.write_settings(self.base())
@@ -164,7 +164,7 @@ class TestSensor(SensorCase):
                             "--yes"], env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         cmd = self.read_settings()["statusLine"]["command"]
-        tap = os.path.join(os.path.realpath(d), "statusline_tap.py")
+        tap = os.path.join(os.path.realpath(d), "statusline_tap.sh")
         self.assertEqual(cmd, shlex.quote(tap))
         with open(os.path.join(self.cache, "statusline.orig")) as fh:
             self.assertEqual(fh.read(), STATUS_LINE["command"])
@@ -215,30 +215,48 @@ class TestSensor(SensorCase):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout, data)
 
-    def test_tap_per_session_files_and_cleanup(self):
+    def test_tap_per_session_files(self):
         self.run_tap(json.dumps({"session_id": "a"}).encode())
         self.run_tap(json.dumps({"session_id": "b"}).encode())
         usage = os.path.join(self.cache, "usage")
         self.assertEqual(sorted(os.listdir(usage)), ["a.json", "b.json"])
+        # the tap never prunes: an old file stays for the reader to remove
         old = os.path.join(usage, "old.json")
         with open(old, "w") as fh:
             fh.write("{}")
         t = time.time() - 90000
         os.utime(old, (t, t))
         self.run_tap(json.dumps({"session_id": "a"}).encode())
-        self.assertEqual(sorted(os.listdir(usage)), ["a.json", "b.json"])
+        self.assertEqual(sorted(os.listdir(usage)), ["a.json", "b.json", "old.json"])
+
+    def test_tap_session_id_with_space_after_colon(self):
+        self.run_tap(b'{"a": 1, "session_id" :  "s-9_x", "b": 2}')
+        self.assertEqual(os.listdir(os.path.join(self.cache, "usage")), ["s-9_x.json"])
+
+    def test_tap_invalid_session_ids_write_nothing(self):
+        for raw in (b'{"session_id": "../evil"}', b'{"session_id": ""}',
+                    b'{"session_id": "a b"}', b'{"session_id": "a.b"}',
+                    b'{"session_id": 5}', b'{"x": 1}', b"not json", b""):
+            r = self.run_tap(raw, orig="printf Y")
+            self.assertEqual((r.returncode, r.stdout), (0, b"Y"), raw)
+        self.assertFalse(os.path.exists(os.path.join(self.cache, "usage")))
+        self.assertFalse(os.path.exists(os.path.join(self.cache, "evil.json")))
+
+    def test_tap_orig_gets_same_stdin_when_invalid(self):
+        r = self.run_tap(b"plain text\nline2", orig="cat")
+        self.assertEqual(r.stdout, b"plain text\nline2")
+
+    def test_tap_silent_on_stderr_and_failures(self):
+        data = json.dumps({"session_id": "s1"}).encode()
+        r = self.run_tap(data, orig="echo err >&2; exit 5")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))
+        env = dict(os.environ, HOME=self.home, PRORAB_CACHE="/dev/null/x")
+        r = subprocess.run(["sh", "-c", TAP], input=data, env=env, capture_output=True)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))
 
     def test_tap_without_orig_prints_nothing(self):
         r = self.run_tap(json.dumps({"session_id": "s1"}).encode())
         self.assertEqual((r.returncode, r.stdout), (0, b""))
-
-    def test_tap_bad_input_still_runs_orig(self):
-        r = self.run_tap(b"not json", orig="printf Y")
-        self.assertEqual((r.returncode, r.stdout), (0, b"Y"))
-        self.assertFalse(os.path.exists(os.path.join(self.cache, "usage")))
-        r = self.run_tap(b'{"session_id": "../evil"}', orig="printf Y")
-        self.assertEqual(r.stdout, b"Y")
-        self.assertFalse(os.path.exists(os.path.join(self.cache, "evil.json")))
 
     def test_cli_install_requires_yes(self):
         self.write_settings(self.base())

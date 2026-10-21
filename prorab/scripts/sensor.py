@@ -136,7 +136,7 @@ def main(argv):
         return 2
     settings = os.path.expanduser("~/.claude/settings.json")
     cache = os.environ.get("PRORAB_CACHE") or os.path.expanduser("~/.cache/prorab")
-    tap = os.path.join(os.path.dirname(os.path.realpath(__file__)), "statusline_tap.py")
+    tap = os.path.join(os.path.dirname(os.path.realpath(__file__)), "statusline_tap.sh")
     cmd = argv[0]
     if cmd == "status":
         print(json.dumps(status(cache, _max_age())))

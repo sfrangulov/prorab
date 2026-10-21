@@ -204,12 +204,29 @@ class TestSensor(SensorCase):
         sensor.uninstall(self.settings, self.cache)
         self.assertEqual(self.read_settings()["statusLine"], STATUS_LINE)
 
-    def test_sourced_tap_survives_exiting_original(self):
+    def test_sourced_tap_passes_original_exit_code(self):
         data = json.dumps({"session_id": "s1"}).encode()
         r = self.run_tap(data, orig="printf A; exit 7")
-        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"A", b""))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (7, b"A", b""))
         r = self.run_tap(data, orig="printf A; printf B")
         self.assertEqual(r.stdout, b"AB")
+
+    def test_exec_path_for_plain_commands(self):
+        data = json.dumps({"session_id": "s1"}).encode()
+        script = os.path.join(self.tmp, "orig.sh")
+        with open(script, "w") as fh:
+            fh.write("#!/bin/sh\ncat >/dev/null\nprintf 'ok %s' \"$1\"\nexit 4\n")
+        os.chmod(script, 0o755)
+        r = self.run_tap(data, orig="%s arg" % script)
+        self.assertEqual((r.returncode, r.stdout), (4, b"ok arg"))
+        # leading assignment and trailing newline in the stored file use the safe path
+        r = self.run_tap(data, orig="X=1 %s arg" % script)
+        self.assertEqual((r.returncode, r.stdout), (4, b"ok arg"))
+        # the original sees the saved JSON on stdin
+        r = self.run_tap(data, orig="cat")
+        self.assertEqual(r.stdout, data)
+        r = self.run_tap(data, orig="wc -c < /dev/null")
+        self.assertEqual(r.stdout.strip(), b"0")
 
     def test_status(self):
         self.write_settings(self.base())
@@ -236,7 +253,7 @@ class TestSensor(SensorCase):
     def test_tap_passes_stdin_to_orig(self):
         data = json.dumps({"session_id": "s1"}).encode()
         r = self.run_tap(data, orig="cat; exit 3")
-        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.returncode, 3)
         self.assertEqual(r.stdout, data)
 
     def test_tap_per_session_files(self):
@@ -267,13 +284,14 @@ class TestSensor(SensorCase):
         self.assertFalse(os.path.exists(os.path.join(self.cache, "evil.json")))
 
     def test_tap_orig_gets_same_stdin_when_invalid(self):
-        r = self.run_tap(b"plain text\nline2", orig="cat")
-        self.assertEqual(r.stdout, b"plain text\nline2")
+        for orig in ("cat", "cat; true"):  # exec path and subshell path
+            r = self.run_tap(b"plain text\nline2", orig=orig)
+            self.assertEqual(r.stdout.rstrip(b"\n"), b"plain text\nline2", orig)
 
     def test_tap_silent_on_stderr_and_failures(self):
         data = json.dumps({"session_id": "s1"}).encode()
         r = self.run_tap(data, orig="echo err >&2; exit 5")
-        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (5, b"", b""))
         env = dict(os.environ, HOME=self.home, PRORAB_CACHE="/dev/null/x")
         r = subprocess.run([self.SHELL, "-c", SRC], input=data, env=env, capture_output=True)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))

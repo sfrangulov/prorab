@@ -3,8 +3,8 @@
 # status-line command with the same stdin. Meant to be SOURCED (`. tap`) by the shell
 # Claude Code already starts for statusLine.command, so it adds no process of its own
 # except one `mv` for the atomic write. Works in sh and zsh; does not use $0; variables
-# are namespaced. Prints nothing of its own and always ends with exit 0 (it ends the
-# shell Claude Code started for this one command).
+# are namespaced. Prints nothing of its own and ends the shell Claude Code started for this one
+# command: it exits with the original's own code, or 0 when there is none or the tap fails.
 exec 2>/dev/null
 __prorab_nl='
 '
@@ -47,11 +47,32 @@ if [ -r "$__prorab_cache/statusline.orig" ]; then
 fi
 case $__prorab_orig in
   *[!\ \	$__prorab_nl]*)
+    # A single plain command (no newline, control syntax or leading assignment) is
+    # exec'd: the shell is replaced by the original, as without the sensor, and its exit
+    # code passes through. Anything else runs in a subshell; its code passes through too.
+    __prorab_o=${__prorab_orig%"$__prorab_nl"}
+    __prorab_w=${__prorab_o%% *}
+    case $__prorab_o in
+      *"$__prorab_nl"* | *[\;\&\|\<\>\`\(\)]*) __prorab_o= ;;
+    esac
+    case $__prorab_w in
+      "" | *=* | "{" | "!" | time | "[[" ) __prorab_o= ;;
+    esac
+    if [ -n "$__prorab_o" ]; then
+      if [ -n "$__prorab_src" ]; then
+        eval "exec $__prorab_o" <"$__prorab_src"
+      else
+        eval "exec $__prorab_o" <<__PRORAB_EOF__
+$__prorab_in
+__PRORAB_EOF__
+      fi
+    fi
     if [ -n "$__prorab_src" ]; then
       (eval "$__prorab_orig") <"$__prorab_src"
     else
       printf '%s' "$__prorab_in" | (eval "$__prorab_orig")
     fi
+    exit $?
     ;;
 esac
 exit 0

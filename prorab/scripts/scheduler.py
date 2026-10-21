@@ -2,7 +2,7 @@
 """Scheduler: how many crews may run at once, in what order to issue work orders, which
 5-hour-limit thresholds apply by day and by night.
 
-``plan`` is what the prorab calls before issuing (the estimates in pp, checked); ``cap`` prints the current thresholds.
+``plan`` is what the foreman calls before issuing (the estimates in pp, checked); ``cap`` prints the current thresholds.
 """
 import argparse
 import datetime

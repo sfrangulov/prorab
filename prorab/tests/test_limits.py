@@ -36,10 +36,10 @@ class TestLimits(unittest.TestCase):
         self.d = _defaults.load()
         self.d["limits"]["sensor_dir"] = self.sensor
 
-    def _write_sensor(self, obj=SENSOR, name="s1.json", age=0):
+    def _write_sensor(self, data=SENSOR, name="s1.json", age=0):
         path = os.path.join(self.sensor, name)
         with open(path, "w") as fh:
-            json.dump(obj, fh)
+            json.dump(data, fh)
         t = time.time() - age
         os.utime(path, (t, t))
         return os.path.getmtime(path)

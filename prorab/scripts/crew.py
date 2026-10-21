@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Brigade lifecycle: a Claude brigade in a herdr pane inside a per-наряд git worktree.
+"""Crew lifecycle: a Claude crew in a herdr pane inside a per-наряд git worktree.
 
 start, send, state, summary, handover, evidence, merge check, answer, pause, stop, cleanup.
 The prorab never merges, never pushes and never answers a trust/consent prompt.
@@ -37,7 +37,7 @@ CONSENT_MARKERS = (
 )
 TRUST_MARKER = CONSENT_MARKERS[0]
 # The only drop decision: an act `ответ` starting with this line (see acts.md).
-DROP_MARKER = "[решение заказчика] drop"
+DROP_MARKER = "[customer decision] drop"
 
 
 def is_consent(visible):
@@ -53,7 +53,7 @@ def _consent_status(visible):
 
 
 def _kv(name, field):
-    return "brigade.%s.%s" % (name, field)
+    return "crew.%s.%s" % (name, field)
 
 
 def _template(heading):
@@ -75,10 +75,10 @@ def _git(args, cwd=None, check=False):
     return p
 
 
-def _worktrees(obj_path):
+def _worktrees(site_path):
     """[{path, branch}] from `git worktree list --porcelain`."""
     out, cur = [], None
-    for line in _git(["worktree", "list", "--porcelain"], obj_path).stdout.splitlines():
+    for line in _git(["worktree", "list", "--porcelain"], site_path).stdout.splitlines():
         if line.startswith("worktree "):
             cur = {"path": line[len("worktree "):], "branch": None}
             out.append(cur)
@@ -88,9 +88,9 @@ def _worktrees(obj_path):
     return out
 
 
-def _find_worktree(obj_path, naryad):
-    for w in _worktrees(obj_path):
-        if os.path.basename(w["path"].rstrip("/")) == "prorab-%s" % naryad:
+def _find_worktree(site_path, work_order):
+    for w in _worktrees(site_path):
+        if os.path.basename(w["path"].rstrip("/")) == "prorab-%s" % work_order:
             return w
     return None
 
@@ -114,29 +114,29 @@ def _split_direction(caller_pane):
     return "down"
 
 
-def _same_object(name, obj_path):
-    obj = journal.kv_get(_kv(name, "object"))
-    if obj is None:
+def _same_site(name, site_path):
+    site = journal.kv_get(_kv(name, "site"))
+    if site is None:
         a = herdr_cli.agent(name)
-        obj = a.get("cwd") if a else None
-    return bool(obj) and _under(obj, obj_path)
+        site = a.get("cwd") if a else None
+    return bool(site) and _under(site, site_path)
 
 
 def _files_overlap(mine, theirs):
     return not mine or not theirs or bool(set(mine) & set(theirs))
 
 
-def start(obj_path, naryad, name, caller_pane):
-    active = journal.brigades()
+def start(site_path, work_order, name, caller_pane):
+    active = journal.crews()
     if len(active) >= journal.budget()["parallel_ceiling"]:
         return {"status": "parallel_limit"}
-    mine = journal.naryad_files(naryad)
+    mine = journal.work_order_files(work_order)
     clash = []
     for other in active:
-        if other == name or not _same_object(other, obj_path):
+        if other == name or not _same_site(other, site_path):
             continue
-        other_naryad = journal.kv_get(_kv(other, "naryad"))
-        theirs = journal.naryad_files(other_naryad) if other_naryad else []
+        other_work_order = journal.kv_get(_kv(other, "work_order"))
+        theirs = journal.work_order_files(other_work_order) if other_work_order else []
         if _files_overlap(mine, theirs):
             clash.append(other)
     if clash:
@@ -144,10 +144,10 @@ def start(obj_path, naryad, name, caller_pane):
 
     direction = _split_direction(caller_pane)
     pane = herdr_cli.run(["pane", "split", caller_pane, "--direction", direction,
-                          "--no-focus", "--cwd", obj_path])["result"]["pane"]["pane_id"]
+                          "--no-focus", "--cwd", site_path])["result"]["pane"]["pane_id"]
     try:
         started = herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane,
-                                 "--", "-w", "prorab-%s" % naryad], timeout_s=90)
+                                 "--", "-w", "prorab-%s" % work_order], timeout_s=90)
     except herdr_cli.HerdrError as e:
         if e.code != "agent_not_ready":
             raise
@@ -159,30 +159,30 @@ def start(obj_path, naryad, name, caller_pane):
         a = herdr_cli.agent(name) or {}
     session_id = (a.get("agent_session") or {}).get("value")
 
-    wt = _find_worktree(obj_path, naryad)
+    wt = _find_worktree(site_path, work_order)
     worktree = wt["path"] if wt else None
     branch = wt["branch"] if wt else None
-    want = "prorab/%s" % naryad
+    want = "prorab/%s" % work_order
     if wt and branch != want:
         if _git(["branch", "-m", want], worktree).returncode == 0:
             branch = want
 
-    journal.register_brigade(name)
-    fields = [("naryad", naryad), ("object", obj_path), ("pane", pane)]
+    journal.register_crew(name)
+    fields = [("work_order", work_order), ("site", site_path), ("pane", pane)]
     if worktree:
         fields += [("worktree", worktree), ("branch", branch or "")]
     for field, value in fields:
         journal.kv_set(_kv(name, field), value)
     result = {"status": "started" if worktree else "started_no_worktree", "pane_id": pane, "name": name,
               "session_id": session_id, "worktree": worktree, "branch": branch}
-    journal.add_act(naryad, "ответ", "бригада %s запущена: панель %s, ветка %s, сессия %s"
+    journal.add_act(work_order, "answer", "бригада %s запущена: панель %s, ветка %s, сессия %s"
                     % (name, pane, branch, session_id))
     return result
 
 
 # ---- sending, state ---------------------------------------------------------
 
-def send_naryad(name, text, retry_delay=5):
+def send_work_order(name, text, retry_delay=5):
     r = herdr_cli.send(name, text)
     if r == "stalled":
         time.sleep(retry_delay)
@@ -235,11 +235,11 @@ def _exit(name):
 # ---- handover ---------------------------------------------------------------
 
 def request_handover(name):
-    return herdr_cli.send(name, _template("Запрос пересменки"))
+    return herdr_cli.send(name, _template("Handover request"))
 
 
 def pause(name):
-    return herdr_cli.send(name, _template("Пауза"))
+    return herdr_cli.send(name, _template("Pause"))
 
 
 def _wait(cond, timeout_s, poll_s):
@@ -260,7 +260,7 @@ def _same_dir(a, b):
     return bool(a) and bool(b) and (a == b or os.path.realpath(a) == os.path.realpath(b))
 
 
-def complete_handover(name, naryad, naryad_text, timeout_s=60, poll_s=1):
+def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1):
     a = herdr_cli.agent(name)
     if a is None:
         return {"status": "gone"}
@@ -275,11 +275,11 @@ def complete_handover(name, naryad, naryad_text, timeout_s=60, poll_s=1):
         return {"status": "act_missing"}
     worktree = journal.kv_get(_kv(name, "worktree"))
     if not worktree:
-        return {"status": "restart_failed", "reason": "worktree of the brigade is unknown"}
+        return {"status": "restart_failed", "reason": "worktree of the crew is unknown"}
     act = "\n".join(ln for ln in lines if ln.strip() != HANDOVER_MARKER).strip()
     tokens = _tokens_of(a)
-    journal.add_act(naryad, "пересменка", act)
-    journal.spend(naryad, sessions=1, tokens=tokens)
+    journal.add_act(work_order, "handover", act)
+    journal.spend(work_order, sessions=1, tokens=tokens)
 
     _exit(name)
     gone = _wait(lambda: herdr_cli.agent(name) is None
@@ -299,9 +299,9 @@ def complete_handover(name, naryad, naryad_text, timeout_s=60, poll_s=1):
             blocked = _consent_status(herdr_cli.pane_visible(pane))
         return {"status": blocked or "restart_failed", "reason": str(e), "pane_id": pane}
 
-    text = "\n\n".join([naryad_text] + journal.acts(naryad, "пересменка"))
+    text = "\n\n".join([work_order_text] + journal.acts(work_order, "handover"))
     try:
-        sent = send_naryad(name, text)
+        sent = send_work_order(name, text)
     except herdr_cli.HerdrError as e:
         return {"status": "prompt_not_accepted", "reason": str(e), "pane_id": pane}
     if sent != "accepted":
@@ -336,9 +336,9 @@ def merge_check(worktree, accepted):
 
 # ---- answering a dialog -----------------------------------------------------
 
-def _record(naryad, text):
-    if naryad:
-        journal.add_act(naryad, "ответ", text)
+def _record(work_order, text):
+    if work_order:
+        journal.add_act(work_order, "answer", text)
 
 
 def _status(name):
@@ -347,7 +347,7 @@ def _status(name):
 
 
 def answer(name, choice=None, text=None):
-    naryad = journal.kv_get(_kv(name, "naryad"))
+    work_order = journal.kv_get(_kv(name, "work_order"))
     visible = herdr_cli.agent_visible(name)
     if is_consent(visible):
         return "consent"
@@ -356,7 +356,7 @@ def answer(name, choice=None, text=None):
         if text is None:
             raise ValueError("no dialog is open: text is required")
         herdr_cli.send(name, text)
-        _record(naryad, "ответ бригаде %s: %s" % (name, text))
+        _record(work_order, "ответ бригаде %s: %s" % (name, text))
         return _status(name)
     labels, current = dialog
     if choice is not None:
@@ -374,55 +374,55 @@ def answer(name, choice=None, text=None):
     keys = ["down"] * delta if delta > 0 else ["up"] * -delta
     if choice is not None:
         herdr_cli.send_keys(name, keys + ["enter"])
-        _record(naryad, "выбор бригаде %s: %d. %s" % (name, choice, labels[target]))
+        _record(work_order, "выбор бригаде %s: %d. %s" % (name, choice, labels[target]))
     else:
         if keys:
             herdr_cli.send_keys(name, keys)
         pane = (herdr_cli.agent(name) or {}).get("pane_id") or journal.kv_get(_kv(name, "pane"))
         herdr_cli.run(["pane", "send-text", pane, text])
         herdr_cli.send_keys(name, ["enter"])
-        _record(naryad, "ответ бригаде %s (свой текст): %s" % (name, text))
+        _record(work_order, "ответ бригаде %s (свой текст): %s" % (name, text))
     return _status(name)
 
 
 # ---- stop, cleanup ----------------------------------------------------------
 
-def stop(name, naryad):
+def stop(name, work_order):
     a = herdr_cli.agent(name)
     tokens = _tokens_of(a)
     if a is not None:
         _exit(name)
-    journal.unregister_brigade(name)
-    journal.spend(naryad, tokens=tokens)
-    for field in ("naryad", "object", "pane", "worktree", "branch"):
+    journal.unregister_crew(name)
+    journal.spend(work_order, tokens=tokens)
+    for field in ("work_order", "site", "pane", "worktree", "branch"):
         journal.kv_clear(_kv(name, field))
 
 
-def _default_branch(obj_path):
+def _default_branch(site_path):
     for b in ("main", "master"):
-        if _git(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b], obj_path).returncode == 0:
+        if _git(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b], site_path).returncode == 0:
             return b
-    return _git(["rev-parse", "--abbrev-ref", "HEAD"], obj_path).stdout.strip()
+    return _git(["rev-parse", "--abbrev-ref", "HEAD"], site_path).stdout.strip()
 
 
-def cleanup(obj_path, naryad):
-    wt = _find_worktree(obj_path, naryad)
+def cleanup(site_path, work_order):
+    wt = _find_worktree(site_path, work_order)
     if wt is None:
         return {"status": "absent"}
     branch = wt["branch"]
-    dropped = any(a.startswith(DROP_MARKER) for a in journal.acts(naryad, "ответ"))
+    dropped = any(a.startswith(DROP_MARKER) for a in journal.acts(work_order, "answer"))
     merged = False
     if branch:
-        out = _git(["branch", "--merged", _default_branch(obj_path)], obj_path).stdout
+        out = _git(["branch", "--merged", _default_branch(site_path)], site_path).stdout
         merged = branch in [ln.strip().lstrip("*+ ").strip() for ln in out.splitlines()]
     if not (merged or dropped):
         return {"status": "kept", "reason": "unmerged"}
     rm = ["worktree", "remove"] + (["--force"] if dropped and not merged else []) + [wt["path"]]
-    p = _git(rm, obj_path)
+    p = _git(rm, site_path)
     if p.returncode != 0:
         return {"status": "kept", "reason": "dirty", "detail": p.stderr.strip()}
     if branch:
-        _git(["branch", "-D" if dropped and not merged else "-d", branch], obj_path)
+        _git(["branch", "-D" if dropped and not merged else "-d", branch], site_path)
     return {"status": "removed", "worktree": wt["path"], "branch": branch}
 
 
@@ -440,18 +440,18 @@ def main(argv=None):
             p.add_argument("--" + o.replace("_", "-"), **kw)
         return p
 
-    cmd("start", "obj_path", "naryad", "name", "caller_pane")
-    cmd("send_naryad", "name", "text")
+    cmd("start", "site_path", "work_order", "name", "caller_pane")
+    cmd("send_work_order", "name", "text")
     cmd("state", "name")
     cmd("summary", "name")
     cmd("request_handover", "name")
-    cmd("complete_handover", "name", "naryad", "naryad_text")
+    cmd("complete_handover", "name", "work_order", "work_order_text")
     cmd("evidence", "worktree", base={"default": "main"})
     cmd("merge_check", "worktree", accepted={"default": ""})
     cmd("answer", "name", choice={"type": int}, text={})
     cmd("pause", "name")
-    cmd("stop", "name", "naryad")
-    cmd("cleanup", "obj_path", "naryad")
+    cmd("stop", "name", "work_order")
+    cmd("cleanup", "site_path", "work_order")
     args = vars(ap.parse_args(argv))
     c = args.pop("cmd")
     if c == "merge_check":

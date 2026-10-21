@@ -63,10 +63,10 @@ class TestJournal(JournalBase):
         for name in ("AGENTS.md", "CLAUDE.md", ".claude", ".codex", ".cursor", ".agents"):
             self.assertFalse(os.path.exists(os.path.join(self.pr, name)), name)
 
-    def test_naryad_and_stage_ready_order(self):
-        n = journal.create_naryad("obj1", "Наряд", "Тело", {"допуск": "да", "n": 3})
-        self.assertEqual(journal.kv_get("smeta.%s.допуск" % n), "да")
-        self.assertEqual(journal.kv_get("smeta.%s.n" % n), "3")
+    def test_work_order_and_stage_ready_order(self):
+        n = journal.create_work_order("site1", "Наряд", "Тело", {"допуск": "да", "n": 3})
+        self.assertEqual(journal.kv_get("estimate.%s.допуск" % n), "да")
+        self.assertEqual(journal.kv_get("estimate.%s.n" % n), "3")
         s1 = journal.create_stage(n, "Этап 1", "b")
         s2 = journal.create_stage(n, "Этап 2", "b", blocked_by=[s1])
         ids = [i["id"] for i in journal.ready()]
@@ -78,21 +78,21 @@ class TestJournal(JournalBase):
         self.assertIn(s2, ids)
 
     def test_ready_ignores_foreign_beads(self):
-        n = journal.create_naryad("o", "T", "b", {})
+        n = journal.create_work_order("o", "T", "b", {})
         other = journal.bd(["create", "alien", "-d", "x", "--silent"], json_out=False).strip()
         ids = [i["id"] for i in journal.ready()]
         self.assertIn(n, ids)
         self.assertNotIn(other, ids)
 
     def test_acts_roundtrip(self):
-        n = journal.create_naryad("o", "T", "b", {})
-        journal.add_act(n, "приёмка", "принято")
-        journal.add_act(n, "смена", "смена 1")
-        journal.add_act(n, "приёмка", "принято снова")
-        self.assertEqual(journal.acts(n, "приёмка"), ["принято", "принято снова"])
-        self.assertEqual(journal.acts(n, "смена"), ["смена 1"])
+        n = journal.create_work_order("o", "T", "b", {})
+        journal.add_act(n, "acceptance", "принято")
+        journal.add_act(n, "shift", "смена 1")
+        journal.add_act(n, "acceptance", "принято снова")
+        self.assertEqual(journal.acts(n, "acceptance"), ["принято", "принято снова"])
+        self.assertEqual(journal.acts(n, "shift"), ["смена 1"])
         self.assertEqual(len(journal.acts(n)), 3)
-        self.assertTrue(journal.acts(n)[0].startswith("[акт:приёмка]"))
+        self.assertTrue(journal.acts(n)[0].startswith("[act:acceptance]"))
         with self.assertRaises(ValueError):
             journal.add_act(n, "bogus", "x")
 
@@ -103,7 +103,7 @@ class TestJournal(JournalBase):
         self.assertEqual((b["sessions"], b["parallel_ceiling"], b["runs"]), (5, 3, 200))
 
     def test_spend_and_over_budget(self):
-        n = journal.create_naryad("o", "T", "b", {})
+        n = journal.create_work_order("o", "T", "b", {})
         journal.spend(n, sessions=30)
         self.assertEqual(journal.over_budget(None), [])
         journal.spend(n, sessions=1, runs=2, tokens=10)
@@ -120,7 +120,7 @@ class TestJournal(JournalBase):
         self.assertEqual(json.loads(journal.kv_get("shift.budget"))["sessions"], 7)
 
     def test_begin_shift_resets_spent(self):
-        n = journal.create_naryad("o", "T", "b", {})
+        n = journal.create_work_order("o", "T", "b", {})
         journal.spend(n, sessions=3)
         journal.begin_shift(None)
         self.assertEqual(journal.shift_spent(), {"sessions": 0, "runs": 0, "tokens": 0})
@@ -146,30 +146,30 @@ class TestJournal(JournalBase):
         self.assertIsNone(journal.kv_get("prorab:handoff"))
 
     def test_wait_customer_blocks(self):
-        n = journal.create_naryad("o", "T", "b", {})
+        n = journal.create_work_order("o", "T", "b", {})
         gate = journal.wait_customer(n, "нужен выбор")
         self.assertTrue(gate)
         self.assertNotIn(n, [i["id"] for i in journal.ready()])
-        self.assertEqual(journal.acts(n, "ответ"), ["нужен выбор"])
+        self.assertEqual(journal.acts(n, "answer"), ["нужен выбор"])
         journal.bd(["gate", "resolve", gate], json_out=False)
         self.assertIn(n, [i["id"] for i in journal.ready()])
 
     def test_restarts_counter(self):
-        n = journal.create_naryad("o", "T", "b", {})
+        n = journal.create_work_order("o", "T", "b", {})
         self.assertEqual(journal.bump_restarts(n), 1)
         self.assertEqual(journal.bump_restarts(n), 2)
         self.assertEqual(journal.kv_get("restarts.%s" % n), "2")
 
-    def test_brigades_registry(self):
-        self.assertEqual(journal.brigades(), [])
-        journal.register_brigade("b1")
-        journal.register_brigade("b2")
-        journal.register_brigade("b1")
-        self.assertEqual(journal.brigades(), ["b1", "b2"])
-        journal.unregister_brigade("b1")
-        self.assertEqual(journal.brigades(), ["b2"])
-        journal.unregister_brigade("b2")
-        self.assertEqual(journal.brigades(), [])
+    def test_crews_registry(self):
+        self.assertEqual(journal.crews(), [])
+        journal.register_crew("b1")
+        journal.register_crew("b2")
+        journal.register_crew("b1")
+        self.assertEqual(journal.crews(), ["b1", "b2"])
+        journal.unregister_crew("b1")
+        self.assertEqual(journal.crews(), ["b2"])
+        journal.unregister_crew("b2")
+        self.assertEqual(journal.crews(), [])
 
     def test_kv_missing_and_roundtrip(self):
         self.assertIsNone(journal.kv_get("nope"))
@@ -187,7 +187,7 @@ class TestJournal(JournalBase):
         self.assertEqual((out["sessions"], out["runs"], out["parallel_ceiling"]), (12, 50, 6))
         self.assertEqual(journal.budget()["sessions"], 12)
 
-    def test_cli_naryad_ready_and_lock(self):
+    def test_cli_work_order_ready_and_lock(self):
         import io
         from contextlib import redirect_stdout
 
@@ -196,10 +196,10 @@ class TestJournal(JournalBase):
             with redirect_stdout(buf):
                 rc = journal.main(list(argv))
             return rc, json.loads(buf.getvalue())
-        rc, out = run("naryad", "o", "Заголовок", "--body", "т", "--smeta", "k=v")
+        rc, out = run("work-order", "o", "Заголовок", "--body", "т", "--estimate", "k=v")
         self.assertEqual(rc, 0)
         nid = out["id"]
-        self.assertEqual(journal.kv_get("smeta.%s.k" % nid), "v")
+        self.assertEqual(journal.kv_get("estimate.%s.k" % nid), "v")
         rc, out = run("ready")
         self.assertIn(nid, [i["id"] for i in out])
         self.set_panes("p-a")
@@ -210,13 +210,13 @@ class TestJournal(JournalBase):
 
     # ---- Amendment S: files, estimates, durations, override ----------------
 
-    def test_stage_files_estimate_and_duration(self):
-        n = journal.create_naryad("o", "T", "b", {})
+    def test_stage_files_duration_and_actual(self):
+        n = journal.create_work_order("o", "T", "b", {})
         s = journal.create_stage(n, "Этап", "b", files=["src/a.py", "docs/b.md"],
-                                 estimate_min=12.5, kind="tests")
+                                 duration_min=12.5, kind="tests")
         info = journal.stage_info(s)
         self.assertEqual(info["files"], ["src/a.py", "docs/b.md"])
-        self.assertEqual(info["estimate_min"], 12.5)
+        self.assertEqual(info["duration_min"], 12.5)
         self.assertEqual(info["kind"], "tests")
         self.assertIsNone(info["started_at"])
         self.assertIsNone(info["actual_min"])
@@ -227,20 +227,20 @@ class TestJournal(JournalBase):
         mins = journal.accept_stage(s, "принято")
         self.assertGreater(mins, 0)
         self.assertEqual(journal.bd(["show", s])[0]["status"], "closed")
-        self.assertEqual(journal.acts(s, "приёмка"), ["принято"])
+        self.assertEqual(journal.acts(s, "acceptance"), ["принято"])
         self.assertEqual(journal.stage_info(s)["actual_min"], mins)
         self.assertEqual(journal.durations("tests"), [mins])
         self.assertEqual(journal.durations("docs"), [])
         plain = journal.create_stage(n, "Без полей", "b")
         info = journal.stage_info(plain)
-        self.assertEqual((info["files"], info["estimate_min"], info["kind"]), ([], None, None))
+        self.assertEqual((info["files"], info["duration_min"], info["kind"]), ([], None, None))
 
-    def test_naryad_files_union(self):
-        n = journal.create_naryad("o", "T", "b", {}, goal="g1")
-        self.assertEqual(journal.naryad_files(n), [])
+    def test_work_order_files_union(self):
+        n = journal.create_work_order("o", "T", "b", {}, goal="g1")
+        self.assertEqual(journal.work_order_files(n), [])
         journal.create_stage(n, "A", "b", files=["a.py", "common.py"])
         journal.create_stage(n, "B", "b", files=["common.py", "b.py"])
-        self.assertEqual(sorted(journal.naryad_files(n)), ["a.py", "b.py", "common.py"])
+        self.assertEqual(sorted(journal.work_order_files(n)), ["a.py", "b.py", "common.py"])
         self.assertIn("goal:g1", journal.bd(["show", n])[0]["labels"])
 
     def test_override_set_get_clear(self):
@@ -248,7 +248,7 @@ class TestJournal(JournalBase):
         journal.set_override("g1")
         o = journal.override()
         self.assertEqual(o["goal"], "g1")
-        self.assertEqual(o["source"], "слова заказчика")
+        self.assertEqual(o["source"], "customer's words")
         self.assertTrue(o["since"])
         journal.clear_override()
         self.assertIsNone(journal.override())
@@ -258,9 +258,9 @@ class TestJournal(JournalBase):
         # a goal without наряды does not expire the override
         journal.set_override("g1")
         self.assertIsNotNone(journal.override())
-        n1 = journal.create_naryad("o", "T1", "b", {}, goal="g1")
-        n2 = journal.create_naryad("o", "T2", "b", {}, goal="g1")
-        other = journal.create_naryad("o", "T3", "b", {}, goal="g2")
+        n1 = journal.create_work_order("o", "T1", "b", {}, goal="g1")
+        n2 = journal.create_work_order("o", "T2", "b", {}, goal="g1")
+        other = journal.create_work_order("o", "T3", "b", {}, goal="g2")
         s = journal.create_stage(n1, "S", "b")
         self.assertIsNotNone(journal.override())
         # stages inherit the goal label but are not наряды (--no-parent)
@@ -280,7 +280,7 @@ class TestJournal(JournalBase):
 
     def test_override_expires_when_stage_waits(self):
         journal.set_override("g1")
-        n = journal.create_naryad("o", "T", "b", {}, goal="g1")
+        n = journal.create_work_order("o", "T", "b", {}, goal="g1")
         s1 = journal.create_stage(n, "S1", "b")
         s2 = journal.create_stage(n, "S2", "b", blocked_by=[s1])
         s3 = journal.create_stage(n, "S3", "b")
@@ -313,15 +313,15 @@ class TestJournal(JournalBase):
             with redirect_stdout(buf):
                 rc = journal.main(list(argv))
             return rc, json.loads(buf.getvalue())
-        _, out = run("naryad", "o", "T", "--goal", "g1")
+        _, out = run("work-order", "o", "T", "--goal", "g1")
         nid = out["id"]
         _, out = run("stage", nid, "S", "--file", "a.py", "--file", "b.py",
-                     "--estimate", "20", "--kind", "docs")
+                     "--duration", "20", "--kind", "docs")
         sid = out["id"]
         _, out = run("stage-info", sid)
-        self.assertEqual((out["files"], out["estimate_min"], out["kind"]),
+        self.assertEqual((out["files"], out["duration_min"], out["kind"]),
                          (["a.py", "b.py"], 20.0, "docs"))
-        self.assertEqual(run("naryad-files", nid)[1], ["a.py", "b.py"])
+        self.assertEqual(run("work-order-files", nid)[1], ["a.py", "b.py"])
         run("stage-start", sid)
         _, out = run("stage-accept", sid, "ok")
         self.assertGreater(out["actual_min"], 0)
@@ -332,10 +332,10 @@ class TestJournal(JournalBase):
         run("override", "clear")
         self.assertEqual(run("override", "get")[1], {"override": None})
 
-    def test_graph_open_stages_and_ready_naryads(self):
-        a = journal.create_naryad("o", "A", "b", {})
-        b = journal.create_naryad("o", "B", "b", {})
-        c = journal.create_naryad("o", "C", "b", {})
+    def test_graph_open_stages_and_ready_work_orders(self):
+        a = journal.create_work_order("o", "A", "b", {})
+        b = journal.create_work_order("o", "B", "b", {})
+        c = journal.create_work_order("o", "C", "b", {})
         journal._run(["dep", "add", b, a])  # b is blocked by a
         journal._run(["dep", "add", c, b])
         sa1 = journal.create_stage(a, "A1", "b")
@@ -348,13 +348,13 @@ class TestJournal(JournalBase):
         self.assertEqual(journal.open_stages(a), [sa2])
         journal._run(["close", c, "--force"])
         self.assertNotIn(c, journal.graph())
-        # a ready stage makes its наряд issuable; a working brigade hides it
-        self.assertIn(a, journal.ready_naryads())
-        self.assertNotIn(b, journal.ready_naryads())  # blocked by a
-        journal.register_brigade("br-a")
-        journal.kv_set("brigade.br-a.naryad", a)
-        self.assertNotIn(a, journal.ready_naryads())
-        self.assertEqual(journal.working_naryads(), [a])
+        # a ready stage makes its наряд issuable; a working crew hides it
+        self.assertIn(a, journal.ready_work_orders())
+        self.assertNotIn(b, journal.ready_work_orders())  # blocked by a
+        journal.register_crew("br-a")
+        journal.kv_set("crew.br-a.work_order", a)
+        self.assertNotIn(a, journal.ready_work_orders())
+        self.assertEqual(journal.working_work_orders(), [a])
 
 
 if __name__ == "__main__":

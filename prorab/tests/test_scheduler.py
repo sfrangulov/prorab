@@ -52,17 +52,17 @@ class TestScheduler(unittest.TestCase):
         order = scheduler.critical_order(graph, est)
         self.assertEqual(order, ["A", "B", "D", "C", "E"])  # 90, 60, 60, 30, 30; ties by id
 
-    def test_critical_order_uses_estimates_and_includes_unknown_blockers(self):
+    def test_critical_order_uses_durations_and_includes_unknown_blockers(self):
         graph = {"X": ["Z"], "Y": []}
         order = scheduler.critical_order(graph, {"X": 10, "Y": 50, "Z": 5})
         self.assertEqual(order, ["Y", "Z", "X"])  # Y 50, Z 15, X 10
 
-    def test_estimate_falls_back_to_history_then_default(self):
+    def test_duration_falls_back_to_history_then_default(self):
         hist = {"code": [10.0, 50.0, 20.0]}
-        self.assertEqual(scheduler.estimate({"estimate_min": 7, "kind": "code"}, hist, D), 7)
-        self.assertEqual(scheduler.estimate({"estimate_min": None, "kind": "code"}, hist, D), 20.0)
-        self.assertEqual(scheduler.estimate({"kind": "docs"}, hist, D), 30)
-        self.assertEqual(scheduler.estimate({"kind": None}, hist, D), 30)
+        self.assertEqual(scheduler.duration({"duration_min": 7, "kind": "code"}, hist, D), 7)
+        self.assertEqual(scheduler.duration({"duration_min": None, "kind": "code"}, hist, D), 20.0)
+        self.assertEqual(scheduler.duration({"kind": "docs"}, hist, D), 30)
+        self.assertEqual(scheduler.duration({"kind": None}, hist, D), 30)
 
     # ---- burn rate --------------------------------------------------------------
 
@@ -141,9 +141,9 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(self._ap(), 6)  # ceiling
         self.assertEqual(self._ap(ready=1), 3)  # active + ready
         self.assertEqual(self._ap(ready=0), 2)
-        # limit: 60 pp left, each of 2 brigades burns 10 pp/h, 3 h to reset -> 60/30 = 2
+        # limit: 60 pp left, each of 2 crews burns 10 pp/h, 3 h to reset -> 60/30 = 2
         self.assertEqual(self._ap(burn_pp_per_h=20.0, resets_in_s=3 * 3600), 2)
-        # load above ncpu: no new brigades
+        # load above ncpu: no new crews
         self.assertEqual(self._ap(load1=9.0), 2)
         self.assertEqual(self._ap(used_pct=80.0), 0)  # cap reached
 
@@ -151,7 +151,7 @@ class TestScheduler(unittest.TestCase):
         # unknown reset -> 5 h: 60 / (10 * 5) = 1
         self.assertEqual(self._ap(burn_pp_per_h=20.0, resets_in_s=None), 1)
         self.assertEqual(self._ap(burn_pp_per_h=None, active=2), 6)  # no burn data
-        self.assertEqual(self._ap(burn_pp_per_h=20.0, active=0), 6)  # no active brigade
+        self.assertEqual(self._ap(burn_pp_per_h=20.0, active=0), 6)  # no active crew
         self.assertEqual(self._ap(burn_pp_per_h=0.0), 6)  # idle: no bound
 
     def test_allowed_parallel_override_keeps_machine_bounds(self):
@@ -179,13 +179,13 @@ class TestScheduler(unittest.TestCase):
         j = types.SimpleNamespace(
             graph=lambda: {"n1": [], "n2": ["n1"], "n3": []},
             open_stages=lambda n: {"n1": ["s1"], "n2": ["s2", "s3"], "n3": ["s4"]}[n],
-            stage_info=lambda s: {"s1": {"estimate_min": 20, "kind": "code"},
-                                  "s2": {"estimate_min": 10, "kind": "code"},
-                                  "s3": {"estimate_min": None, "kind": "docs"},
-                                  "s4": {"estimate_min": 5, "kind": "code"}}[s],
+            stage_info=lambda s: {"s1": {"duration_min": 20, "kind": "code"},
+                                  "s2": {"duration_min": 10, "kind": "code"},
+                                  "s3": {"duration_min": None, "kind": "docs"},
+                                  "s4": {"duration_min": 5, "kind": "code"}}[s],
             durations=lambda kind: [],
-            ready_naryads=lambda: ["n1", "n3"],
-            brigades=lambda: ["b1"],
+            ready_work_orders=lambda: ["n1", "n3"],
+            crews=lambda: ["b1"],
             kv_get=lambda k: kw.get("kv", {}).get(k),
             override=lambda: kw.get("override"),
         )
@@ -203,7 +203,7 @@ class TestScheduler(unittest.TestCase):
         plan = scheduler.build_plan(self._journal(), D, now, lim, log, (1.0, 8))
         self.assertEqual(plan["order"], ["n1", "n3"])  # n1: 20+10+30 = 60 > n3: 5
         self.assertEqual(plan["active"], 1)
-        # burn 10 pp/h, 1 brigade, 1 h left: 50 / 10 = 5 -> min(1 + 2, 5, 6) = 3
+        # burn 10 pp/h, 1 crew, 1 h left: 50 / 10 = 5 -> min(1 + 2, 5, 6) = 3
         self.assertEqual(plan["allowed"], 3)
         self.assertEqual(plan["new"], 2)
         self.assertEqual(plan["cap"]["mode"], "day")
@@ -223,7 +223,7 @@ class TestScheduler(unittest.TestCase):
         now = at(23)
         lim = {"five_hour": 97.0, "seven_day": None, "five_hour_resets_at": at(3, day=22),
                "five_hour_resets_in_s": 4 * 3600}
-        ov = {"goal": "g", "since": 1, "source": "слова заказчика"}
+        ov = {"goal": "g", "since": 1, "source": "customer's words"}
         j = self._journal(kv={"shift.night": "1"}, override=ov)
         none = os.path.join(self.tmp.name, "none")
         plan = scheduler.build_plan(j, D, now, lim, none, (0.5, 8))
@@ -232,7 +232,7 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(plan["allowed"], 3)  # active 1 + 2 ready; the cap is 100
         # the machine bound still holds under the override
         plan = scheduler.build_plan(j, D, now, lim, none, (9.0, 8))
-        self.assertEqual(plan["allowed"], 1)  # load > ncpu: only the running brigade
+        self.assertEqual(plan["allowed"], 1)  # load > ncpu: only the running crew
         # by day: 85 > stop 80
         lim = dict(lim, five_hour=85.0)
         day = scheduler.build_plan(self._journal(), D, at(14), lim, none, (0.5, 8))
@@ -249,12 +249,12 @@ class TestScheduler(unittest.TestCase):
         self.assertTrue(plan["limits_unknown"])
         self.assertEqual(plan["allowed"], 1)  # max(1, active=1), not active + ready
         j = self._journal()
-        j.brigades = lambda: ["b1", "b2", "b3"]
+        j.crews = lambda: ["b1", "b2", "b3"]
         plan = scheduler.build_plan(j, D, now, lim, none, (0.5, 8))
-        self.assertEqual(plan["allowed"], 3)  # no growth beyond the running brigades
-        j.brigades = lambda: []
+        self.assertEqual(plan["allowed"], 3)  # no growth beyond the running crews
+        j.crews = lambda: []
         plan = scheduler.build_plan(j, D, now, lim, none, (0.5, 8))
-        self.assertEqual(plan["allowed"], 1)  # one brigade may start
+        self.assertEqual(plan["allowed"], 1)  # one crew may start
         ok = dict(lim, five_hour=10.0)
         self.assertFalse(scheduler.build_plan(j, D, now, ok, none, (0.5, 8))["limits_unknown"])
 

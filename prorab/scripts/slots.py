@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Machine-wide semaphore for heavy commands: n flock-ed lock files per kind.
 
-Brigades run ``slots.py run --kind heavy -- <cmd...>``; the lock is released when the
+Crews run ``slots.py run --kind heavy -- <cmd...>``; the lock is released when the
 command ends (or when this process dies). Never touches the journal.
 """
 import argparse

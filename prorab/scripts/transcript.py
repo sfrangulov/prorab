@@ -31,14 +31,14 @@ def _assistant_entries(path):
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
-                obj = json.loads(line)
+                entry = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(obj, dict) or obj.get("type") != "assistant":
+            if not isinstance(entry, dict) or entry.get("type") != "assistant":
                 continue
-            if obj.get("isSidechain"):
+            if entry.get("isSidechain"):
                 continue
-            msg = obj.get("message")
+            msg = entry.get("message")
             if isinstance(msg, dict):
                 yield msg
 

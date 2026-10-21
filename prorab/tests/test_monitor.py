@@ -38,7 +38,7 @@ class Stub:
     """Mutable fake world injected into poll/main as `deps`."""
 
     def __init__(self):
-        self.brigades = {"b1": st()}
+        self.crews = {"b1": st()}
         self.limits = lim(10.0, 10.0)
         self.kv = {}
         self.over = []
@@ -48,7 +48,7 @@ class Stub:
 
     def deps(self):
         return {
-            "state": lambda n: self.brigades.get(n) or st("gone"),
+            "state": lambda n: self.crews.get(n) or st("gone"),
             "transcript_size": lambda s: s.get("_size"),
             "statusline_ctx": lambda n: self.statusline.get(n),
             "limits": lambda d, now: self.limits,
@@ -81,7 +81,7 @@ class PollBase(unittest.TestCase):
         time.tzset()
 
     def poll(self, now=None, names=("b1",)):
-        if getattr(self, "no_brigades", False):
+        if getattr(self, "no_crews", False):
             names = ()
         return monitor.poll(list(names), D, self.mem, self.now if now is None else now,
                             deps=self.s.deps())
@@ -90,31 +90,31 @@ class PollBase(unittest.TestCase):
 
 class TestMonitorPoll(PollBase):
     def test_settled_suppressed_by_bg_shell(self):
-        self.s.brigades["b1"] = st("idle", bg=1)
+        self.s.crews["b1"] = st("idle", bg=1)
         self.assertEqual(self.poll(), [])
-        self.s.brigades["b1"] = st("idle", bg=0)
+        self.s.crews["b1"] = st("idle", bg=0)
         self.assertEqual(self.poll(), ["settled b1 idle"])
 
     def test_blocked_always_settled(self):
-        self.s.brigades["b1"] = st("blocked", bg=2)
+        self.s.crews["b1"] = st("blocked", bg=2)
         self.assertEqual(self.poll(), ["settled b1 blocked"])
 
     def test_settled_once_per_transition(self):
-        self.s.brigades["b1"] = st("done")
+        self.s.crews["b1"] = st("done")
         self.assertEqual(self.poll(), ["settled b1 done"])
         self.assertEqual(self.poll(), [])
-        self.s.brigades["b1"] = st("working")
+        self.s.crews["b1"] = st("working")
         self.assertEqual(self.poll(), [])
-        self.s.brigades["b1"] = st("done")
+        self.s.crews["b1"] = st("done")
         self.assertEqual(self.poll(), ["settled b1 done"])
 
     def test_gone_once(self):
-        del self.s.brigades["b1"]
+        del self.s.crews["b1"]
         self.assertEqual(self.poll(), ["gone b1"])
         self.assertEqual(self.poll(), [])
-        self.s.brigades["b1"] = st()
+        self.s.crews["b1"] = st()
         self.assertEqual(self.poll(), [])
-        del self.s.brigades["b1"]
+        del self.s.crews["b1"]
         self.assertEqual(self.poll(), ["gone b1"])
 
     def test_blind_once_then_ack_silences(self):
@@ -157,28 +157,28 @@ class TestMonitorPoll(PollBase):
         self.s.limits = lim(95.0, 10.0, resets_at=before_morning)
         self.assertEqual(self.poll(now), ["limit 95 10 sensor night_before_morning"])
 
-    def test_override_silences_limit_and_smeta_but_logs(self):
+    def test_override_silences_limit_and_budget_but_logs(self):
         self.s.override = "goal-1"
         self.s.limits = lim(90.0, 60.0)
         self.s.over = ["sessions"]
         self.assertEqual(self.poll(), [])
         self.assertEqual(self.mem["last_reading"]["five_hour"], 90.0)
         self.s.override = None
-        self.assertEqual(self.poll(), ["limit 90 60 sensor day", "smeta sessions"])
+        self.assertEqual(self.poll(), ["limit 90 60 sensor day", "budget sessions"])
 
-    def test_smeta_on_change_only(self):
+    def test_budget_on_change_only(self):
         self.s.over = ["sessions"]
-        self.assertEqual(self.poll(), ["smeta sessions"])
+        self.assertEqual(self.poll(), ["budget sessions"])
         self.assertEqual(self.poll(), [])
         self.s.over = ["sessions", "runs"]
-        self.assertEqual(self.poll(), ["smeta sessions,runs"])
+        self.assertEqual(self.poll(), ["budget sessions,runs"])
         self.s.over = []
         self.assertEqual(self.poll(), [])
         self.s.over = ["runs"]
-        self.assertEqual(self.poll(), ["smeta runs"])
+        self.assertEqual(self.poll(), ["budget runs"])
 
     def test_blind_week_after_1800s_once(self):
-        self.no_brigades = True
+        self.no_crews = True
         self.s.limits = lim(10.0, None)
         self.assertEqual(self.poll(self.now), [])
         self.assertEqual(self.poll(self.now + 1800), [])
@@ -192,19 +192,19 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(self.now + 6000), [])
 
     def test_context_soft_fires_once(self):
-        self.s.brigades["b1"] = st(ctx=ctx(61.0, soft=True))
+        self.s.crews["b1"] = st(ctx=ctx(61.0, soft=True))
         self.assertEqual(self.poll(), ["context_soft b1 61.0"])
         self.assertEqual(self.poll(), [])
-        self.s.brigades["b1"] = st(ctx=ctx(81.0, soft=True, hard=True))
+        self.s.crews["b1"] = st(ctx=ctx(81.0, soft=True, hard=True))
         self.assertEqual(self.poll(), ["context_hard b1 81.0"])
         self.assertEqual(self.poll(), [])
-        self.s.brigades["b1"] = st(ctx=ctx(10.0))
+        self.s.crews["b1"] = st(ctx=ctx(10.0))
         self.assertEqual(self.poll(), [])
-        self.s.brigades["b1"] = st(ctx=ctx(62.0, soft=True))
+        self.s.crews["b1"] = st(ctx=ctx(62.0, soft=True))
         self.assertEqual(self.poll(), ["context_soft b1 62.0"])
 
     def test_context_statusline_fallback(self):
-        self.s.brigades["b1"] = st(ctx=None)
+        self.s.crews["b1"] = st(ctx=None)
         self.s.statusline["b1"] = 65.0
         self.assertEqual(self.poll(), ["context_soft b1 65.0 (statusline)"])
         self.s.statusline["b1"] = 85.0
@@ -224,21 +224,21 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(self.now + 1799), [])
         self.assertEqual(self.poll(self.now + 1800), ["hung b1"])
         self.assertEqual(self.poll(self.now + 2000), [])  # once per episode
-        self.s.brigades["b1"] = st(size=200)  # growth ends the episode
+        self.s.crews["b1"] = st(size=200)  # growth ends the episode
         self.assertEqual(self.poll(self.now + 2100), [])
         self.assertEqual(self.poll(self.now + 4000), ["hung b1"])
 
     def test_priority_order(self):
-        del self.s.brigades["b1"]
-        self.s.brigades["b2"] = st("blocked")
+        del self.s.crews["b1"]
+        self.s.crews["b2"] = st("blocked")
         self.s.limits = lim(90.0, 10.0)
         self.s.over = ["runs"]
         out = self.poll(names=("b1", "b2"))
-        self.assertEqual([e.split()[0] for e in out], ["gone", "limit", "smeta", "settled"])
+        self.assertEqual([e.split()[0] for e in out], ["gone", "limit", "budget", "settled"])
 
     def test_state_survives_json_roundtrip(self):
         self.s.limits = lim(90.0, 10.0)
-        self.s.brigades["b1"] = st("done", ctx=ctx(61.0, soft=True))
+        self.s.crews["b1"] = st("done", ctx=ctx(61.0, soft=True))
         first = self.poll()
         self.mem = json.loads(json.dumps(self.mem))
         self.assertTrue(first)
@@ -251,7 +251,7 @@ class Boom(RuntimeError):
 
 class TestMonitorFaults(PollBase):
     def test_mid_poll_exception_keeps_events(self):
-        del self.s.brigades["b1"]
+        del self.s.crews["b1"]
         self.s.limits = lim(90.0, 10.0)
         self.s.over = ["runs"]
         calls = {"n": 0}
@@ -263,16 +263,16 @@ class TestMonitorFaults(PollBase):
                 raise Boom("transient")
             return None
         deps["own_context"] = flaky
-        # an unguarded failure (the brigade list is not a guarded source) aborts the poll
+        # an unguarded failure (the crew list is not a guarded source) aborts the poll
         bad = dict(deps, state=lambda n: (_ for _ in ()).throw(KeyboardInterrupt()))
         with self.assertRaises(KeyboardInterrupt):
             monitor.poll(["b1"], D, self.mem, self.now, deps=bad)
         self.assertEqual(self.mem, {})  # nothing committed
         out = monitor.poll(["b1"], D, self.mem, self.now, deps=deps)
-        self.assertEqual([e.split()[0] for e in out], ["gone", "limit", "smeta"])
+        self.assertEqual([e.split()[0] for e in out], ["gone", "limit", "budget"])
 
     def test_failing_source_does_not_block_others(self):
-        del self.s.brigades["b1"]
+        del self.s.crews["b1"]
         self.s.limits = lim(90.0, 10.0)
         deps = self.s.deps()
 
@@ -309,7 +309,7 @@ class TestMonitorFaults(PollBase):
         self.assertEqual(self.poll(), ["blind"])
 
     def test_no_hung_without_transcript(self):
-        self.s.brigades["b1"] = st(size=None)
+        self.s.crews["b1"] = st(size=None)
         self.assertEqual(self.poll(self.now), [])
         self.assertEqual(self.poll(self.now + 5000), [])
 
@@ -332,7 +332,7 @@ class TestMonitorMain(unittest.TestCase):
     def run_main(self, *extra):
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = monitor.main(["--brigade", "b1", *extra], deps=self.s.deps())
+            rc = monitor.main(["--crew", "b1", *extra], deps=self.s.deps())
         return rc, buf.getvalue()
 
     def test_heartbeat_exit(self):
@@ -340,12 +340,12 @@ class TestMonitorMain(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "EVENT heartbeat")
 
-    def test_brigade_list_reread_every_poll(self):
+    def test_crew_list_reread_every_poll(self):
         deps = self.s.deps()
         seen = []
         lists = iter([[], ["b1"]])
-        deps["brigades"] = lambda: next(lists)
-        self.s.brigades["b1"] = st("done")
+        deps["crews"] = lambda: next(lists)
+        self.s.crews["b1"] = st("done")
         orig = deps["state"]
         deps["state"] = lambda n: (seen.append(n), orig(n))[1]
         buf = io.StringIO()
@@ -361,19 +361,19 @@ class TestMonitorMain(unittest.TestCase):
         deps["own_context"] = broken
         buf = io.StringIO()
         with redirect_stdout(buf):
-            monitor.main(["--brigade", "b1", "--interval", "0.01", "--heartbeat", "5"],
+            monitor.main(["--crew", "b1", "--interval", "0.01", "--heartbeat", "5"],
                          deps=deps)
         self.assertEqual(buf.getvalue().strip(), "EVENT error own_context")
         rows = monitor.readings()
         self.assertTrue(all("own_context" in r["errors"][0] for r in rows))
         buf = io.StringIO()
         with redirect_stdout(buf):
-            monitor.main(["--brigade", "b1", "--interval", "0.01", "--heartbeat", "0.02"],
+            monitor.main(["--crew", "b1", "--interval", "0.01", "--heartbeat", "0.02"],
                          deps=deps)
         self.assertEqual(buf.getvalue().strip(), "EVENT heartbeat last_error=own_context")
 
     def test_event_exit_and_log(self):
-        self.s.brigades["b1"] = st("done")
+        self.s.crews["b1"] = st("done")
         self.s.limits = lim(12.0, 3.0, resets_at=12345)
         rc, out = self.run_main("--interval", "0.01", "--heartbeat", "5")
         self.assertEqual(rc, 0)
@@ -387,7 +387,7 @@ class TestMonitorMain(unittest.TestCase):
         self.assertEqual(monitor.readings(since=r["ts"] + 1), [])
 
     def test_restart_does_not_repeat_persisting_condition(self):
-        self.s.brigades["b1"] = st("done")
+        self.s.crews["b1"] = st("done")
         self.s.limits = lim(85.0, 3.0)
         _, out1 = self.run_main("--interval", "0.01", "--heartbeat", "5")
         self.assertIn("EVENT limit 85 3 sensor day", out1)

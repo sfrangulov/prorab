@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scheduler: how many brigades may run at once, in what order to issue наряды, which
+"""Scheduler: how many crews may run at once, in what order to issue наряды, which
 5-hour-limit thresholds apply by day and by night.
 
 ``plan`` is what the prorab calls before issuing; ``cap`` prints the current thresholds.
@@ -22,7 +22,7 @@ import journal  # noqa: E402
 
 # ---- critical path ----------------------------------------------------------------
 
-def critical_order(graph, estimates):
+def critical_order(graph, durations):
     """Ids sorted by remaining path (own estimate + longest path of what they block)."""
     ids = set(graph)
     for blockers in graph.values():
@@ -37,21 +37,21 @@ def critical_order(graph, estimates):
         if i in memo:
             return memo[i]
         tail = [remaining(j, seen + (i,)) for j in blocks[i] if j not in seen and j != i]
-        memo[i] = estimates.get(i, 0.0) + (max(tail) if tail else 0.0)
+        memo[i] = durations.get(i, 0.0) + (max(tail) if tail else 0.0)
         return memo[i]
 
     return sorted(ids, key=lambda i: (-remaining(i), i))
 
 
-def estimate(stage, history, d):
-    """Stage estimate: its own, else the median of the kind's history, else the default."""
-    own = stage.get("estimate_min")
+def duration(stage, history, d):
+    """Stage duration: its own, else the median of the kind's history, else the default."""
+    own = stage.get("duration_min")
     if own is not None:
         return float(own)
     past = history.get(stage.get("kind")) or []
     if past:
         return float(statistics.median(past))
-    return float(d["schedule"]["default_estimate_min"])
+    return float(d["schedule"]["default_duration_min"])
 
 
 # ---- monitor log and burn rate ---------------------------------------------------------
@@ -137,9 +137,9 @@ def cap_for(now, resets_at, morning, d, night=False, week_known=True):
 
 def allowed_parallel(ready, burn_pp_per_h, used_pct, cap_pct, resets_in_s, active, load1,
                      ncpu, d):
-    """Total brigades allowed at once (the active ones included)."""
+    """Total crews allowed at once (the active ones included)."""
     ceiling = d["budget"]["parallel_ceiling"]
-    if used_pct is None:  # unknown usage is not zero: no growth, but one brigade may run
+    if used_pct is None:  # unknown usage is not zero: no growth, but one crew may run
         limit_bound = max(1, active)
     elif used_pct >= cap_pct:
         limit_bound = 0
@@ -147,8 +147,8 @@ def allowed_parallel(ready, burn_pp_per_h, used_pct, cap_pct, resets_in_s, activ
         limit_bound = ceiling
     else:
         hours = resets_in_s / 3600.0 if resets_in_s is not None else 5.0
-        per_brigade = (burn_pp_per_h / active) * hours
-        limit_bound = ceiling if per_brigade <= 0 else math.floor((cap_pct - used_pct) / per_brigade)
+        per_crew = (burn_pp_per_h / active) * hours
+        limit_bound = ceiling if per_crew <= 0 else math.floor((cap_pct - used_pct) / per_crew)
     load_bound = active if load1 > ncpu else ceiling
     return max(0, min(active + ready, limit_bound, load_bound, ceiling))
 
@@ -168,7 +168,7 @@ def machine_load():
 
 # ---- plan ----------------------------------------------------------------------------
 
-def naryad_estimates(j, d, ids):
+def work_order_durations(j, d, ids):
     """Estimate of a наряд = the sum over its open stages."""
     history = {}
     out = {}
@@ -179,7 +179,7 @@ def naryad_estimates(j, d, ids):
             kind = info.get("kind")
             if kind not in history:
                 history[kind] = j.durations(kind) if kind else []
-            total += estimate(info, history, d)
+            total += duration(info, history, d)
         out[n] = total
     return out
 
@@ -199,13 +199,13 @@ def build_plan(j, d, now, lim, log, load):
         used = fresh[-1][1] if fresh else None
     unknown = used is None
     if unknown and ov:
-        used = 0.0  # «игнорируй лимиты»: usage does not bound the brigades
+        used = 0.0  # «игнорируй лимиты»: usage does not bound the crews
     graph = j.graph()
-    ready = [n for n in j.ready_naryads()]
-    order = [n for n in critical_order(graph, naryad_estimates(j, d, list(graph)))
+    ready = [n for n in j.ready_work_orders()]
+    order = [n for n in critical_order(graph, work_order_durations(j, d, list(graph)))
              if n in ready]
     order += [n for n in ready if n not in order]
-    active = len(j.brigades())
+    active = len(j.crews())
     load1, ncpu = load
     allowed = allowed_parallel(len(order), burn_rate(burn_points(entries), d), used, cap_pct,
                                lim.get("five_hour_resets_in_s"), active, load1, ncpu, d)

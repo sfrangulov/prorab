@@ -36,8 +36,8 @@ def _write_atomic(path, text):
         raise
 
 
-def _dump(settings, obj):
-    _write_atomic(settings, json.dumps(obj, indent=2, ensure_ascii=False) + "\n")
+def _dump(settings, cfg):
+    _write_atomic(settings, json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
 
 
 def _backup_path(settings):

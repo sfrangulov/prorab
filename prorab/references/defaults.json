@@ -15,7 +15,7 @@
     },
     "seven_day": {
       "notify": 50,
-      "dopusk_only": 70
+      "clearance_only": 70
     },
     "five_hour_night": {
       "stop_before_morning": 95,
@@ -46,7 +46,7 @@
     "morning": "08:00"
   },
   "schedule": {
-    "default_estimate_min": 30,
+    "default_duration_min": 30,
     "burn_min_span_s": 600
   },
   "monitor": {

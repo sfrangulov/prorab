@@ -23,7 +23,7 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(d["context"]["unknown_window"], 200000)
 
         self.assertEqual(d["limits"]["five_hour"], {"no_new_mass": 60, "stop": 80})
-        self.assertEqual(d["limits"]["seven_day"], {"notify": 50, "dopusk_only": 70})
+        self.assertEqual(d["limits"]["seven_day"], {"notify": 50, "clearance_only": 70})
         with open(_defaults.DEFAULT_PATH, encoding="utf-8") as fh:
             raw = json.load(fh)
         self.assertNotIn("sensor_path", raw["limits"])
@@ -57,7 +57,7 @@ class TestDefaults(unittest.TestCase):
         )
         self.assertEqual(d["night"], {"morning": "08:00"})
         self.assertEqual(
-            d["schedule"], {"default_estimate_min": 30, "burn_min_span_s": 600})
+            d["schedule"], {"default_duration_min": 30, "burn_min_span_s": 600})
         self.assertEqual(
             d["monitor"],
             {"interval_s": 90, "heartbeat_s": 1200, "hung_s": 1800, "max_restarts": 2,

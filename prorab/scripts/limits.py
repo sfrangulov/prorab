@@ -90,12 +90,12 @@ def read_sensor(path, max_age_s, now=None):
         try:
             mtime = os.path.getmtime(full)
             with open(full, encoding="utf-8") as fh:
-                obj = json.load(fh)
+                data = json.load(fh)
         except (OSError, ValueError):
             continue
         if now - mtime > max_age_s:
             continue
-        rl = obj.get("rate_limits") if isinstance(obj, dict) else None
+        rl = data.get("rate_limits") if isinstance(data, dict) else None
         if not isinstance(rl, dict):
             continue
         for win in seen:

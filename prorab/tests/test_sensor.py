@@ -36,9 +36,9 @@ class SensorCase(unittest.TestCase):
         os.makedirs(os.path.join(self.home, ".claude"))
         self.settings = os.path.join(self.home, ".claude", "settings.json")
 
-    def write_settings(self, obj):
+    def write_settings(self, cfg):
         with open(self.settings, "w", encoding="utf-8") as fh:
-            json.dump(obj, fh, indent=2, ensure_ascii=False)
+            json.dump(cfg, fh, indent=2, ensure_ascii=False)
             fh.write("\n")
 
     def read_settings(self):

@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _defaults  # noqa: E402
 
-ACT_KINDS = ("приёмка", "пересменка", "смена", "ответ")
-NARYAD_LABEL = "prorab:naryad"
+ACT_KINDS = ("acceptance", "handover", "shift", "answer")
+WORK_ORDER_LABEL = "prorab:work-order"
 SPENT_KEYS = ("sessions", "runs", "tokens")
 
 
@@ -98,28 +98,28 @@ def _kv_int(key, default=0):
 
 # ---- наряды and stages ------------------------------------------------------
 
-def create_naryad(obj, title, body, smeta, goal=None):
-    labels = "%s,obj:%s" % (NARYAD_LABEL, obj)
+def create_work_order(site, title, body, estimate, goal=None):
+    labels = "%s,site:%s" % (WORK_ORDER_LABEL, site)
     if goal:
         labels += ",goal:%s" % goal
     nid = bd(["create", title, "-d", body, "-l", labels,
               "--silent"], json_out=False).strip()
     if not nid:
         raise JournalError("bd create returned no id")
-    for k, v in (smeta or {}).items():
-        kv_set("smeta.%s.%s" % (nid, k), v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+    for k, v in (estimate or {}).items():
+        kv_set("estimate.%s.%s" % (nid, k), v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
     return nid
 
 
-def create_stage(parent, title, body, blocked_by=(), files=(), estimate_min=None, kind=None):
+def create_stage(parent, title, body, blocked_by=(), files=(), duration_min=None, kind=None):
     """Create a stage under a наряд.
 
-    Storage (bd 1.3.1): files / estimate_min / started_at / actual_min live in the
+    Storage (bd 1.3.1): files / duration_min / started_at / actual_min live in the
     bead's `metadata` JSON object (bd update merges keys); kind is the label `type:<kind>`.
     """
     meta = {"files": list(files or [])}
-    if estimate_min is not None:
-        meta["estimate_min"] = float(estimate_min)
+    if duration_min is not None:
+        meta["duration_min"] = float(duration_min)
     args = ["create", title, "-d", body, "--parent", parent, "--silent",
             "--metadata", json.dumps(meta, ensure_ascii=False)]
     if kind:
@@ -147,7 +147,7 @@ def _info(item):
         if lab.startswith("type:"):
             kind = lab[len("type:"):]
     return {"files": list(meta.get("files") or []),
-            "estimate_min": meta.get("estimate_min"), "kind": kind,
+            "duration_min": meta.get("duration_min"), "kind": kind,
             "started_at": meta.get("started_at"), "actual_min": meta.get("actual_min")}
 
 
@@ -155,10 +155,10 @@ def stage_info(stage):
     return _info(_show(stage))
 
 
-def naryad_files(naryad):
+def work_order_files(work_order):
     """Union of the files of the наряд's stages, in first-seen order."""
     out = []
-    for child in bd(["list", "--parent", naryad, "--all", "--limit", "0"]):
+    for child in bd(["list", "--parent", work_order, "--all", "--limit", "0"]):
         for f in _info(child)["files"]:
             if f not in out:
                 out.append(f)
@@ -176,7 +176,7 @@ def accept_stage(stage, act):
     if started is None:
         raise JournalError("stage %s was never started" % stage)
     minutes = (time.time() - float(started)) / 60.0
-    add_act(stage, "приёмка", act)
+    add_act(stage, "acceptance", act)
     _set_meta(stage, actual_min=minutes)
     _run(["close", stage])
     return minutes
@@ -197,7 +197,7 @@ OVERRIDE_KEY = "override.ignore_limits"
 
 def set_override(goal):
     kv_set(OVERRIDE_KEY, json.dumps({"goal": goal, "since": int(time.time()),
-                                     "source": "слова заказчика"}, ensure_ascii=False))
+                                     "source": "customer's words"}, ensure_ascii=False))
 
 
 def clear_override():
@@ -209,11 +209,11 @@ def _open_gate(item):
                for d in item.get("dependencies") or [])
 
 
-def _naryad_settled(naryad_id):
+def _work_order_settled(work_order_id):
     """An open наряд is settled when it, or all of its open work, waits for the customer."""
-    if _open_gate(_show(naryad_id)):
+    if _open_gate(_show(work_order_id)):
         return True
-    stages = [c for c in bd(["list", "--parent", naryad_id, "--all", "--limit", "0"])
+    stages = [c for c in bd(["list", "--parent", work_order_id, "--all", "--limit", "0"])
               if c.get("status") != "closed"]
     if not stages:
         return False
@@ -235,11 +235,11 @@ def _naryad_settled(naryad_id):
 
 def _goal_done(goal):
     """True when the goal has наряды and each is closed or waits for the customer."""
-    naryads = bd(["list", "--label", NARYAD_LABEL, "--label", "goal:%s" % goal,
+    work_orders = bd(["list", "--label", WORK_ORDER_LABEL, "--label", "goal:%s" % goal,
                   "--no-parent", "--all", "--limit", "0"])
-    if not naryads:
+    if not work_orders:
         return False
-    return all(n.get("status") == "closed" or _naryad_settled(n["id"]) for n in naryads)
+    return all(n.get("status") == "closed" or _work_order_settled(n["id"]) for n in work_orders)
 
 
 def override():
@@ -263,21 +263,21 @@ def override():
 def ready():
     out = []
     for it in bd(["ready"]):
-        if NARYAD_LABEL in (it.get("labels") or []) or it.get("parent"):
+        if WORK_ORDER_LABEL in (it.get("labels") or []) or it.get("parent"):
             out.append(it)
     return out
 
 
 # ---- the scheduler's view: наряды as units of issue ---------------------------------
 
-def _open_naryads():
-    return [n for n in bd(["list", "--label", NARYAD_LABEL, "--no-parent", "--limit", "0"])
+def _open_work_orders():
+    return [n for n in bd(["list", "--label", WORK_ORDER_LABEL, "--no-parent", "--limit", "0"])
             if n.get("status") != "closed"]
 
 
 def graph():
     """``{open наряд: [open наряды that block it]}`` (stage-level edges are not included)."""
-    items = _open_naryads()
+    items = _open_work_orders()
     ids = {n["id"] for n in items}
     out = {}
     for n in items:
@@ -286,25 +286,25 @@ def graph():
     return out
 
 
-def open_stages(naryad):
+def open_stages(work_order):
     """Ids of the наряд's stages that are not closed."""
-    return [c["id"] for c in bd(["list", "--parent", naryad, "--all", "--limit", "0"])
+    return [c["id"] for c in bd(["list", "--parent", work_order, "--all", "--limit", "0"])
             if c.get("status") != "closed"]
 
 
-def working_naryads():
-    """Наряды a registered brigade is working on."""
+def working_work_orders():
+    """Наряды a registered crew is working on."""
     out = []
-    for name in brigades():
-        n = kv_get("brigade.%s.naryad" % name)
+    for name in crews():
+        n = kv_get("crew.%s.work_order" % name)
         if n and n not in out:
             out.append(n)
     return out
 
 
-def ready_naryads():
-    """Наряды with a ready stage (or ready themselves) and no brigade working on them."""
-    busy = set(working_naryads())
+def ready_work_orders():
+    """Наряды with a ready stage (or ready themselves) and no crew working on them."""
+    busy = set(working_work_orders())
     out = []
     for it in ready():
         n = it.get("parent") or it["id"]
@@ -318,7 +318,7 @@ def ready_naryads():
 def add_act(bead, kind, text):
     if kind not in ACT_KINDS:
         raise ValueError("unknown act kind %r (expected one of %s)" % (kind, ", ".join(ACT_KINDS)))
-    bd(["comments", "add", bead, "[акт:%s] %s" % (kind, text)])
+    bd(["comments", "add", bead, "[act:%s] %s" % (kind, text)])
 
 
 def acts(bead, kind=None):
@@ -328,12 +328,12 @@ def acts(bead, kind=None):
     out = []
     for c in comments:
         t = c.get("text", "")
-        if not t.startswith("[акт:"):
+        if not t.startswith("[act:"):
             continue
         if kind is None:
             out.append(t)
             continue
-        tag = "[акт:%s]" % kind
+        tag = "[act:%s]" % kind
         if t.startswith(tag):
             out.append(t[len(tag):].lstrip(" "))
     return out
@@ -356,11 +356,11 @@ def set_budget(**kw):
         kv_set("budget.%s" % k, v)
 
 
-def spend(naryad, sessions=0, runs=0, tokens=0):
+def spend(work_order, sessions=0, runs=0, tokens=0):
     for name, n in (("sessions", sessions), ("runs", runs), ("tokens", tokens)):
         if not n:
             continue
-        kv_set("spent.%s.%s" % (naryad, name), _kv_int("spent.%s.%s" % (naryad, name)) + n)
+        kv_set("spent.%s.%s" % (work_order, name), _kv_int("spent.%s.%s" % (work_order, name)) + n)
         kv_set("shift.spent.%s" % name, _kv_int("shift.spent.%s" % name) + n)
 
 
@@ -409,40 +409,40 @@ def acquire_active(pane_id):
     return False
 
 
-# ---- waiting for the customer, restarts, brigades ------------------------------
+# ---- waiting for the customer, restarts, crews ------------------------------
 
 def wait_customer(bead, reason):
     gate = bd(["gate", "create", "--type", "human", "--blocks", bead, "--reason", reason])
-    add_act(bead, "ответ", reason)
+    add_act(bead, "answer", reason)
     return gate["id"]
 
 
-def bump_restarts(naryad):
-    n = _kv_int("restarts.%s" % naryad) + 1
-    kv_set("restarts.%s" % naryad, n)
+def bump_restarts(work_order):
+    n = _kv_int("restarts.%s" % work_order) + 1
+    kv_set("restarts.%s" % work_order, n)
     return n
 
 
-def brigades():
-    v = kv_get("brigades.active")
+def crews():
+    v = kv_get("crews.active")
     return [x for x in v.split(",") if x] if v else []
 
 
-def _save_brigades(names):
+def _save_crews(names):
     if names:
-        kv_set("brigades.active", ",".join(names))
+        kv_set("crews.active", ",".join(names))
     else:
-        kv_clear("brigades.active")
+        kv_clear("crews.active")
 
 
-def register_brigade(name):
-    names = brigades()
+def register_crew(name):
+    names = crews()
     if name not in names:
-        _save_brigades(names + [name])
+        _save_crews(names + [name])
 
 
-def unregister_brigade(name):
-    _save_brigades([n for n in brigades() if n != name])
+def unregister_crew(name):
+    _save_crews([n for n in crews() if n != name])
 
 
 # ---- CLI --------------------------------------------------------------------
@@ -457,8 +457,8 @@ def _pairs(items):
     return out
 
 
-def _emit(obj):
-    print(json.dumps(obj, ensure_ascii=False))
+def _emit(value):
+    print(json.dumps(value, ensure_ascii=False))
     return 0
 
 
@@ -466,16 +466,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ensure")
-    p = sub.add_parser("naryad")
-    p.add_argument("obj"); p.add_argument("title")
-    p.add_argument("--body", default=""); p.add_argument("--smeta", action="append", default=[])
+    p = sub.add_parser("work-order")
+    p.add_argument("site"); p.add_argument("title")
+    p.add_argument("--body", default=""); p.add_argument("--estimate", action="append", default=[])
     p.add_argument("--goal")
     p = sub.add_parser("stage")
     p.add_argument("parent"); p.add_argument("title")
     p.add_argument("--body", default=""); p.add_argument("--blocked-by", action="append", default=[])
     p.add_argument("--file", action="append", default=[])
-    p.add_argument("--estimate", type=float); p.add_argument("--kind")
-    for name in ("stage-info", "stage-start", "naryad-files"):
+    p.add_argument("--duration", type=float); p.add_argument("--kind")
+    for name in ("stage-info", "stage-start", "work-order-files"):
         sub.add_parser(name).add_argument("bead")
     p = sub.add_parser("stage-accept")
     p.add_argument("stage"); p.add_argument("act")
@@ -486,8 +486,8 @@ def main(argv=None):
     osub.add_parser("set").add_argument("goal")
     sub.add_parser("ready")
     sub.add_parser("graph")
-    sub.add_parser("ready-naryads")
-    sub.add_parser("open-stages").add_argument("naryad")
+    sub.add_parser("ready-work-orders")
+    sub.add_parser("open-stages").add_argument("work_order")
     p = sub.add_parser("act")
     p.add_argument("bead"); p.add_argument("kind"); p.add_argument("text")
     p = sub.add_parser("acts")
@@ -495,7 +495,7 @@ def main(argv=None):
     p = sub.add_parser("budget")
     p.add_argument("--set", action="append", default=[])
     p = sub.add_parser("spend")
-    p.add_argument("naryad")
+    p.add_argument("work_order")
     for k in SPENT_KEYS:
         p.add_argument("--" + k, type=int, default=0)
     sub.add_parser("spent")
@@ -508,8 +508,8 @@ def main(argv=None):
     p = sub.add_parser("wait")
     p.add_argument("bead"); p.add_argument("reason")
     p = sub.add_parser("restarts")
-    p.add_argument("naryad")
-    p = sub.add_parser("brigades")
+    p.add_argument("work_order")
+    p = sub.add_parser("crews")
     p.add_argument("--add"); p.add_argument("--remove")
     p = sub.add_parser("kv")
     ksub = p.add_subparsers(dest="kvcmd", required=True)
@@ -521,15 +521,15 @@ def main(argv=None):
         ensure_db()
         return _emit({"ok": True})
     ensure_db()
-    if a.cmd == "naryad":
-        return _emit({"id": create_naryad(a.obj, a.title, a.body, _pairs(a.smeta), goal=a.goal)})
+    if a.cmd == "work-order":
+        return _emit({"id": create_work_order(a.site, a.title, a.body, _pairs(a.estimate), goal=a.goal)})
     if a.cmd == "stage":
         return _emit({"id": create_stage(
-            a.parent, a.title, a.body, a.blocked_by, a.file, a.estimate, a.kind)})
+            a.parent, a.title, a.body, a.blocked_by, a.file, a.duration, a.kind)})
     if a.cmd == "stage-info":
         return _emit(stage_info(a.bead))
-    if a.cmd == "naryad-files":
-        return _emit(naryad_files(a.bead))
+    if a.cmd == "work-order-files":
+        return _emit(work_order_files(a.bead))
     if a.cmd == "stage-start":
         start_stage(a.bead)
         return _emit({"ok": True})
@@ -548,10 +548,10 @@ def main(argv=None):
         return _emit(ready())
     if a.cmd == "graph":
         return _emit(graph())
-    if a.cmd == "ready-naryads":
-        return _emit(ready_naryads())
+    if a.cmd == "ready-work-orders":
+        return _emit(ready_work_orders())
     if a.cmd == "open-stages":
-        return _emit(open_stages(a.naryad))
+        return _emit(open_stages(a.work_order))
     if a.cmd == "act":
         add_act(a.bead, a.kind, a.text)
         return _emit({"ok": True})
@@ -563,7 +563,7 @@ def main(argv=None):
             set_budget(**kw)
         return _emit(budget())
     if a.cmd == "spend":
-        spend(a.naryad, a.sessions, a.runs, a.tokens)
+        spend(a.work_order, a.sessions, a.runs, a.tokens)
         return _emit(shift_spent())
     if a.cmd == "spent":
         return _emit(shift_spent())
@@ -579,13 +579,13 @@ def main(argv=None):
     if a.cmd == "wait":
         return _emit({"gate": wait_customer(a.bead, a.reason)})
     if a.cmd == "restarts":
-        return _emit({"restarts": bump_restarts(a.naryad)})
-    if a.cmd == "brigades":
+        return _emit({"restarts": bump_restarts(a.work_order)})
+    if a.cmd == "crews":
         if a.add:
-            register_brigade(a.add)
+            register_crew(a.add)
         if a.remove:
-            unregister_brigade(a.remove)
-        return _emit(brigades())
+            unregister_crew(a.remove)
+        return _emit(crews())
     if a.cmd == "kv":
         if a.kvcmd == "get":
             return _emit({"key": a.key, "value": kv_get(a.key)})

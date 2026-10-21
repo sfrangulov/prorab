@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Monitor: polls brigades, limits, budget and the prorab's own context.
+"""Monitor: polls crews, limits, budget and the prorab's own context.
 
 Runs as a background command of the prorab: prints ``EVENT <line>`` for every event of the
 first poll that has any (or ``EVENT heartbeat`` after a quiet ``heartbeat_s``) and exits 0;
@@ -102,12 +102,12 @@ def _transcript_size(st):
 
 
 def real_deps():
-    import brigade
+    import crew
     import herdr_cli
     import journal
     import limits
     return {
-        "state": brigade.state,
+        "state": crew.state,
         "transcript_size": _transcript_size,
         "statusline_ctx": lambda n: limits.statusline_context(herdr_cli.agent_visible(n)),
         "limits": scheduler.gather_limits,
@@ -115,7 +115,7 @@ def real_deps():
         "over_budget": journal.over_budget,
         "override": journal.override,
         "own_context": _own_context,
-        "brigades": journal.brigades,
+        "crews": journal.crews,
     }
 
 
@@ -143,7 +143,7 @@ def _limit_state(lim, cap, d):
     return [band, bool(week_over), bool(lim.get("reached"))]
 
 
-def poll(brigades, d, mem, now, *, deps=None):
+def poll(crews, d, mem, now, *, deps=None):
     """Event lines in priority order; `mem` carries the dedupe state between polls.
 
     The state is updated on a copy and committed only when the whole poll returns, so a
@@ -152,14 +152,14 @@ def poll(brigades, d, mem, now, *, deps=None):
     """
     dp = real_deps() if deps is None else deps
     work = copy.deepcopy(mem)
-    out = _poll(brigades, d, work, now, dp)
+    out = _poll(crews, d, work, now, dp)
     mem.clear()
     mem.update(work)
     return out
 
 
-def _poll(brigades, d, mem, now, dp):
-    ev = {k: [] for k in ("gone", "limit", "blind", "blind_week", "smeta", "prorab_context",
+def _poll(crews, d, mem, now, dp):
+    ev = {k: [] for k in ("gone", "limit", "blind", "blind_week", "budget", "prorab_context",
                           "context_hard", "context_soft", "hung", "settled", "error")}
     errors = {}
 
@@ -226,13 +226,13 @@ def _poll(brigades, d, mem, now, dp):
     else:
         mem["week_unknown_since"], mem["blind_week_fired"] = None, False
 
-    # smeta: the set of exceeded budget items changed
+    # budget: the set of exceeded budget items changed
     over = None if (override or not have_lim) else guard("over_budget", dp["over_budget"], week)
     if over is not None:
         over = list(over)
-        if over and over != mem.get("smeta"):
-            ev["smeta"].append("smeta %s" % ",".join(over))
-        mem["smeta"] = over
+        if over and over != mem.get("budget"):
+            ev["budget"].append("budget %s" % ",".join(over))
+        mem["budget"] = over
 
     # the prorab's own context
     own = guard("own_context", dp["own_context"], d)
@@ -244,7 +244,7 @@ def _poll(brigades, d, mem, now, dp):
         ctx_mem["_prorab"] = lv
 
     gone, settled, hung = (mem.setdefault(k, {}) for k in ("gone", "settled", "hung"))
-    for name in brigades:
+    for name in crews:
         st = guard("state.%s" % name, dp["state"], name)
         if st is None:
             continue
@@ -272,7 +272,7 @@ def _poll(brigades, d, mem, now, dp):
             settled.pop(name, None)
             size = guard("transcript.%s" % name, dp["transcript_size"], st)
             h = hung.get(name)
-            if size is None:  # no transcript to watch: never call a brigade hung blindly
+            if size is None:  # no transcript to watch: never call a crew hung blindly
                 hung.pop(name, None)
             elif h is None or h["size"] != size:
                 hung[name] = {"size": size, "since": now, "fired": False}
@@ -310,7 +310,7 @@ def _poll(brigades, d, mem, now, dp):
 
 def main(argv=None, *, deps=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--brigade", action="append", default=[])
+    ap.add_argument("--crew", action="append", default=[])
     ap.add_argument("--interval", type=float)
     ap.add_argument("--heartbeat", type=float)
     a = ap.parse_args(argv)
@@ -318,23 +318,23 @@ def main(argv=None, *, deps=None):
     interval = a.interval if a.interval is not None else d["monitor"]["interval_s"]
     heartbeat = a.heartbeat if a.heartbeat is not None else d["monitor"]["heartbeat_s"]
     dp = real_deps() if deps is None else deps
-    names = list(a.brigade)
+    names = list(a.crew)
     mem = load_mem()
     started = time.monotonic()
     while True:
         now = time.time()
         list_err = None
         try:
-            if not a.brigade:  # no explicit list: follow the journal on every poll
+            if not a.crew:  # no explicit list: follow the journal on every poll
                 try:
-                    names = list(dp["brigades"]())
+                    names = list(dp["crews"]())
                     list_err = None
                 except Exception as e:  # keep the previous list
-                    list_err = "brigades: %s" % e
+                    list_err = "crews: %s" % e
             events = poll(names, d, mem, now, deps=dp)
             if list_err:
                 mem["poll_errors"] = mem.get("poll_errors", []) + [list_err]
-                mem["last_error"] = "brigades"
+                mem["last_error"] = "crews"
         except Exception as e:  # herdr/bd hiccup: keep watching, the heartbeat still wakes us
             print("monitor: poll failed: %s" % e, file=sys.stderr)
             events = []

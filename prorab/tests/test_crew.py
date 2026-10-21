@@ -95,6 +95,8 @@ class FakeJournal:
         return list(self.files.get(work_order, []))
 
     def kv_get(self, key):
+        if key.startswith("restarts.") and key[len("restarts."):] in self.restarts:
+            return str(self.restarts[key[len("restarts."):]])
         return self.kv.get(key)
 
     def kv_set(self, key, value):
@@ -973,10 +975,22 @@ class TestRestart(CrewBase):
         self.assertEqual(self.j.restarts, {})
 
     def test_restart_over_limit_waits_customer(self):
-        self.j.restarts["N1"] = _defaults.load()["monitor"]["max_restarts"]
+        self.j.restarts["N1"] = _defaults.load()["monitor"]["max_restarts"]  # via kv_get
         self.assertEqual(self.go("hung"), {"status": "waits_customer"})
         self.assertEqual(len(self.j.gates), 1)
         self.assertEqual(self.calls_or_empty(), [])
+
+    def test_failed_herdr_call_leaves_counter_and_session(self):
+        self.route("pane run w:p9", err("cli_error"), exit_code=1)
+        r = self.go("hung")
+        self.assertEqual(r["status"], "restart_failed")
+        self.assertEqual(self.j.restarts, {})
+        self.assertEqual(self.j.kv["crew.a1.session"], "old-session")
+        self.route("pane run w:p9", ok({}))
+        self.route("agent start a1", err("agent_start_failed"), exit_code=1)
+        self.assertEqual(self.go("hung")["status"], "restart_failed")
+        self.assertEqual(self.j.restarts, {})
+        self.assertEqual(self.j.kv["crew.a1.session"], "old-session")
 
     def test_restart_unknown_reason(self):
         with self.assertRaises(ValueError):
@@ -1076,6 +1090,27 @@ class TestCheckReport(CrewBase):
             tail="\nResult: delivered\nCommit: %s\n" % other)), "not an ancestor of HEAD")
         self.has(self.problems(text=make_report(
             tail="\nResult: delivered\nCommit: %s\n" % ("0" * 12))), "git failed")
+
+    def test_check_report_empty_list_item_is_a_rejection(self):
+        tail = "\nResult: delivered\nCommit: %s\n" % self.sha
+        for body in ("- \n- `src/a.py`\n", "- \n", "- ``\n"):
+            p = self.problems(text=make_report(
+                sections={"Changed files": "## Changed files\n" + body}, tail=tail))
+            self.has(p, "empty list item under Changed files")
+        r = self.check(text=make_report(
+            sections={"Changed files": "## Changed files\n- \n"}, tail="\nResult: blocked\n"))
+        self.assertFalse(r["ok"])
+
+    def test_check_report_sha_must_be_in_the_branch_range(self):
+        # on the default branch only: an ancestor of HEAD, but not one of the crew's commits
+        base_sha = git(self.repo, "rev-parse", "--short=10", "main").strip()
+        p = self.problems(text=make_report(
+            tail="\nResult: delivered\nCommit: %s\n" % base_sha))
+        self.has(p, "not in main..HEAD")
+        self.has(self.problems(text=make_report(
+            tail="\nResult: delivered\nCommit: %s\n" % ("0" * 12))), "git failed")
+        # a commit the crew made but the report names by its short form still passes
+        self.assertTrue(self.check()["ok"])
 
     def test_check_report_empty_branch(self):
         wt2 = self.add_worktree(self.repo, "N2", "prorab/N2")

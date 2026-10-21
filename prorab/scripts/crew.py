@@ -519,8 +519,9 @@ def restart(name, work_order, work_order_text, reason, caller_pane=None,
     if reason not in RESTART_REASONS:
         raise ValueError("unknown restart reason %r (expected one of %s)"
                          % (reason, ", ".join(RESTART_REASONS)))
-    if reason != "limit_died":
-        n = journal.bump_restarts(work_order)
+    counted = reason != "limit_died"
+    if counted:
+        n = int(journal.kv_get("restarts.%s" % work_order) or 0) + 1
         if n > _defaults.load()["monitor"]["max_restarts"]:
             journal.wait_customer(work_order, "crew %s was restarted %d times; the customer "
                                   "decides how to go on" % (name, n))
@@ -528,6 +529,18 @@ def restart(name, work_order, work_order_text, reason, caller_pane=None,
     worktree = journal.kv_get(_kv(name, "worktree"))
     if not worktree:
         return {"status": "restart_failed", "reason": "worktree of the crew is unknown"}
+    try:
+        result = _restart(name, work_order, work_order_text, worktree, caller_pane,
+                          timeout_s, poll_s)
+    except herdr_cli.HerdrError as e:
+        return {"status": "restart_failed", "reason": str(e)}
+    # counted only once the agent was started again; a failed restart leaves the counter
+    if counted and result["status"] in ("resumed", "restarted", "prompt_not_accepted"):
+        journal.bump_restarts(work_order)
+    return result
+
+
+def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s, poll_s):
     pane = journal.kv_get(_kv(name, "pane"))
     alive = False
     if pane:
@@ -830,11 +843,14 @@ def check_report(text, criteria, files, worktree, base="main"):
         elif int(skip.group(1)) > 0:
             warnings.append("SKIP: %s in %s; the foreman judges the skipped tests and says so "
                             "in the act" % (skip.group(1), _TICKS.search(item).group(0)))
+    changed_items = _items(sections.get("Changed files", []))
+    if any(not it.strip(" `") for it in changed_items):
+        problems.append("empty list item under Changed files")
+        changed_items = [it for it in changed_items if it.strip(" `")]
     if outcome == "delivered":
         if checks == 0:
             problems.append("delivered: no check command in Verification")
-        problems += _check_delivery(sha, _items(sections.get("Changed files", [])),
-                                    files, worktree, base)
+        problems += _check_delivery(sha, changed_items, files, worktree, base)
     return {"ok": not problems, "problems": problems, "warnings": warnings,
             "outcome": outcome, "sha": sha}
 
@@ -853,18 +869,26 @@ def _check_delivery(sha, changed_items, files, worktree, base):
         problems.append("delivered: commit %s is not an ancestor of HEAD" % sha)
     elif p.returncode != 0:
         return failed(p)
-    p = _git(["log", "--oneline", "%s..HEAD" % base], worktree)
+    p = _git(["rev-list", "%s..HEAD" % base], worktree)
     if p.returncode != 0:
         return problems + failed(p)
-    if not p.stdout.strip():
+    branch_commits = p.stdout.split()
+    if not branch_commits:
         problems.append("delivered: no commit in %s..HEAD" % base)
+    else:
+        full = _git(["rev-parse", "--verify", "--quiet", "%s^{commit}" % sha], worktree)
+        if full.returncode != 0:
+            return problems + failed(full)
+        if full.stdout.strip() not in branch_commits:
+            problems.append("delivered: commit %s is not in %s..HEAD (not on the crew's branch)"
+                            % (sha, base))
     p = _git(["diff", "--name-only", "%s...HEAD" % base], worktree)
     if p.returncode != 0:
         return problems + failed(p)
     changed = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
     if not changed:
         problems.append("delivered: empty diff %s...HEAD" % base)
-    listed = [_listed_path(it) for it in changed_items]
+    listed = [_listed_path(it) for it in changed_items if it.strip()]
     if set(listed) != set(changed):
         problems.append("changed files differ from git diff: listed but not changed: %s; "
                         "changed but not listed: %s"

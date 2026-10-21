@@ -1,0 +1,7 @@
+ Allow external CLAUDE.md file imports?
+
+ This project's CLAUDE.md imports files outside the working directory:
+   /home/user/shared/notes.md
+
+ > 1. Yes, allow external imports
+   2. No, disable external imports

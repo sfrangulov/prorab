@@ -1,0 +1,6 @@
+● Ready for the next work order.
+
+╭──────────────────────────────────────────────────╮
+│ > Read the work order in /home/user/.cache/prorab/work-orders/N1.md and start │
+╰──────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

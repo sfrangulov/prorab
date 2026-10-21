@@ -1,0 +1,6 @@
+● Ready for the next work order.
+
+╭──────────────────────────────────────────────────╮
+│ > run the tests again                            │
+╰──────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

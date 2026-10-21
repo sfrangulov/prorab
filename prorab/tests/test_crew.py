@@ -298,7 +298,7 @@ class TestHandover(CrewBase):
         r = crew.complete_handover("a1", "N1", "Текст наряда", timeout_s=2, poll_s=0.01)
         self.assertEqual(r["status"], "restarted")
         calls = self.calls()
-        i_exit = calls.index("agent prompt a1 /exit --wait --timeout 15000")
+        i_exit = calls.index("agent prompt a1 /exit --wait --until working --until done --until blocked --timeout 60000")
         i_cd = calls.index("pane run w:p9 cd %s" % self.wt)
         i_start = calls.index("agent start a1 --kind claude --pane w:p9")
         i_prompt = next(i for i, c in enumerate(calls)
@@ -367,7 +367,7 @@ class TestHandover(CrewBase):
         calls = self.calls()
         self.assertEqual([c for c in calls if c.startswith(("agent prompt", "agent send-keys",
                                                             "pane send"))],
-                         ["agent prompt a1 /exit --wait --timeout 15000"])
+                         ["agent prompt a1 /exit --wait --until working --until done --until blocked --timeout 60000"])
 
     def test_prompt_not_accepted_is_not_restarted(self):
         self.restart_routes()
@@ -499,7 +499,7 @@ class TestAnswer(CrewBase):
         self.route("agent read a1 --source visible", "just a prompt\n")
         self.route("agent prompt a1", ok({}))
         crew.answer("a1", text="продолжай")
-        self.assertIn("agent prompt a1 продолжай --wait --timeout 15000", self.calls())
+        self.assertIn("agent prompt a1 продолжай --wait --until working --until done --until blocked --timeout 60000", self.calls())
 
     def test_answer_refuses_consent_prompt(self):
         for screen in ("Do you trust the files in this folder?\n1. Yes, I trust this folder\n",
@@ -524,7 +524,7 @@ class TestStop(CrewBase):
         crew.stop("a1", "N1")
         self.assertEqual(self.j.active, [])
         self.assertEqual(self.j.spent, [("N1", 0, 0, 6)])
-        self.assertIn("agent prompt a1 /exit --wait --timeout 15000", self.calls())
+        self.assertIn("agent prompt a1 /exit --wait --until working --until done --until blocked --timeout 60000", self.calls())
         self.assertNotIn("crew.a1.work_order", self.j.kv)
 
 

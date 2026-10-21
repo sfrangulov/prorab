@@ -1,0 +1,29 @@
+ Do you want to proceed?
+ 1. Yes
+ 2. No
+
+● worked on step 1
+● worked on step 2
+● worked on step 3
+● worked on step 4
+● worked on step 5
+● worked on step 6
+● worked on step 7
+● worked on step 8
+● worked on step 9
+● worked on step 10
+● worked on step 11
+● worked on step 12
+● worked on step 13
+● worked on step 14
+● worked on step 15
+● worked on step 16
+● worked on step 17
+● worked on step 18
+● worked on step 19
+● worked on step 20
+
+──────────────────────────────
+> 
+──────────────────────────────
+  ⏵⏵ bypass permissions on · 1 shell

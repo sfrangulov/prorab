@@ -12,6 +12,7 @@ if SCRIPTS_DIR not in sys.path:
 
 import herdr_cli  # noqa: E402
 
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 FAKES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fakes")
 
 DIALOG = """\
@@ -32,6 +33,11 @@ DIALOG = """\
 
 Enter to select · ↑/↓ to navigate · Esc to cancel
 """
+
+
+def fixture(*parts):
+    with open(os.path.join(FIXTURES, *parts), encoding="utf-8") as fh:
+        return fh.read()
 
 
 def err(code):
@@ -62,7 +68,8 @@ class FakeBase(unittest.TestCase):
         self.routes = {}
 
     def route(self, prefix, body, exit_code=0, name=None):
-        name = name or "r%d.txt" % len(self.routes)
+        self._n = getattr(self, "_n", 0) + 1
+        name = name or "r%d.txt" % self._n
         with open(os.path.join(self.dir, name), "w", encoding="utf-8") as fh:
             fh.write(body)
         self.routes[prefix] = {"file": name, "exit": exit_code}
@@ -170,19 +177,21 @@ class TestSend(FakeBase):
     def test_send_ok(self):
         self.route("agent prompt a1", ok({}))
         self.assertEqual(herdr_cli.send("a1", "hi"), "accepted")
-        self.assertIn("agent prompt a1 hi --wait --timeout 15000", self.calls())
+        self.assertIn("agent prompt a1 hi --wait --until working --until done "
+                      "--until blocked --timeout 60000", self.calls())
 
     def test_send_timeout_but_working_is_accepted(self):
         self.route("agent prompt a1", err("timeout"), exit_code=1)
         self.route("agent list", ok({"agents": [{"name": "a1", "agent_status": "working"}]}))
         self.assertEqual(herdr_cli.send("a1", "hi"), "accepted")
 
-    def test_send_timeout_not_working_raises(self):
+    def test_send_timeout_not_working_is_unconfirmed(self):
         self.route("agent prompt a1", err("timeout"), exit_code=1)
         self.route("agent list", ok({"agents": [{"name": "a1", "agent_status": "idle"}]}))
-        with self.assertRaises(herdr_cli.HerdrError) as cm:
-            herdr_cli.send("a1", "hi")
-        self.assertEqual(cm.exception.code, "timeout")
+        self.assertEqual(herdr_cli.send("a1", "hi"), "unconfirmed")
+        self.assertEqual([c for c in self.calls() if "prompt" in c or "send-keys" in c],
+                         [c for c in self.calls() if c.startswith("agent prompt")])
+        self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
 
     def test_send_stalled(self):
         self.route("agent prompt a1", err("agent_prompt_stalled"), exit_code=1)
@@ -197,6 +206,136 @@ class TestSend(FakeBase):
         with self.assertRaises(herdr_cli.HerdrError) as cm:
             herdr_cli.send("a1", "hi")
         self.assertEqual(cm.exception.code, "agent_not_found")
+
+
+class TestSendWait(FakeBase):
+    def test_send_waits_until_working_done_blocked(self):
+        self.route("agent prompt a1", ok({}))
+        herdr_cli.send("a1", "hi", timeout_ms=60000)
+        line = self.calls()[0]
+        for until in ("--until working", "--until done", "--until blocked", "--timeout 60000"):
+            self.assertIn(until, line)
+        self.assertNotIn("--until idle", line)
+
+    def test_send_success_with_blocked_status(self):
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "blocked"}}))
+        self.assertEqual(herdr_cli.send("a1", "hi"), "blocked")
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "done"}}))
+        self.assertEqual(herdr_cli.send("a1", "hi"), "accepted")
+
+    def test_wait_ready_until_idle_or_done(self):
+        self.route("agent wait a1", ok({"agent": {"agent_status": "done"}}))
+        self.assertEqual(herdr_cli.wait_ready("a1"), "done")
+        self.assertIn("agent wait a1 --until idle --until done --timeout 60000", self.calls())
+        self.route("agent wait a1", err("timeout"), exit_code=1)
+        self.assertEqual(herdr_cli.wait_ready("a1"), "timeout")
+
+
+class TestComposer(unittest.TestCase):
+    def test_composer_text_from_fixtures(self):
+        self.assertTrue(fixture("composer", "ours.txt") and
+                        herdr_cli.composer_text(fixture("composer", "ours.txt")).startswith(
+                            "Read the work order in"))
+        self.assertEqual(herdr_cli.composer_text(fixture("composer", "empty.txt")), "")
+        self.assertIsNone(herdr_cli.composer_text("● just output\nmore output\n"))
+
+    def test_composer_text_bare_marker(self):
+        self.assertEqual(herdr_cli.composer_text("output\n>\n"), "")
+        self.assertEqual(herdr_cli.composer_text("output\n> hi there  \n"), "hi there")
+        self.assertIsNone(herdr_cli.composer_text("> old\n" + "x\n" * 20))
+
+
+class TestRecoverStalled(FakeBase):
+    TEXT = "Read the work order in /home/user/.cache/prorab/work-orders/N1.md and start"
+
+    def setup_agent(self, status, screen):
+        self.route("agent get a1", ok({"agent": {"name": "a1", "agent_status": status}}))
+        self.route("agent read a1", fixture("composer", screen))
+        self.route("agent send-keys a1 enter", ok({}))
+        self.route("agent wait a1", ok({"agent": {"agent_status": "working"}}))
+
+    def keys(self):
+        return [c for c in self.calls() if "send-keys" in c]
+
+    def test_recover_stalled_idle_or_done_with_our_text_one_enter(self):
+        for status in ("idle", "done"):
+            self.setup_agent(status, "ours.txt")
+            open(os.path.join(self.dir, "calls.log"), "w").close()
+            self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "accepted")
+            self.assertEqual(self.keys(), ["agent send-keys a1 enter"])
+            self.assertFalse([c for c in self.calls() if c.startswith("agent prompt")])
+            self.assertIn("agent wait a1 --until working --until done --until blocked "
+                          "--timeout 60000", self.calls())
+
+    def test_recover_stalled_wait_outcomes(self):
+        self.setup_agent("idle", "ours.txt")
+        self.route("agent wait a1", err("timeout"), exit_code=1)
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
+        self.route("agent wait a1", ok({"agent": {"agent_status": "blocked"}}))
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "blocked")
+
+    def test_recover_stalled_empty_composer_presses_nothing(self):
+        self.setup_agent("done", "empty.txt")
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
+        self.assertEqual(self.keys(), [])
+
+    def test_recover_stalled_suggestion_presses_nothing(self):
+        self.setup_agent("done", "suggestion.txt")
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
+        self.assertEqual(self.keys(), [])
+
+    def test_recover_stalled_no_composer_presses_nothing(self):
+        self.setup_agent("idle", "ours.txt")
+        self.route("agent read a1", "● plain output, no input line\n")
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
+        self.assertEqual(self.keys(), [])
+
+    def test_recover_stalled_other_status_presses_nothing(self):
+        for status in ("working", "blocked"):
+            self.setup_agent(status, "ours.txt")
+            self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
+            self.assertEqual(self.keys(), [])
+
+
+class TestConsent(unittest.TestCase):
+    def test_consent_kinds_from_fixtures(self):
+        for kind in ("trust", "mcp", "claude_md_imports", "bypass_warning", "api_key",
+                     "tool_permission"):
+            self.assertEqual(herdr_cli.consent_dialog(fixture("consent", kind + ".txt")),
+                             kind, kind)
+            self.assertIn(kind, herdr_cli.CONSENT_NAMES)
+
+    def test_consent_only_in_bottom_block(self):
+        self.assertIsNone(herdr_cli.consent_dialog(fixture("consent", "marker_in_scrollback.txt")))
+        self.assertEqual(herdr_cli.consent_dialog(
+            fixture("consent", "marker_in_scrollback.txt"), tail_lines=40), "tool_permission")
+
+    def test_bypass_status_line_is_not_consent(self):
+        self.assertIsNone(herdr_cli.consent_dialog("output\nbypass permissions on · 1 shell\n"))
+
+    def test_tool_permission_is_not_a_choice_dialog(self):
+        screen = DIALOG + "\nDo you want to proceed?\n"
+        self.assertIsNotNone(herdr_cli.choice_dialog(DIALOG))
+        self.assertIsNone(herdr_cli.choice_dialog(screen))
+        self.assertIsNone(herdr_cli.choice_state(screen))
+
+
+class TestNames(FakeBase):
+    def test_valid_name(self):
+        self.assertTrue(herdr_cli.valid_name("demo-app-1"))
+        for bad in ("Demo-1", "1demo", "a" * 33, "", "-x"):
+            self.assertFalse(herdr_cli.valid_name(bad), bad)
+        self.assertTrue(herdr_cli.valid_name("a" * 32))
+
+    def test_bottom_block(self):
+        self.assertEqual(herdr_cli.bottom_block("a\n\nb\n  \nc\n", 2), "b\nc")
+
+    def test_agent_by_pane(self):
+        lst = [{"name": "a1", "pane_id": "w:p1"}, {"pane_id": "w:p2"}]
+        self.assertEqual(herdr_cli.agent_by_pane("w:p2", lst), {"pane_id": "w:p2"})
+        self.assertIsNone(herdr_cli.agent_by_pane("w:p3", lst))
+        self.route("agent list", ok({"agents": lst}))
+        self.assertEqual(herdr_cli.agent_by_pane("w:p1")["name"], "a1")
 
 
 if __name__ == "__main__":

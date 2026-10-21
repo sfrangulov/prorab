@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Thin wrapper over the herdr CLI (>= 0.9.5): JSON calls, env check, reliable send."""
+"""Thin wrapper over the herdr CLI (>= 0.9.5): JSON calls, env check, reliable send,
+screen markers (consent prompts, choice dialogs, composer line)."""
 import json
 import os
 import re
@@ -8,7 +9,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import _defaults  # noqa: E402
+
 MIN_VERSION = (0, 9, 5)
+NAME_RULE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 class HerdrError(Exception):
@@ -82,6 +86,20 @@ def agent(name):
     return None
 
 
+def agent_by_pane(pane_id, agents_list=None):
+    """The agent living in `pane_id`. Pane numbers are reused and names can be reset,
+    so after a handover a crew is found by its pane; its name is only compared."""
+    for a in (agents() if agents_list is None else agents_list):
+        if a.get("pane_id") == pane_id:
+            return a
+    return None
+
+
+def valid_name(name):
+    """herdr's agent name rule."""
+    return isinstance(name, str) and NAME_RULE.match(name) is not None
+
+
 def pane_visible(pane_id):
     return _text(["pane", "read", pane_id, "--source", "visible"])
 
@@ -92,6 +110,65 @@ def agent_visible(name):
 
 def send_keys(name, keys):
     run(["agent", "send-keys", name] + list(keys))
+
+
+def bottom_block(visible, n):
+    """The last `n` non-empty lines of a screen. Screen markers are searched only
+    there: old output above may contain the same words."""
+    lines = [ln for ln in visible.splitlines() if ln.strip()]
+    return "\n".join(lines[-n:] if n > 0 else [])
+
+
+# Consent prompts the foreman never answers: (kind, case-insensitive markers); first match
+# wins. Markers stay broad: a false positive only stops the crew, a miss could let a
+# consent prompt be answered as a question.
+CONSENT_KINDS = (
+    ("api_key", ("use this api key",)),
+    ("trust", ("trust this folder", "quick safety check", "do you trust the files")),
+    ("bypass_warning", ("bypass permissions mode",)),
+    ("claude_md_imports", ("claude.md file imports", "external claude.md")),
+    ("mcp", ("mcp server",)),
+    ("tool_permission", ("esc to cancel · tab to amend", "do you want to proceed",
+                         "do you want to make this edit", "do you want to create",
+                         "do you want to allow", "don't ask again")),
+)
+CONSENT_NAMES = {
+    "trust": "folder trust",
+    "mcp": "the project's MCP servers",
+    "claude_md_imports": "external CLAUDE.md imports",
+    "bypass_warning": "bypass-mode warning",
+    "api_key": "custom API key",
+    "tool_permission": "tool permission",
+}
+
+
+def _tail_lines(tail_lines):
+    if tail_lines is not None:
+        return tail_lines
+    return _defaults.load()["screen"]["tail_lines"]
+
+
+def consent_dialog(visible, tail_lines=None):
+    """The kind of consent prompt in the bottom block of the screen, else None."""
+    low = bottom_block(visible, _tail_lines(tail_lines)).lower()
+    for kind, markers in CONSENT_KINDS:
+        if any(m in low for m in markers):
+            return kind
+    return None
+
+
+_COMPOSER = re.compile(r"^[\s│┃║╭╰╮╯─━]*>(?: (.*))?$")
+_BOX_TRAIL = " \t│┃║╮╯─━"
+
+
+def composer_text(visible, tail_lines=None):
+    """Text of Claude Code's input line in the bottom block (the last line that starts
+    with the prompt marker `>`), "" for an empty composer, None when none is visible."""
+    for ln in reversed(bottom_block(visible, _tail_lines(tail_lines)).splitlines()):
+        m = _COMPOSER.match(ln.rstrip())
+        if m:
+            return (m.group(1) or "").rstrip(_BOX_TRAIL)
+    return None
 
 
 _OPTION = re.compile(r"^\s*(?:❯\s*)?(\d+)\.\s+(.*)$")
@@ -107,6 +184,8 @@ def choice_state(visible):
     before the last option), up to the footer hint. Numbered lines printed above
     the dialog do not become options.
     """
+    if consent_dialog(visible) is not None:
+        return None
     if "Enter to select" not in visible or "↑/↓ to navigate" not in visible:
         return None
     lines = visible.splitlines()
@@ -139,11 +218,39 @@ def bg_shells(visible):
     return max(found)
 
 
-def send(name, text, timeout_ms=15000):
+def _send_timeout_ms(timeout_ms):
+    return timeout_ms or _defaults.load()["send"]["timeout_ms"]
+
+
+def _status_in(data):
+    """agent_status found in a herdr JSON answer (result.agent, result, or result.status)."""
+    res = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(res, dict):
+        return None
+    for node in (res.get("agent"), res):
+        if isinstance(node, dict):
+            st = node.get("agent_status") or node.get("status")
+            if isinstance(st, str):
+                return st
+    return None
+
+
+def _wait_args(timeout_ms):
+    return ["--until", "working", "--until", "done", "--until", "blocked",
+            "--timeout", str(timeout_ms)]
+
+
+def send(name, text, timeout_ms=None):
+    """Send one line to a crew. "accepted" | "blocked" | "stalled" | "unconfirmed".
+
+    The text is sent once and never re-sent; nothing is pressed afterwards. There is no
+    `--until idle`: the agent is idle before the prompt, so a swallowed Enter would read
+    as delivery.
+    """
+    ms = _send_timeout_ms(timeout_ms)
     try:
-        run(["agent", "prompt", name, text, "--wait", "--timeout", str(timeout_ms)],
-            timeout_s=timeout_ms // 1000 + 30)
-        return "accepted"
+        data = run(["agent", "prompt", name, text, "--wait"] + _wait_args(ms),
+                   timeout_s=ms // 1000 + 30)
     except HerdrError as e:
         if e.code == "agent_prompt_stalled":
             return "stalled"
@@ -151,6 +258,45 @@ def send(name, text, timeout_ms=15000):
             return "blocked"
         if e.code == "timeout":
             a = agent(name)
-            if a and a.get("agent_status") == "working":
-                return "accepted"
+            return "accepted" if a and a.get("agent_status") == "working" else "unconfirmed"
         raise
+    return "blocked" if _status_in(data) == "blocked" else "accepted"
+
+
+def recover_stalled(name, text, timeout_ms=None):
+    """After "stalled": press Enter exactly once, and only when the agent is idle or done
+    and the visible composer line holds the start of our text. Never on an empty composer
+    (a grey prompt suggestion there could be submitted), never over a dialog.
+    Returns "accepted" | "blocked" | "stalled"."""
+    ms = _send_timeout_ms(timeout_ms)
+    st = _status_in(run(["agent", "get", name]))
+    if st not in ("idle", "done"):
+        return "stalled"
+    shown = composer_text(agent_visible(name))
+    n = min(_defaults.load()["send"]["composer_match_chars"], len(text))
+    if not shown or n == 0 or shown[:n] != text[:n]:
+        return "stalled"
+    send_keys(name, ["enter"])
+    try:
+        data = run(["agent", "wait", name] + _wait_args(ms),
+                   timeout_s=ms // 1000 + 30)
+    except HerdrError as e:
+        if e.code in ("timeout", "agent_prompt_stalled"):
+            return "stalled"
+        if e.code == "agent_blocked":
+            return "blocked"
+        raise
+    return "blocked" if _status_in(data) == "blocked" else "accepted"
+
+
+def wait_ready(name, timeout_ms=None):
+    """Wait for the first prompt: the reached status ("idle" or "done"), or "timeout"."""
+    ms = _send_timeout_ms(timeout_ms)
+    try:
+        data = run(["agent", "wait", name, "--until", "idle", "--until", "done",
+                    "--timeout", str(ms)], timeout_s=ms // 1000 + 30)
+    except HerdrError as e:
+        if e.code == "timeout":
+            return "timeout"
+        raise
+    return _status_in(data) or _status_in(run(["agent", "get", name])) or "timeout"

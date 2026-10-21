@@ -1,0 +1,6 @@
+● Ready for the next work order.
+
+╭──────────────────────────────────────────────────╮
+│ >                                                │
+╰──────────────────────────────────────────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

@@ -24,32 +24,20 @@ REFERENCES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
                           "references")
 HANDOVER_MARKER = "HANDOVER READY"
 
-# Screen fragments of consent prompts: the prorab never answers them.
-CONSENT_MARKERS = (
-    "trust this folder",
-    "Do you trust the files",
-    "MCP server",
-    "Do you want to proceed",
-    "Do you want to make this edit",
-    "Do you want to create",
-    "Do you want to allow",
-    "don't ask again",
-)
-TRUST_MARKER = CONSENT_MARKERS[0]
 # The only drop decision: an act `ответ` starting with this line (see acts.md).
 DROP_MARKER = "[customer decision] drop"
 
 
 def is_consent(visible):
-    low = visible.lower()
-    return any(m.lower() in low for m in CONSENT_MARKERS)
+    return herdr_cli.consent_dialog(visible) is not None
 
 
 def _consent_status(visible):
     """needs_trust / needs_consent for a consent screen, else None. Never sends keys."""
-    if TRUST_MARKER.lower() in visible.lower():
-        return "needs_trust"
-    return "needs_consent" if is_consent(visible) else None
+    kind = herdr_cli.consent_dialog(visible)
+    if kind is None:
+        return None
+    return "needs_trust" if kind == "trust" else "needs_consent"
 
 
 def _kv(name, field):

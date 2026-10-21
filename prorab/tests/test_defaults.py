@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 
 SCRIPTS_DIR = os.path.join(
@@ -25,11 +26,14 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(d["limits"]["seven_day"], {"notify": 50, "dopusk_only": 70})
         with open(_defaults.DEFAULT_PATH, encoding="utf-8") as fh:
             raw = json.load(fh)
-        self.assertEqual(raw["limits"]["sensor_path"], "~/.cache/prorab/usage.json")
+        self.assertNotIn("sensor_path", raw["limits"])
+        self.assertEqual(raw["limits"]["sensor_dir"], "~/.cache/prorab/usage")
         self.assertEqual(
-            d["limits"]["sensor_path"],
-            os.path.expanduser("~/.cache/prorab/usage.json"),
+            d["limits"]["sensor_dir"],
+            os.path.expanduser("~/.cache/prorab/usage"),
         )
+        self.assertEqual(d["limits"]["sensor_retention_s"], 86400)
+        self.assertEqual(d["limits"]["week_unknown_blind_s"], 1800)
         self.assertEqual(d["limits"]["sensor_max_age_s"], 300)
         self.assertEqual(
             d["limits"]["message_patterns"],
@@ -61,8 +65,15 @@ class TestDefaults(unittest.TestCase):
         self.assertIsNone(d["polish_cmd"])
 
     def test_tilde_expanded(self):
-        path = _defaults.load()["limits"]["sensor_path"]
+        path = _defaults.load()["limits"]["sensor_dir"]
         self.assertTrue(path.startswith("/"), path)
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = os.path.join(tmp, "d.json")
+            with open(cfg, "w") as fh:
+                json.dump({"a_path": "~/x", "b_dir": "~/y", "c": "~/z"}, fh)
+            d = _defaults.load(cfg)
+        self.assertTrue(d["a_path"].startswith("/") and d["b_dir"].startswith("/"))
+        self.assertEqual(d["c"], "~/z")
 
 
 if __name__ == "__main__":

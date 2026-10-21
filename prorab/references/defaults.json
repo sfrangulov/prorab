@@ -24,8 +24,10 @@
         "stop": 80
       }
     },
-    "sensor_path": "~/.cache/prorab/usage.json",
+    "sensor_dir": "~/.cache/prorab/usage",
     "sensor_max_age_s": 300,
+    "sensor_retention_s": 86400,
+    "week_unknown_blind_s": 1800,
     "message_patterns": [
       "usage limit reached",
       "limit will reset",

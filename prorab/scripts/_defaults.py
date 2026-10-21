@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Loader for prorab/references/defaults.json.
 
-Keys whose names end in ``_path`` hold filesystem paths; they are returned
+Keys whose names end in ``_path`` or ``_dir`` hold filesystem paths; they are returned
 with ``~`` expanded to the user's home directory.
 """
 
@@ -19,7 +19,7 @@ def _expand(node):
     if isinstance(node, dict):
         out = {}
         for key, value in node.items():
-            if key.endswith("_path") and isinstance(value, str):
+            if key.endswith(("_path", "_dir")) and isinstance(value, str):
                 out[key] = os.path.expanduser(value)
             else:
                 out[key] = _expand(value)

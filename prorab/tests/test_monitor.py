@@ -15,6 +15,8 @@ if SCRIPTS_DIR not in sys.path:
 
 import _defaults  # noqa: E402
 import monitor  # noqa: E402
+import transcript  # noqa: E402
+from prorab.tests.test_herdr_cli import FakeBase, ok  # noqa: E402
 
 D = _defaults.load()
 
@@ -29,9 +31,11 @@ def lim(five=None, week=None, source="sensor", reached=False, resets_at=None):
             "seven_day_resets_at": None}
 
 
-def st(status="working", bg=0, ctx=None, size=100):
-    return {"status": status, "bg_shells": bg, "ctx": ctx, "session_id": "s", "cwd": "/w",
-            "pane_id": "p", "_size": size}
+def st(status="working", bg=0, ctx=None, size=100, pane="p", cwd="/w", consent=None,
+       limit_screen=None, provider_error=None):
+    return {"status": status, "bg_shells": bg, "ctx": ctx, "session_id": "s", "cwd": cwd,
+            "pane_id": pane, "_size": size, "consent": consent, "limit_screen": limit_screen,
+            "provider_error": provider_error}
 
 
 class Stub:
@@ -45,17 +49,45 @@ class Stub:
         self.override = None
         self.own = None
         self.statusline = {}
+        self.screens = {}   # pane id -> screen text
+        self.holders = []
+        self.age = {}       # worktree -> newest file age; missing = very old
+        self.calls = {"agents": 0, "kv_all": 0, "visible": [], "limit_panes": None}
+
+    def _agents(self):
+        self.calls["agents"] += 1
+        return [{"name": n, "pane_id": c["pane_id"], "agent_status": c["status"],
+                 "cwd": c["cwd"]} for n, c in self.crews.items() if c["status"] != "gone"]
+
+    def _kv_all(self):
+        self.calls["kv_all"] += 1
+        return dict(self.kv)
+
+    def _visible(self, pane):
+        self.calls["visible"].append(pane)
+        return self.screens.get(pane, "")
+
+    def _limits(self, d, now, pane_texts=None):
+        self.calls["limit_panes"] = pane_texts
+        return self.limits
 
     def deps(self):
         return {
-            "state": lambda n: self.crews.get(n) or st("gone"),
+            "state": lambda n, a, read_screen=True, kv=None: (
+                self.crews[n] if a is not None else st("gone")),
+            "agents": self._agents,
+            "kv_all": self._kv_all,
+            "visible": self._visible,
+            "slot_holders": lambda: list(self.holders),
+            "newest_age": lambda wt, now, max_files: self.age.get(wt, 10 ** 6),
             "transcript_size": lambda s: s.get("_size"),
-            "statusline_ctx": lambda n: self.statusline.get(n),
-            "limits": lambda d, now: self.limits,
+            "statusline_ctx": lambda text: self.statusline.get(text),
+            "limits": self._limits,
             "kv_get": lambda k: self.kv.get(k),
-            "over_budget": lambda wk: list(self.over),
-            "override": lambda: self.override,
-            "own_context": lambda d: self.own,
+            "over_budget": lambda wk, kv=None: list(self.over),
+            "override": lambda kv=None: self.override,
+            "own_context": lambda d, listed=None: self.own,
+            "crews": lambda kv=None: [],
         }
 
 
@@ -205,9 +237,10 @@ class TestMonitorPoll(PollBase):
 
     def test_context_statusline_fallback(self):
         self.s.crews["b1"] = st(ctx=None)
-        self.s.statusline["b1"] = 65.0
+        self.s.screens["p"] = "SL"
+        self.s.statusline["SL"] = 65.0
         self.assertEqual(self.poll(), ["context_soft b1 65.0 (statusline)"])
-        self.s.statusline["b1"] = 85.0
+        self.s.statusline["SL"] = 85.0
         self.assertEqual(self.poll(), ["context_hard b1 85.0 (statusline)"])
 
     def test_prorab_context_once(self):
@@ -245,6 +278,176 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(), [])
 
 
+class TestMonitorG(PollBase):
+    def test_one_agents_and_one_kv_call_per_poll(self):
+        for n, pane in (("b1", "p1"), ("b2", "p2"), ("b3", "p3")):
+            self.s.crews[n] = st("working", pane=pane, ctx=ctx(10.0))
+        self.poll(names=("b1", "b2", "b3"))
+        self.poll(names=("b1", "b2", "b3"))
+        self.assertEqual((self.s.calls["agents"], self.s.calls["kv_all"]), (2, 2))
+
+    def test_screen_read_only_on_change(self):
+        self.s.crews["b1"] = st("working", ctx=ctx(10.0))
+        self.poll()
+        self.assertEqual(self.s.calls["visible"], ["p"])  # first sight: the status is new
+        self.poll()
+        self.assertEqual(self.s.calls["visible"], ["p"])  # unchanged, context from transcript
+        self.s.crews["b1"] = st("idle", bg=2, ctx=ctx(10.0))
+        self.poll()
+        self.assertEqual(len(self.s.calls["visible"]), 2)  # changed
+        self.poll()
+        self.assertEqual(len(self.s.calls["visible"]), 3)  # idle with background shells: again
+        self.s.crews["b1"] = st("idle", bg=0, ctx=ctx(10.0))
+        self.poll()
+        self.assertEqual(len(self.s.calls["visible"]), 4)  # re-read; shells gone
+        self.assertEqual(self.poll(), [])
+        self.assertEqual(len(self.s.calls["visible"]), 4)  # settled and unchanged: no read
+
+    def test_screen_read_when_context_only_from_statusline(self):
+        self.s.crews["b1"] = st("working", ctx=None)
+        self.s.screens["p"] = "SL"
+        self.s.statusline["SL"] = 10.0
+        self.poll()
+        self.poll()
+        self.assertEqual(self.s.calls["visible"], ["p", "p"])
+
+    def test_settled_uses_remembered_shells_without_reading(self):
+        self.s.crews["b1"] = st("idle", bg=0, ctx=ctx(10.0))
+        self.assertEqual(self.poll(), ["settled b1 idle"])
+        self.assertEqual(self.poll(), [])
+        self.assertEqual(len(self.s.calls["visible"]), 1)
+
+    def test_hung_needs_both_signs(self):
+        self.s.age["/w"] = 10  # a file changed ten seconds ago
+        self.poll(self.now)
+        self.assertEqual(self.poll(self.now + 1800), [])
+        self.assertEqual(self.poll(self.now + 2400), [])
+        self.s.age["/w"] = 5000
+        self.assertEqual(self.poll(self.now + 2500), ["hung b1"])
+
+    def test_worktree_not_scanned_before_first_sign(self):
+        calls = []
+        deps = self.s.deps()
+        deps["newest_age"] = lambda wt, now, mx: calls.append(wt) or 10 ** 6
+        monitor.poll(["b1"], D, self.mem, self.now, deps=deps)
+        monitor.poll(["b1"], D, self.mem, self.now + 100, deps=deps)
+        self.assertEqual(calls, [])
+        monitor.poll(["b1"], D, self.mem, self.now + 1800, deps=deps)
+        self.assertEqual(calls, ["/w"])
+
+    def test_slot_holder_never_hung(self):
+        self.s.holders = [{"cwd": "/w/build", "pid": 1}]
+        self.poll(self.now)
+        self.assertEqual(self.poll(self.now + 5000), [])
+        self.s.holders = [{"cwd": "/elsewhere", "pid": 1}]
+        self.assertEqual(self.poll(self.now + 5100), ["hung b1"])
+
+    def test_hung_unclear_once_never_hung(self):
+        with tempfile.TemporaryDirectory() as wt:
+            self.s.crews["b1"] = st(cwd=wt)
+            self.s.age[wt] = None  # unreadable or too many files
+            self.poll(self.now)
+            self.assertEqual(self.poll(self.now + 1800), ["hung_unclear b1 scan_capped"])
+            self.assertEqual(self.poll(self.now + 2400), [])
+        self.s.crews["b1"] = st(size=None)
+        self.mem.clear()
+        self.poll(self.now)
+        self.assertEqual(self.poll(self.now + 1800), ["hung_unclear b1 no_transcript"])
+        self.s.crews["b1"] = st(cwd=None)
+        self.mem.clear()
+        self.poll(self.now)
+        self.assertEqual(self.poll(self.now + 1800), ["hung_unclear b1 no_worktree"])
+
+    def test_consent_event_names_kind_once(self):
+        self.s.crews["b1"] = st("blocked", consent="api_key")
+        self.assertEqual(self.poll(), ["consent b1 api_key"])
+        self.assertEqual(self.poll(), [])
+        self.mem = json.loads(json.dumps(self.mem))  # a monitor restart on the same screen
+        self.assertEqual(self.poll(), [])
+        self.s.crews["b1"] = st("working")
+        self.poll()
+        self.s.crews["b1"] = st("blocked", consent="trust")
+        self.assertEqual(self.poll(), ["consent b1 trust"])
+
+    def test_limit_screen_event_not_hung_not_gone(self):
+        self.s.crews["b1"] = st("idle", bg=0, limit_screen={"kind": "limit", "resets_at": 1761060000.0})
+        self.assertEqual(self.poll(self.now), ["limit_screen b1 1761060000"])
+        self.assertEqual(self.poll(self.now + 100), [])
+        self.s.crews["b1"] = st("working", limit_screen=None)
+        self.poll(self.now + 200)  # the screen is read again on the change: episode over
+        self.s.crews["b1"] = st("idle", bg=0, limit_screen={"kind": "limit", "resets_at": None})
+        self.assertEqual(self.poll(self.now + 300), ["limit_screen b1 -"])
+        # a crew on a limit screen is never hung, even working with a still transcript
+        self.s.crews["b1"] = st("working", limit_screen={"kind": "limit", "resets_at": None})
+        self.poll(self.now + 400)
+        self.assertNotIn("hung b1", self.poll(self.now + 9000))
+
+    def test_provider_error_event_once(self):
+        self.s.crews["b1"] = st("idle", bg=0, provider_error="invalid api key")
+        out = self.poll()
+        self.assertIn("provider_error b1 invalid api key", out)
+        self.assertEqual(self.poll(), [])
+        self.s.crews["b1"] = st("working")
+        self.poll()
+        self.s.crews["b1"] = st("idle", bg=0, provider_error="invalid api key")
+        self.assertIn("provider_error b1 invalid api key", self.poll())
+
+    def test_priority_order_new_events(self):
+        self.s.crews["b1"] = st("blocked", consent="mcp")
+        self.s.crews["b2"] = st("idle", pane="p2", limit_screen={"kind": "limit", "resets_at": None})
+        self.s.crews["b3"] = st("idle", pane="p3", provider_error="x")
+        self.s.crews["b4"] = st("idle", pane="p4", bg=0)
+        self.s.limits = lim(90.0, 10.0)
+        out = self.poll(names=("b1", "b2", "b3", "b4"))
+        self.assertEqual([e.split()[0] for e in out],
+                         ["consent", "provider_error", "limit_screen", "limit", "settled", "settled"])
+
+    def test_limit_pass_lazy_and_reuses_screens(self):
+        for n, pane, status in (("b1", "p1", "working"), ("b2", "p2", "idle"),
+                                ("b3", "p3", "working"), ("b4", "p4", "working")):
+            self.s.crews[n] = st(status, pane=pane, bg=0, ctx=ctx(10.0))
+        self.s.screens.update({"p1": "one", "p2": "two", "p3": "three", "p4": "four"})
+        self.poll(names=("b2", "b1"))  # reads p2, p1
+        self.assertEqual(self.s.calls["visible"], ["p2", "p1"])
+        self.assertTrue(callable(self.s.calls["limit_panes"]))
+        reads = len(self.s.calls["visible"])
+        texts = self.s.calls["limit_panes"]()
+        # one working screen read so far (limit_panes is 2): one more working crew is read
+        self.assertEqual(texts, ["two", "one"])  # b3/b4 not in this poll's crew list
+        self.assertEqual(len(self.s.calls["visible"]), reads)
+        self.s.calls["visible"].clear()
+        self.poll(names=("b2", "b1", "b3", "b4"))  # b3, b4 are new: read
+        texts = self.s.calls["limit_panes"]()
+        self.assertEqual(texts, ["three", "four"])  # both new screens are working crews
+
+    def test_limit_pass_reads_further_working_screens_up_to_limit_panes(self):
+        for n, pane in (("b1", "p1"), ("b2", "p2"), ("b3", "p3"), ("b4", "p4")):
+            self.s.crews[n] = st("working", pane=pane, ctx=ctx(10.0))
+            self.s.screens[pane] = "text-" + pane
+        names = ("b1", "b2", "b3", "b4")
+        self.poll(names=names)  # first sight: all four read
+        self.s.calls["visible"].clear()
+        self.poll(names=names)  # unchanged: nothing read, then the limit pass wants some
+        texts = self.s.calls["limit_panes"]()
+        self.assertEqual(texts, ["text-p1", "text-p2"])  # limit_panes = 2 working crews
+        self.assertEqual(self.s.calls["visible"], ["p1", "p2"])
+
+    def test_unknown_window_stays_none(self):
+        import scheduler
+        d = json.loads(json.dumps(D))
+        with tempfile.TemporaryDirectory() as tmp:
+            d["limits"]["sensor_dir"] = os.path.join(tmp, "usage")
+            self.s.crews["b1"] = st("working", ctx=ctx(10.0))
+            self.s.screens["p"] = "just a screen, no status line"
+            deps = self.s.deps()
+            deps["limits"] = lambda dd, now, pane_texts=None: scheduler.gather_limits(
+                dd, now, pane_texts=pane_texts)
+            monitor.poll(["b1"], d, self.mem, self.now, deps=deps)
+        self.assertEqual(self.mem["last_reading"]["seven_day"], None)
+        self.assertEqual(self.mem["last_reading"]["five_hour"], None)
+        self.assertEqual(json.loads(json.dumps(self.mem["last_reading"]))["seven_day"], None)
+
+
 class Boom(RuntimeError):
     pass
 
@@ -257,14 +460,14 @@ class TestMonitorFaults(PollBase):
         calls = {"n": 0}
         deps = self.s.deps()
 
-        def flaky(d):
+        def flaky(d, listed=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise Boom("transient")
             return None
         deps["own_context"] = flaky
         # an unguarded failure (the crew list is not a guarded source) aborts the poll
-        bad = dict(deps, state=lambda n: (_ for _ in ()).throw(KeyboardInterrupt()))
+        bad = dict(deps, state=lambda n, a, **kw: (_ for _ in ()).throw(KeyboardInterrupt()))
         with self.assertRaises(KeyboardInterrupt):
             monitor.poll(["b1"], D, self.mem, self.now, deps=bad)
         self.assertEqual(self.mem, {})  # nothing committed
@@ -276,7 +479,7 @@ class TestMonitorFaults(PollBase):
         self.s.limits = lim(90.0, 10.0)
         deps = self.s.deps()
 
-        def broken(d):
+        def broken(d, listed=None):
             raise Boom("pane read")
         deps["own_context"] = broken
         out = monitor.poll(["b1"], D, self.mem, self.now, deps=deps)
@@ -286,14 +489,14 @@ class TestMonitorFaults(PollBase):
     def test_error_event_after_n_polls_once_per_streak(self):
         deps = self.s.deps()
 
-        def broken(d):
+        def broken(d, listed=None):
             raise Boom("x")
         deps["own_context"] = broken
         run = lambda: monitor.poll(["b1"], D, self.mem, self.now, deps=deps)  # noqa: E731
         self.assertEqual([run(), run()], [[], []])
         self.assertEqual(run(), ["error own_context"])
         self.assertEqual(run(), [])
-        deps["own_context"] = lambda d: None
+        deps["own_context"] = lambda d, listed=None: None
         self.assertEqual(run(), [])
         deps["own_context"] = broken
         run(), run()
@@ -304,14 +507,101 @@ class TestMonitorFaults(PollBase):
         deps = self.s.deps()
         with self.assertRaises(KeyboardInterrupt):
             monitor.poll(["b1"], D, self.mem, self.now,
-                         deps=dict(deps, state=lambda n: (_ for _ in ()).throw(KeyboardInterrupt())))
+                         deps=dict(deps, state=lambda n, a, **kw: (_ for _ in ()).throw(KeyboardInterrupt())))
         self.assertEqual(self.poll(), [])
         self.assertEqual(self.poll(), ["blind"])
 
     def test_no_hung_without_transcript(self):
         self.s.crews["b1"] = st(size=None)
         self.assertEqual(self.poll(self.now), [])
-        self.assertEqual(self.poll(self.now + 5000), [])
+        out = self.poll(self.now + 5000)
+        self.assertNotIn("hung b1", out)
+        self.assertNotIn("hung b1", self.poll(self.now + 9000))
+
+
+class TestProcessBudget(FakeBase):
+    """Real dependencies against the fake herdr and a fake bd that log every call."""
+
+    def setUp(self):
+        super().setUp()
+        saved = {k: os.environ.get(k) for k in ("HOME", "PRORAB_BEADS_DIR", "PRORAB_LOG_DIR",
+                                                 "PRORAB_CACHE", "HERDR_PANE_ID", "BD_LOG")}
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.addCleanup(restore)
+        base = self.dir
+        self.home = os.path.join(base, "home")
+        os.makedirs(self.home)
+        os.makedirs(os.path.join(base, "beads"))
+        bindir = os.path.join(base, "bin")
+        os.makedirs(bindir)
+        self.bd_log = os.path.join(base, "bd.log")
+        bd = os.path.join(bindir, "bd")
+        with open(bd, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho \"$*\" >> \"$BD_LOG\"\necho '{}'\n")
+        os.chmod(bd, 0o755)
+        os.environ.update(HOME=self.home, PRORAB_BEADS_DIR=os.path.join(base, "beads", ".beads"),
+                          PRORAB_LOG_DIR=os.path.join(base, "logs"),
+                          PRORAB_CACHE=os.path.join(base, "cache"), BD_LOG=self.bd_log,
+                          PATH=bindir + os.pathsep + os.environ["PATH"])
+        os.environ.pop("HERDR_PANE_ID", None)
+        self.d = json.loads(json.dumps(D))
+        self.sensor = os.path.join(base, "usage")
+        self.d["limits"]["sensor_dir"] = self.sensor
+        os.makedirs(self.sensor)
+        self.names = ("b1", "b2", "b3")
+        for i, n in enumerate(self.names, 1):
+            cwd = "/home/user/projects/demo-app-%d" % i
+            path = transcript.transcript_path(cwd, "sess-%d" % i, self.home)
+            os.makedirs(os.path.dirname(path))
+            with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "tests", "fixtures", "session_main.jsonl"),
+                      encoding="utf-8") as src, open(path, "w", encoding="utf-8") as out:
+                out.write(src.read())
+            self.route("pane read w:p%d --source visible" % i, "screen %d\nno status line\n" % i)
+        self.mem = {}
+
+    def _agents(self, status):
+        self.route("agent list", ok({"agents": [
+            {"name": n, "pane_id": "w:p%d" % i, "agent_status": status,
+             "cwd": "/home/user/projects/demo-app-%d" % i,
+             "agent_session": {"value": "sess-%d" % i}}
+            for i, n in enumerate(self.names, 1)]}))
+
+    def _procs(self):
+        n = 0
+        for path in (os.path.join(self.dir, "calls.log"), self.bd_log):
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    n += len(fh.read().splitlines())
+        return n
+
+    def _fresh_sensor(self):
+        with open(os.path.join(self.sensor, "s1.json"), "w", encoding="utf-8") as fh:
+            json.dump({"rate_limits": {"five_hour": {"used_percentage": 12.0,
+                                                      "resets_at": time.time() + 3600},
+                                       "seven_day": {"used_percentage": 30.0,
+                                                     "resets_at": time.time() + 86400}}}, fh)
+
+    def test_process_budget_real_deps(self):
+        self._fresh_sensor()
+        self._agents("working")
+        monitor.poll(list(self.names), self.d, self.mem, time.time())  # first sight: reads
+        before = self._procs()
+        monitor.poll(list(self.names), self.d, self.mem, time.time())
+        self.assertEqual(self._procs() - before, 2)  # agent list + kv list, nothing else
+        # all three change status and there is no sensor: the limit pass reuses the screens
+        os.remove(os.path.join(self.sensor, "s1.json"))
+        self._agents("idle")
+        before = self._procs()
+        monitor.poll(list(self.names), self.d, self.mem, time.time())
+        self.assertEqual(self._procs() - before, 5)  # agents, kv, three screens
+        self.assertIsNone(self.mem["last_reading"]["seven_day"])
 
 
 class TestMonitorMain(unittest.TestCase):
@@ -344,10 +634,10 @@ class TestMonitorMain(unittest.TestCase):
         deps = self.s.deps()
         seen = []
         lists = iter([[], ["b1"]])
-        deps["crews"] = lambda: next(lists)
+        deps["crews"] = lambda kv=None: next(lists)
         self.s.crews["b1"] = st("done")
         orig = deps["state"]
-        deps["state"] = lambda n: (seen.append(n), orig(n))[1]
+        deps["state"] = lambda n, a, **kw: (seen.append(n), orig(n, a, **kw))[1]
         buf = io.StringIO()
         with redirect_stdout(buf):
             monitor.main(["--interval", "0.01", "--heartbeat", "5"], deps=deps)
@@ -356,7 +646,7 @@ class TestMonitorMain(unittest.TestCase):
     def test_errors_logged_and_heartbeat_carries_last_error(self):
         deps = self.s.deps()
 
-        def broken(d):
+        def broken(d, listed=None):
             raise Boom("x")
         deps["own_context"] = broken
         buf = io.StringIO()
@@ -385,6 +675,59 @@ class TestMonitorMain(unittest.TestCase):
                          (12.0, 3.0, "sensor", 12345))
         self.assertEqual(r["events"], ["settled b1 done"])
         self.assertEqual(monitor.readings(since=r["ts"] + 1), [])
+
+    def _sleeps(self, deps, extra, trigger_after):
+        sleeps = []
+        real = monitor.time.sleep
+
+        def fake(sec):
+            sleeps.append(sec)
+            if len(sleeps) == trigger_after:
+                self.s.limits = lim(95.0, 10.0)  # an event ends the run
+        monitor.time.sleep = fake
+        self.addCleanup(setattr, monitor.time, "sleep", real)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            monitor.main(["--heartbeat", "1000000"] + extra, deps=deps)
+        return sleeps
+
+    def test_backoff_grows_and_resets(self):
+        deps = self.s.deps()
+        self.assertEqual(self._sleeps(deps, [], 4), [90, 180, 300, 300])
+        # a working crew keeps the interval at the base
+        os.remove(monitor.state_path())
+        self.s.limits = lim(10.0, 10.0)
+        self.s.crews["b1"] = st("working")
+        deps["crews"] = lambda kv=None: ["b1"]
+        self.assertEqual(self._sleeps(deps, [], 3), [90, 90, 90])
+
+    def test_backoff_resets_on_status_change_and_interval_flag_fixes_it(self):
+        deps = self.s.deps()
+        sleeps = []
+        real = monitor.time.sleep
+        names = ["b1"]
+        deps["crews"] = lambda kv=None: names
+        self.s.crews["b1"] = st("idle", bg=1)  # quiet: settled is suppressed by a shell
+
+        def fake(sec):
+            sleeps.append(sec)
+            if len(sleeps) == 3:
+                self.s.crews["b1"] = st("done", bg=1)  # status change, still no event
+            if len(sleeps) == 5:
+                self.s.limits = lim(95.0, 10.0)
+        monitor.time.sleep = fake
+        self.addCleanup(setattr, monitor.time, "sleep", real)
+        with redirect_stdout(io.StringIO()):
+            monitor.main(["--heartbeat", "1000000"], deps=deps)
+        self.assertEqual(sleeps, [90, 90, 180, 90, 90])
+        sleeps.clear()
+        self.s.limits = lim(10.0, 10.0)
+        self.s.crews["b1"] = st("idle", bg=1)
+        monitor.time.sleep = lambda sec: (sleeps.append(sec), len(sleeps) == 3 and setattr(
+            self.s, "limits", lim(95.0, 10.0)))
+        with redirect_stdout(io.StringIO()):
+            monitor.main(["--heartbeat", "1000000", "--interval", "7"], deps=deps)
+        self.assertEqual(sleeps, [7, 7, 7])
 
     def test_restart_does_not_repeat_persisting_condition(self):
         self.s.crews["b1"] = st("done")

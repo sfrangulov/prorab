@@ -315,10 +315,17 @@ def _transcript_for(name, a=None, kv=None):
     return _transcript_path(a) if a else None
 
 
+def gone_state():
+    """The state of a crew whose agent is not listed."""
+    return {"status": "gone", "name_ok": False, "bg_shells": 0, "consent": None,
+            "limit_screen": None, "provider_error": None, "ctx": None,
+            "session_id": None, "cwd": None, "pane_id": None}
+
+
 def state(name, a=None, *, read_screen=True, kv=None):
     """The crew's agent (found by its pane, the name only as a fallback) with its status,
     context and, with `read_screen`, the markers of one screen read; without it those are
-    None (unknown, not 0)."""
+    None (unknown, not 0). `read_screen` may also be the screen text already read."""
     if a is None:
         pane = _kv_of(kv, _kv(name, "pane"))
         listed = herdr_cli.agents()
@@ -326,9 +333,7 @@ def state(name, a=None, *, read_screen=True, kv=None):
         if a is None:
             a = next((x for x in listed if x.get("name") == name), None)
     if a is None:
-        return {"status": "gone", "name_ok": False, "bg_shells": 0, "consent": None,
-                "limit_screen": None, "provider_error": None, "ctx": None,
-                "session_id": None, "cwd": None, "pane_id": None}
+        return gone_state()
     path = _transcript_for(name, a, kv)
     out = {"status": a.get("agent_status"), "name_ok": a.get("name") == name,
            "bg_shells": None, "consent": None, "limit_screen": None, "provider_error": None,
@@ -336,8 +341,11 @@ def state(name, a=None, *, read_screen=True, kv=None):
            "session_id": (a.get("agent_session") or {}).get("value"),
            "cwd": a.get("cwd"), "pane_id": a.get("pane_id")}
     if read_screen:
-        screen = (herdr_cli.agent_visible(a["name"]) if a.get("name")
-                  else herdr_cli.pane_visible(a["pane_id"]))
+        if isinstance(read_screen, str):
+            screen = read_screen
+        else:
+            screen = (herdr_cli.agent_visible(a["name"]) if a.get("name")
+                      else herdr_cli.pane_visible(a["pane_id"]))
         d = _defaults.load()
         out.update(bg_shells=herdr_cli.bg_shells(screen),
                    consent=herdr_cli.consent_dialog(screen),

@@ -492,6 +492,13 @@ class TestSendState(CrewBase):
                                           "provider_error")], [None] * 4)
         self.assertFalse([c for c in self.calls() if c.startswith("agent read")])
 
+    def test_state_takes_a_screen_already_read(self):
+        self.route("agent list", ok({"agents": [agent_entry(status="blocked")]}))
+        a = crew.herdr_cli.agents()[0]
+        st = crew.state("a1", a, read_screen=fixture("consent", "mcp.txt"))
+        self.assertEqual(st["consent"], "mcp")
+        self.assertFalse([c for c in self.calls() if c.startswith("agent read")])
+
     def test_state_uses_kv_snapshot(self):
         self.route("agent list", ok({"agents": [agent_entry()]}))
         snap = {"crew.a1.pane": "w:p9"}

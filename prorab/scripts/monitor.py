@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Monitor: polls crews, limits, budget and the prorab's own context.
+"""Monitor: polls crews, limits, budget and the foreman's own context.
 
 Runs as a background command of the prorab: prints ``EVENT <line>`` for every event of the
 first poll that has any (or ``EVENT heartbeat`` after a quiet ``heartbeat_s``) and exits 0;
@@ -17,9 +17,14 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _defaults  # noqa: E402
+import herdr_cli  # noqa: E402
 import scheduler  # noqa: E402
 
 SETTLED = ("idle", "done", "blocked")
+SKIP_DIRS = frozenset((".git", "node_modules", ".venv", "__pycache__"))
+EVENT_ORDER = ("gone", "consent", "provider_error", "limit_screen", "limit", "blind",
+               "blind_week", "budget", "prorab_context", "context_hard", "context_soft",
+               "hung", "hung_unclear", "settled", "error")
 
 
 # ---- log and state files --------------------------------------------------------------
@@ -69,13 +74,13 @@ def _pct_ctx(pct, d):
     return {"pct": pct, "soft": pct >= soft_pct, "hard": pct >= c["hard_pct"]}
 
 
-def _own_context(d):
-    import herdr_cli
+def _own_context(d, listed=None):
     import transcript
     pane = os.environ.get("HERDR_PANE_ID")
     if not pane:
         return None
-    me = next((a for a in herdr_cli.agents() if a.get("pane_id") == pane), None)
+    agents = herdr_cli.agents() if listed is None else listed
+    me = next((a for a in agents if a.get("pane_id") == pane), None)
     sid = ((me or {}).get("agent_session") or {}).get("value")
     if me and sid and me.get("cwd"):
         path = transcript.find_transcript(me["cwd"], sid)
@@ -101,17 +106,50 @@ def _transcript_size(st):
         return None
 
 
+def _newest_age(worktree, now, max_files):
+    """Seconds since the newest file in `worktree` changed, skipping .git, node_modules,
+    .venv and __pycache__. None when the tree is unreadable or has more than `max_files`
+    entries."""
+    newest, seen = None, 0
+
+    def fail(err):
+        raise err
+    try:
+        for root, dirs, files in os.walk(worktree, onerror=fail):
+            dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
+            seen += len(dirs) + len(files)
+            if seen > max_files:
+                return None
+            for name in files:
+                try:
+                    m = os.lstat(os.path.join(root, name)).st_mtime
+                except FileNotFoundError:  # gone between listing and stat
+                    continue
+                if newest is None or m > newest:
+                    newest = m
+        if newest is None:  # an empty tree: its own mtime
+            newest = os.stat(worktree).st_mtime
+    except OSError:
+        return None
+    return max(0.0, now - newest)
+
+
 def real_deps():
     import crew
-    import herdr_cli
     import journal
     import limits
+    import slots
     return {
-        "state": crew.state,
+        "state": lambda name, a, **kw: (crew.state(name, a, **kw) if a is not None
+                                        else crew.gone_state()),
+        "agents": herdr_cli.agents,
+        "kv_all": journal.kv_all,
+        "visible": herdr_cli.pane_visible,
+        "slot_holders": slots.holders,
+        "newest_age": _newest_age,
         "transcript_size": _transcript_size,
-        "statusline_ctx": lambda n: limits.statusline_context(herdr_cli.agent_visible(n)),
+        "statusline_ctx": limits.statusline_context,
         "limits": scheduler.gather_limits,
-        "kv_get": journal.kv_get,
         "over_budget": journal.over_budget,
         "override": journal.override,
         "own_context": _own_context,
@@ -143,12 +181,30 @@ def _limit_state(lim, cap, d):
     return [band, bool(week_over), bool(lim.get("reached"))]
 
 
+def _kv_value(kv, key):
+    v = kv.get(key)
+    return None if v in (None, "") else v
+
+
+def _find_agent(name, listed, kv):
+    """The crew's agent: by its pane in kv first, the name only as a fallback."""
+    pane = _kv_value(kv, "crew.%s.pane" % name)
+    a = next((x for x in listed if pane and x.get("pane_id") == pane), None)
+    return a or next((x for x in listed if x.get("name") == name), None)
+
+
+def _inside(path, root):
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def poll(crews, d, mem, now, *, deps=None):
     """Event lines in priority order; `mem` carries the dedupe state between polls.
 
-    The state is updated on a copy and committed only when the whole poll returns, so a
-    failure in the middle never swallows an event. A failing source is isolated: it is
-    recorded in ``mem["poll_errors"]`` and the other sources are still polled.
+    `crews` is a list of names or a callable taking the kv snapshot. The state is updated
+    on a copy and committed only when the whole poll returns, so a failure in the middle
+    never swallows an event. A failing source is isolated: it is recorded in
+    ``mem["poll_errors"]`` and the other sources are still polled.
     """
     dp = real_deps() if deps is None else deps
     work = copy.deepcopy(mem)
@@ -159,22 +215,170 @@ def poll(crews, d, mem, now, *, deps=None):
 
 
 def _poll(crews, d, mem, now, dp):
-    ev = {k: [] for k in ("gone", "limit", "blind", "blind_week", "budget", "prorab_context",
-                          "context_hard", "context_soft", "hung", "settled", "error")}
+    ev = {k: [] for k in EVENT_ORDER}
     errors = {}
 
-    def guard(source, fn, *args, default=None):
+    def guard(source, fn, *args, default=None, **kw):
         try:
-            return fn(*args)
+            return fn(*args, **kw)
         except Exception as e:  # one broken source must not stop the others
             errors.setdefault(source, "%s: %s" % (type(e).__name__, e))
             return default
 
-    def kv_get(key):
-        return guard("kv", dp["kv_get"], key)
+    # one agent list and one kv snapshot per poll; everything below reads these
+    kv_snap = guard("kv", dp["kv_all"])
+    kv = kv_snap if isinstance(kv_snap, dict) else {}
+    kv_arg = kv if isinstance(kv_snap, dict) else None  # None: the callee reads kv itself
+    listed = guard("agents", dp["agents"])
 
-    override = guard("override", dp["override"]) is not None
-    lim = guard("limits", dp["limits"], d, now)
+    def kv_get(key):
+        return _kv_value(kv, key)
+
+    if callable(crews):
+        crews = crews(kv_arg)
+
+    mon = d["monitor"]
+    last = mem.setdefault("last", {})
+    gone, settled, hung = (mem.setdefault(k, {}) for k in ("gone", "settled", "hung"))
+    ep = {k: mem.setdefault(k, {}) for k in ("consent", "provider_error", "limit_screen")}
+    ctx_mem = mem.setdefault("ctx", {})
+    screens = {}        # pane id -> screen text read during this poll
+    seen_crews = []     # (pane id, status) of every crew seen this poll
+    active = False
+    holders = []
+
+    def read(pane):
+        if pane not in screens:
+            text = guard("screen.%s" % pane, dp["visible"], pane)
+            if text is None:
+                return None
+            screens[pane] = text
+        return screens[pane]
+
+    def limit_texts():
+        """The screens read this poll, plus working crews' screens until `limit_panes`
+        of the screens belong to working crews."""
+        working = sum(1 for p, s in seen_crews if s == "working" and p in screens)
+        for pane, status in seen_crews:
+            if working >= mon["limit_panes"]:
+                break
+            if status == "working" and pane not in screens:
+                if read(pane) is not None:
+                    working += 1
+        return list(screens.values())
+
+    def slot_holders():
+        if not holders:
+            holders.extend(guard("slots", dp["slot_holders"], default=[]) or [])
+        return holders
+
+    override = guard("override", dp["override"], kv=kv_arg) is not None
+
+    for name in (crews if listed is not None else ()):
+        a = _find_agent(name, listed, kv)
+        prev = last.get(name) or {}
+        screen = None
+        if a is not None:
+            pane = a.get("pane_id")
+            need = (a.get("agent_status") != prev.get("status") or prev.get("shells")
+                    or prev.get("statusline"))
+            if need and pane:
+                screen = read(pane)
+        st = guard("state.%s" % name, dp["state"], name, a,
+                   read_screen=False if screen is None else screen, kv=kv_arg)
+        if st is None:
+            continue
+        status = st.get("status")
+        if status == "gone":
+            if not gone.get(name):
+                ev["gone"].append("gone %s" % name)
+            gone[name] = True
+            last.pop(name, None)
+            for episodes in ep.values():
+                episodes.pop(name, None)
+            continue
+        gone[name] = False
+        pane = st.get("pane_id") or (a or {}).get("pane_id")
+        if st.get("ctx") is None and screen is None and pane:
+            screen = read(pane)  # the context can only come from the status line
+            if screen is not None:
+                st = guard("state.%s" % name, dp["state"], name, a, read_screen=screen,
+                           kv=kv_arg) or st
+        seen_crews.append((pane, status))
+        if status != prev.get("status") or status == "working":
+            active = True
+
+        # what the screen shows: read only now and then, remembered between reads
+        read_now = screen is not None
+        bg = st.get("bg_shells") if read_now else prev.get("bg")
+        if read_now:
+            for key, field in (("consent", "consent"), ("provider_error", "provider_error"),
+                               ("limit_screen", "limit_screen")):
+                val = st.get(field)
+                if not val:
+                    ep[key].pop(name, None)
+                    continue
+                if name in ep[key]:
+                    continue
+                if key == "limit_screen":
+                    at = val.get("resets_at") if isinstance(val, dict) else None
+                    ep[key][name] = "-" if at is None else "%d" % round(at)
+                    ev[key].append("limit_screen %s %s" % (name, ep[key][name]))
+                else:
+                    ep[key][name] = val
+                    ev[key].append("%s %s %s" % (key, name, val))
+
+        c, suffix, from_statusline = st.get("ctx"), "", False
+        if c is None and read_now:
+            pct = guard("statusline.%s" % name, dp["statusline_ctx"], screen)
+            if pct is not None:
+                c, suffix, from_statusline = _pct_ctx(pct, d), " (statusline)", True
+        if c:
+            lv = _level(c)
+            if lv > ctx_mem.get(name, 0):
+                kind = "context_hard" if lv == 2 else "context_soft"
+                ev[kind].append("%s %s %s%s" % (kind, name, c["pct"], suffix))
+            ctx_mem[name] = lv
+        last[name] = {"status": status, "bg": bg,
+                      "shells": status in ("idle", "done") and bool(bg),
+                      "statusline": from_statusline or (prev.get("statusline", False)
+                                                        and not read_now)}
+
+        on_limit_screen = name in ep["limit_screen"]
+        if status == "working":
+            settled.pop(name, None)
+            size = guard("transcript.%s" % name, dp["transcript_size"], st)
+            h = hung.get(name)
+            if h is None or h["size"] != size:
+                hung[name] = {"size": size, "since": now, "fired": False}
+            elif (not h["fired"] and not on_limit_screen
+                  and now - h["since"] >= mon["hung_s"]):
+                wt = st.get("cwd")
+                if wt and any(_inside(x["cwd"], wt) for x in slot_holders() if x.get("cwd")):
+                    pass  # a heavy command of this crew holds a slot: not hung
+                elif size is None:
+                    h["fired"] = True
+                    ev["hung_unclear"].append("hung_unclear %s no_transcript" % name)
+                else:
+                    age = (guard("newest_age.%s" % name, dp["newest_age"], wt, now,
+                                 mon["hung_scan_max_files"]) if wt else None)
+                    if age is None:
+                        h["fired"] = True
+                        reason = "scan_capped" if wt and os.path.isdir(wt) else "no_worktree"
+                        ev["hung_unclear"].append("hung_unclear %s %s" % (name, reason))
+                    elif age >= mon["hung_s"]:
+                        h["fired"] = True
+                        ev["hung"].append("hung %s" % name)
+        else:
+            hung.pop(name, None)
+            if (status in SETTLED and (status == "blocked" or not bg)
+                    and name not in ep["consent"] and not on_limit_screen):
+                if settled.get(name) != status:
+                    ev["settled"].append("settled %s %s" % (name, status))
+                settled[name] = status
+
+    # the limits come after the crews: a stale sensor falls back on the screens just read
+    lim = guard("limits", dp["limits"], d, now, pane_texts=limit_texts)
     if lim is None:
         lim = {}
         have_lim = False
@@ -227,64 +431,21 @@ def _poll(crews, d, mem, now, dp):
         mem["week_unknown_since"], mem["blind_week_fired"] = None, False
 
     # budget: the set of exceeded budget items changed
-    over = None if (override or not have_lim) else guard("over_budget", dp["over_budget"], week)
+    over = (None if (override or not have_lim)
+            else guard("over_budget", dp["over_budget"], week, kv=kv_arg))
     if over is not None:
         over = list(over)
         if over and over != mem.get("budget"):
             ev["budget"].append("budget %s" % ",".join(over))
         mem["budget"] = over
 
-    # the prorab's own context
-    own = guard("own_context", dp["own_context"], d)
-    ctx_mem = mem.setdefault("ctx", {})
+    # the foreman's own context
+    own = guard("own_context", dp["own_context"], d, listed=listed)
     if own:
         lv = _level(own)
         if lv > ctx_mem.get("_prorab", 0):
             ev["prorab_context"].append("prorab_context %s" % own["pct"])
         ctx_mem["_prorab"] = lv
-
-    gone, settled, hung = (mem.setdefault(k, {}) for k in ("gone", "settled", "hung"))
-    for name in crews:
-        st = guard("state.%s" % name, dp["state"], name)
-        if st is None:
-            continue
-        status = st.get("status")
-        if status == "gone":
-            if not gone.get(name):
-                ev["gone"].append("gone %s" % name)
-            gone[name] = True
-            continue
-        gone[name] = False
-
-        c, suffix = st.get("ctx"), ""
-        if c is None:
-            pct = guard("statusline.%s" % name, dp["statusline_ctx"], name)
-            if pct is not None:
-                c, suffix = _pct_ctx(pct, d), " (statusline)"
-        if c:
-            lv = _level(c)
-            if lv > ctx_mem.get(name, 0):
-                kind = "context_hard" if lv == 2 else "context_soft"
-                ev[kind].append("%s %s %s%s" % (kind, name, c["pct"], suffix))
-            ctx_mem[name] = lv
-
-        if status == "working":
-            settled.pop(name, None)
-            size = guard("transcript.%s" % name, dp["transcript_size"], st)
-            h = hung.get(name)
-            if size is None:  # no transcript to watch: never call a crew hung blindly
-                hung.pop(name, None)
-            elif h is None or h["size"] != size:
-                hung[name] = {"size": size, "since": now, "fired": False}
-            elif not h["fired"] and now - h["since"] >= d["monitor"]["hung_s"]:
-                h["fired"] = True
-                ev["hung"].append("hung %s" % name)
-        else:
-            hung.pop(name, None)
-            if status in SETTLED and (status == "blocked" or st.get("bg_shells") == 0):
-                if settled.get(name) != status:
-                    ev["settled"].append("settled %s %s" % (name, status))
-                settled[name] = status
 
     # errors: `error <source>` after error_polls consecutive failing polls, once per streak
     streak, fired = mem.setdefault("err_streak", {}), mem.setdefault("err_fired", [])
@@ -295,7 +456,7 @@ def _poll(crews, d, mem, now, dp):
                 fired.remove(src)
     for src in errors:
         streak[src] = streak.get(src, 0) + 1
-        if streak[src] >= d["monitor"]["error_polls"] and src not in fired:
+        if streak[src] >= mon["error_polls"] and src not in fired:
             fired.append(src)
             ev["error"].append("error %s" % src)
     mem["poll_errors"] = ["%s: %s" % (k, v) for k, v in errors.items()]
@@ -303,7 +464,9 @@ def _poll(crews, d, mem, now, dp):
         mem["last_error"] = list(errors)[-1]
     else:
         mem.pop("last_error", None)
-    return [line for k in ev for line in ev[k]]
+    lines = [line for k in EVENT_ORDER for line in ev[k]]
+    mem["active"] = bool(active or lines)  # read by main: backoff resets while it is set
+    return lines
 
 
 # ---- main ---------------------------------------------------------------------------
@@ -315,23 +478,31 @@ def main(argv=None, *, deps=None):
     ap.add_argument("--heartbeat", type=float)
     a = ap.parse_args(argv)
     d = _defaults.load()
-    interval = a.interval if a.interval is not None else d["monitor"]["interval_s"]
-    heartbeat = a.heartbeat if a.heartbeat is not None else d["monitor"]["heartbeat_s"]
+    mon = d["monitor"]
+    base = a.interval if a.interval is not None else mon["interval_s"]
+    heartbeat = a.heartbeat if a.heartbeat is not None else mon["heartbeat_s"]
     dp = real_deps() if deps is None else deps
     names = list(a.crew)
+    list_err = None
     mem = load_mem()
     started = time.monotonic()
+
+    def crew_names(kv):
+        """The crew list from the journal on every poll; on failure the previous list."""
+        nonlocal names, list_err
+        try:
+            names = list(dp["crews"](kv=kv))
+            list_err = None
+        except Exception as e:
+            list_err = "crews: %s" % e
+        return names
+
     while True:
         now = time.time()
         list_err = None
+        sleep_for = mem.get("interval") or base
         try:
-            if not a.crew:  # no explicit list: follow the journal on every poll
-                try:
-                    names = list(dp["crews"]())
-                    list_err = None
-                except Exception as e:  # keep the previous list
-                    list_err = "crews: %s" % e
-            events = poll(names, d, mem, now, deps=dp)
+            events = poll(names if a.crew else crew_names, d, mem, now, deps=dp)
             if list_err:
                 mem["poll_errors"] = mem.get("poll_errors", []) + [list_err]
                 mem["last_error"] = "crews"
@@ -341,6 +512,12 @@ def main(argv=None, *, deps=None):
             mem["last_error"] = "poll"
             append_log({"ts": now, "events": [], "errors": ["poll: %s" % e]})
         else:
+            if a.interval is not None:
+                sleep_for = a.interval
+            elif mem.get("active"):  # a status change, an event or a working crew
+                sleep_for = mem["interval"] = base
+            else:  # quiet: sleep as planned, then back off for the next time
+                mem["interval"] = min(sleep_for * mon["backoff_factor"], mon["interval_max_s"])
             save_mem(mem)
             entry = dict(mem.get("last_reading") or {"ts": now}, events=events)
             if mem.get("poll_errors"):
@@ -354,7 +531,7 @@ def main(argv=None, *, deps=None):
             last = mem.get("last_error")
             print("EVENT heartbeat" + (" last_error=%s" % last if last else ""), flush=True)
             return 0
-        time.sleep(interval)
+        time.sleep(sleep_for)
 
 
 if __name__ == "__main__":

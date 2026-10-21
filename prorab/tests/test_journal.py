@@ -208,6 +208,100 @@ class TestJournal(JournalBase):
         rc, out = run("kv", "get", "prorab:active")
         self.assertEqual(out, {"key": "prorab:active", "value": "p-a"})
 
+    # ---- Amendment S: files, estimates, durations, override ----------------
+
+    def test_stage_files_estimate_and_duration(self):
+        n = journal.create_naryad("o", "T", "b", {})
+        s = journal.create_stage(n, "Этап", "b", files=["src/a.py", "docs/b.md"],
+                                 estimate_min=12.5, kind="tests")
+        info = journal.stage_info(s)
+        self.assertEqual(info["files"], ["src/a.py", "docs/b.md"])
+        self.assertEqual(info["estimate_min"], 12.5)
+        self.assertEqual(info["kind"], "tests")
+        self.assertIsNone(info["started_at"])
+        self.assertIsNone(info["actual_min"])
+        self.assertEqual(journal.durations("tests"), [])
+        journal.start_stage(s)
+        self.assertEqual(journal.bd(["show", s])[0]["status"], "in_progress")
+        self.assertIsNotNone(journal.stage_info(s)["started_at"])
+        mins = journal.accept_stage(s, "принято")
+        self.assertGreater(mins, 0)
+        self.assertEqual(journal.bd(["show", s])[0]["status"], "closed")
+        self.assertEqual(journal.acts(s, "приёмка"), ["принято"])
+        self.assertEqual(journal.stage_info(s)["actual_min"], mins)
+        self.assertEqual(journal.durations("tests"), [mins])
+        self.assertEqual(journal.durations("docs"), [])
+        plain = journal.create_stage(n, "Без полей", "b")
+        info = journal.stage_info(plain)
+        self.assertEqual((info["files"], info["estimate_min"], info["kind"]), ([], None, None))
+
+    def test_naryad_files_union(self):
+        n = journal.create_naryad("o", "T", "b", {}, goal="g1")
+        self.assertEqual(journal.naryad_files(n), [])
+        journal.create_stage(n, "A", "b", files=["a.py", "common.py"])
+        journal.create_stage(n, "B", "b", files=["common.py", "b.py"])
+        self.assertEqual(sorted(journal.naryad_files(n)), ["a.py", "b.py", "common.py"])
+        self.assertIn("goal:g1", journal.bd(["show", n])[0]["labels"])
+
+    def test_override_set_get_clear(self):
+        self.assertIsNone(journal.override())
+        journal.set_override("g1")
+        o = journal.override()
+        self.assertEqual(o["goal"], "g1")
+        self.assertEqual(o["source"], "слова заказчика")
+        self.assertTrue(o["since"])
+        journal.clear_override()
+        self.assertIsNone(journal.override())
+        self.assertIsNone(journal.kv_get("override.ignore_limits"))
+
+    def test_override_expires_with_goal(self):
+        # a goal without наряды does not expire the override
+        journal.set_override("g1")
+        self.assertIsNotNone(journal.override())
+        n1 = journal.create_naryad("o", "T1", "b", {}, goal="g1")
+        n2 = journal.create_naryad("o", "T2", "b", {}, goal="g1")
+        other = journal.create_naryad("o", "T3", "b", {}, goal="g2")
+        s = journal.create_stage(n1, "S", "b")
+        self.assertIsNotNone(journal.override())
+        journal.bd(["close", s])
+        journal.bd(["close", n1])
+        self.assertIsNotNone(journal.override())  # n2 still open
+        journal.wait_customer(n2, "нужен выбор")
+        self.assertIsNone(journal.override())  # closed + waiting for the customer
+        self.assertIsNone(journal.kv_get("override.ignore_limits"))
+        journal.set_override("g2")
+        self.assertIsNotNone(journal.override())
+        journal.bd(["close", other])
+        self.assertIsNone(journal.override())
+
+    def test_cli_stage_override(self):
+        import io
+        from contextlib import redirect_stdout
+
+        def run(*argv):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = journal.main(list(argv))
+            return rc, json.loads(buf.getvalue())
+        _, out = run("naryad", "o", "T", "--goal", "g1")
+        nid = out["id"]
+        _, out = run("stage", nid, "S", "--file", "a.py", "--file", "b.py",
+                     "--estimate", "20", "--kind", "docs")
+        sid = out["id"]
+        _, out = run("stage-info", sid)
+        self.assertEqual((out["files"], out["estimate_min"], out["kind"]),
+                         (["a.py", "b.py"], 20.0, "docs"))
+        self.assertEqual(run("naryad-files", nid)[1], ["a.py", "b.py"])
+        run("stage-start", sid)
+        _, out = run("stage-accept", sid, "ok")
+        self.assertGreater(out["actual_min"], 0)
+        self.assertEqual(run("durations", "docs")[1], [out["actual_min"]])
+        self.assertEqual(run("override", "get")[1], {"override": None})
+        run("override", "set", "g1")
+        self.assertEqual(run("override", "get")[1]["override"]["goal"], "g1")
+        run("override", "clear")
+        self.assertEqual(run("override", "get")[1], {"override": None})
+
 
 if __name__ == "__main__":
     unittest.main()

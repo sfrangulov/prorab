@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -97,8 +98,11 @@ def _kv_int(key, default=0):
 
 # ---- наряды and stages ------------------------------------------------------
 
-def create_naryad(obj, title, body, smeta):
-    nid = bd(["create", title, "-d", body, "-l", "%s,obj:%s" % (NARYAD_LABEL, obj),
+def create_naryad(obj, title, body, smeta, goal=None):
+    labels = "%s,obj:%s" % (NARYAD_LABEL, obj)
+    if goal:
+        labels += ",goal:%s" % goal
+    nid = bd(["create", title, "-d", body, "-l", labels,
               "--silent"], json_out=False).strip()
     if not nid:
         raise JournalError("bd create returned no id")
@@ -107,11 +111,128 @@ def create_naryad(obj, title, body, smeta):
     return nid
 
 
-def create_stage(parent, title, body, blocked_by=()):
-    args = ["create", title, "-d", body, "--parent", parent, "--silent"]
+def create_stage(parent, title, body, blocked_by=(), files=(), estimate_min=None, kind=None):
+    """Create a stage under a наряд.
+
+    Storage (bd 1.3.1): files / estimate_min / started_at / actual_min live in the
+    bead's `metadata` JSON object (bd update merges keys); kind is the label `type:<kind>`.
+    """
+    meta = {"files": list(files or [])}
+    if estimate_min is not None:
+        meta["estimate_min"] = float(estimate_min)
+    args = ["create", title, "-d", body, "--parent", parent, "--silent",
+            "--metadata", json.dumps(meta, ensure_ascii=False)]
+    if kind:
+        args += ["-l", "type:%s" % kind]
     if blocked_by:
         args += ["--deps", ",".join("blocked-by:%s" % b for b in blocked_by)]
     return bd(args, json_out=False).strip()
+
+
+def _show(bead):
+    items = bd(["show", bead])
+    if not items:
+        raise JournalError("no such bead: %s" % bead)
+    return items[0]
+
+
+def _set_meta(bead, **kw):
+    _run(["update", bead, "--metadata", json.dumps(kw, ensure_ascii=False)])
+
+
+def _info(item):
+    meta = item.get("metadata") or {}
+    kind = None
+    for lab in item.get("labels") or []:
+        if lab.startswith("type:"):
+            kind = lab[len("type:"):]
+    return {"files": list(meta.get("files") or []),
+            "estimate_min": meta.get("estimate_min"), "kind": kind,
+            "started_at": meta.get("started_at"), "actual_min": meta.get("actual_min")}
+
+
+def stage_info(stage):
+    return _info(_show(stage))
+
+
+def naryad_files(naryad):
+    """Union of the files of the наряд's stages, in first-seen order."""
+    out = []
+    for child in bd(["list", "--parent", naryad, "--all", "--limit", "0"]):
+        for f in _info(child)["files"]:
+            if f not in out:
+                out.append(f)
+    return out
+
+
+def start_stage(stage):
+    _run(["update", stage, "--status", "in_progress", "--metadata",
+          json.dumps({"started_at": time.time()})])
+
+
+def accept_stage(stage, act):
+    """Record the приёмка act and the actual duration (minutes), close the stage."""
+    started = stage_info(stage)["started_at"]
+    if started is None:
+        raise JournalError("stage %s was never started" % stage)
+    minutes = (time.time() - float(started)) / 60.0
+    add_act(stage, "приёмка", act)
+    _set_meta(stage, actual_min=minutes)
+    _run(["close", stage])
+    return minutes
+
+
+def durations(kind):
+    """Actual durations (minutes) of closed stages of the kind, oldest first."""
+    items = bd(["list", "--label", "type:%s" % kind, "--status", "closed", "--limit", "0"])
+    items = sorted(items, key=lambda i: i.get("closed_at") or "")
+    return [i["metadata"]["actual_min"] for i in items
+            if (i.get("metadata") or {}).get("actual_min") is not None]
+
+
+# ---- the ignore-limits override (customer's words only) --------------------------
+
+OVERRIDE_KEY = "override.ignore_limits"
+
+
+def set_override(goal):
+    kv_set(OVERRIDE_KEY, json.dumps({"goal": goal, "since": int(time.time()),
+                                     "source": "слова заказчика"}, ensure_ascii=False))
+
+
+def clear_override():
+    kv_clear(OVERRIDE_KEY)
+
+
+def _goal_done(goal):
+    """True when the goal has наряды and each is closed or waits for the customer."""
+    naryads = bd(["list", "--label", NARYAD_LABEL, "--label", "goal:%s" % goal,
+                  "--no-parent", "--all", "--limit", "0"])
+    if not naryads:
+        return False
+    for n in naryads:
+        if n.get("status") == "closed":
+            continue
+        deps = _show(n["id"]).get("dependencies") or []
+        if not any(d.get("issue_type") == "gate" and d.get("status") != "closed" for d in deps):
+            return False
+    return True
+
+
+def override():
+    """The stored override, or None; expires (and is cleared) once its goal is done."""
+    v = kv_get(OVERRIDE_KEY)
+    if v is None:
+        return None
+    try:
+        data = json.loads(v)
+    except ValueError:
+        clear_override()
+        return None
+    if _goal_done(data.get("goal")):
+        clear_override()
+        return None
+    return data
 
 
 def ready():
@@ -278,9 +399,21 @@ def main(argv=None):
     p = sub.add_parser("naryad")
     p.add_argument("obj"); p.add_argument("title")
     p.add_argument("--body", default=""); p.add_argument("--smeta", action="append", default=[])
+    p.add_argument("--goal")
     p = sub.add_parser("stage")
     p.add_argument("parent"); p.add_argument("title")
     p.add_argument("--body", default=""); p.add_argument("--blocked-by", action="append", default=[])
+    p.add_argument("--file", action="append", default=[])
+    p.add_argument("--estimate", type=float); p.add_argument("--kind")
+    for name in ("stage-info", "stage-start", "naryad-files"):
+        sub.add_parser(name).add_argument("bead")
+    p = sub.add_parser("stage-accept")
+    p.add_argument("stage"); p.add_argument("act")
+    sub.add_parser("durations").add_argument("kind")
+    p = sub.add_parser("override")
+    osub = p.add_subparsers(dest="ovcmd", required=True)
+    osub.add_parser("get"); osub.add_parser("clear")
+    osub.add_parser("set").add_argument("goal")
     sub.add_parser("ready")
     p = sub.add_parser("act")
     p.add_argument("bead"); p.add_argument("kind"); p.add_argument("text")
@@ -316,9 +449,28 @@ def main(argv=None):
         return _emit({"ok": True})
     ensure_db()
     if a.cmd == "naryad":
-        return _emit({"id": create_naryad(a.obj, a.title, a.body, _pairs(a.smeta))})
+        return _emit({"id": create_naryad(a.obj, a.title, a.body, _pairs(a.smeta), goal=a.goal)})
     if a.cmd == "stage":
-        return _emit({"id": create_stage(a.parent, a.title, a.body, a.blocked_by)})
+        return _emit({"id": create_stage(
+            a.parent, a.title, a.body, a.blocked_by, a.file, a.estimate, a.kind)})
+    if a.cmd == "stage-info":
+        return _emit(stage_info(a.bead))
+    if a.cmd == "naryad-files":
+        return _emit(naryad_files(a.bead))
+    if a.cmd == "stage-start":
+        start_stage(a.bead)
+        return _emit({"ok": True})
+    if a.cmd == "stage-accept":
+        accept_stage(a.stage, a.act)
+        return _emit(stage_info(a.stage))
+    if a.cmd == "durations":
+        return _emit(durations(a.kind))
+    if a.cmd == "override":
+        if a.ovcmd == "set":
+            set_override(a.goal)
+        elif a.ovcmd == "clear":
+            clear_override()
+        return _emit({"override": override()})
     if a.cmd == "ready":
         return _emit(ready())
     if a.cmd == "act":

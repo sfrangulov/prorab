@@ -11,12 +11,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _defaults  # noqa: E402
 
-_FIVE = re.compile(r"5h\s+\S+\s+([\d.]+)%")
+_FIVE = re.compile(
+    r"5h\s+\S+\s+([\d.]+)%"
+    r"(?:\s*\((?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?\))?")
 _WEEK = re.compile(r"wk\s+\S+\s+([\d.]+)%")
 
 
-def _make(five=None, seven=None, five_at=None, seven_at=None, source="unknown", reached=False):
-    return {"five_hour": five, "seven_day": seven,
+def _make(five=None, seven=None, five_at=None, seven_at=None, source="unknown",
+          reached=False, five_in=None):
+    return {"five_hour_resets_in_s": five_in, "five_hour": five, "seven_day": seven,
             "five_hour_resets_at": five_at, "seven_day_resets_at": seven_at,
             "source": source, "reached": reached}
 
@@ -51,15 +54,22 @@ def read_sensor(path, max_age_s, now=None):
     f, s = _num(five.get("used_percentage")), _num(seven.get("used_percentage"))
     if f is None and s is None:
         return None
-    return _make(f, s, _int(five.get("resets_at")), _int(seven.get("resets_at")), "sensor")
+    f_at = _int(five.get("resets_at"))
+    return _make(f, s, f_at, _int(seven.get("resets_at")), "sensor",
+                 five_in=None if f_at is None else max(0, int(f_at - now)))
 
 
 def parse_statusline(text):
     f, w = _FIVE.search(text), _WEEK.search(text)
     if not f and not w:
         return None
+    five_in = None
+    if f and any(f.group(i) for i in (2, 3, 4)):
+        five_in = (int(f.group(2) or 0) * 86400 + int(f.group(3) or 0) * 3600
+                   + int(f.group(4) or 0) * 60)
     return _make(float(f.group(1)) if f else None,
-                 float(w.group(1)) if w else None, source="statusline")
+                 float(w.group(1)) if w else None, source="statusline",
+                 five_in=five_in)
 
 
 def detect_messages(text, patterns):

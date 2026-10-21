@@ -61,6 +61,21 @@ class TestLimits(unittest.TestCase):
         self.assertEqual(r["seven_day_resets_at"], 1761400000)
         self.assertEqual(r["source"], "sensor")
 
+    def test_statusline_countdown(self):
+        r = limits.parse_statusline(_read("statusline_wide.txt"))
+        self.assertEqual(r["five_hour_resets_in_s"], 4 * 3600 + 7 * 60)
+        r = limits.parse_statusline("5h \u00a0▓░ 9.0% (2d3h) │ wk ▓ 1.0% (4d21h7m)")
+        self.assertEqual(r["five_hour_resets_in_s"], 2 * 86400 + 3 * 3600)
+        r = limits.parse_statusline("5h ▓░ 9.0% (45m)")
+        self.assertEqual(r["five_hour_resets_in_s"], 45 * 60)
+        self._write_sensor({"rate_limits": {"five_hour": {
+            "used_percentage": 5.0, "resets_at": 1761060000}}})
+        r = limits.read_sensor(self.sensor, 300, now=1761060000 - 600)
+        self.assertEqual(r["five_hour_resets_in_s"], 600)
+        self.assertIsNone(limits.parse_statusline("5h ▓ 9.0% │ wk ▓ 1.0%")
+                          ["five_hour_resets_in_s"])
+        self.assertIsNone(limits.parse_statusline(_read("statusline_narrow.txt")))
+
     def test_sensor_stale_falls_through(self):
         m = self._write_sensor()
         self.assertIsNone(limits.read_sensor(self.sensor, 300, now=m + 301))

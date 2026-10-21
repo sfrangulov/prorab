@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -113,6 +114,53 @@ class TestSensor(SensorCase):
         self.assertTrue(os.path.isdir(os.path.join(self.cache, "usage")))
         sensor.uninstall(self.settings, self.cache)
         self.assertFalse(os.path.exists(os.path.join(self.cache, "usage")))
+
+    def test_multiline_original_command_runs_whole(self):
+        multi = "\nprintf A\nprintf B\n"
+        sl = dict(STATUS_LINE, command=multi)
+        self.write_settings({"statusLine": sl})
+        sensor.install(self.settings, self.cache, TAP)
+        with open(os.path.join(self.cache, "statusline.orig"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), multi)
+        r = self.run_tap(json.dumps({"session_id": "s1"}).encode())
+        self.assertEqual(r.stdout, b"AB")
+        sensor.uninstall(self.settings, self.cache)
+        self.assertEqual(self.read_settings()["statusLine"], sl)
+
+    def test_tap_path_with_space_is_quoted(self):
+        d = os.path.join(self.tmp, "my dir")
+        os.makedirs(d)
+        tap = os.path.join(d, "statusline_tap.py")
+        shutil.copy(TAP, tap)
+        os.chmod(tap, 0o755)
+        self.write_settings(self.base())
+        sensor.install(self.settings, self.cache, tap)
+        cmd = self.read_settings()["statusLine"]["command"]
+        self.assertEqual(cmd, shlex.quote(tap))
+        env = dict(os.environ, HOME=self.home, PRORAB_CACHE=self.cache)
+        data = json.dumps({"session_id": "q1"}).encode()
+        with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
+            fh.write("printf Z")
+        r = subprocess.run(["sh", "-c", cmd], input=data, env=env, capture_output=True)
+        self.assertEqual(r.stdout, b"Z")
+        with open(self.settings, "rb") as fh:
+            once = fh.read()
+        self.assertFalse(sensor.install(self.settings, self.cache, tap)["changed"])
+        with open(self.settings, "rb") as fh:
+            self.assertEqual(fh.read(), once)
+        self.assertEqual(len(self.backups()), 1)
+        sensor.uninstall(self.settings, self.cache)
+        self.assertEqual(self.read_settings()["statusLine"], STATUS_LINE)
+
+    def test_backup_keeps_private_mode(self):
+        self.write_settings(self.base())
+        os.chmod(self.settings, 0o600)
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        sensor.install(self.settings, self.cache, TAP)
+        b = os.path.join(os.path.dirname(self.settings), self.backups()[0])
+        self.assertEqual(os.stat(b).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(self.settings).st_mode & 0o777, 0o600)
 
     def test_status(self):
         self.write_settings(self.base())

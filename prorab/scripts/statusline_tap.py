@@ -59,7 +59,7 @@ def _save(data, cache):
 def _orig(cache):
     try:
         with open(os.path.join(cache, "statusline.orig"), encoding="utf-8") as fh:
-            return fh.readline().strip()
+            return fh.read()
     except OSError:
         return ""
 
@@ -76,7 +76,7 @@ def main():
         pass
     try:
         cmd = _orig(cache)
-        if cmd:
+        if cmd.strip():
             res = subprocess.run(["/bin/sh", "-c", cmd], input=data,
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             sys.stdout.buffer.write(res.stdout)

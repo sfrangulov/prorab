@@ -2,6 +2,7 @@
 """Install, remove and inspect the optional limits sensor (status-line tap)."""
 import json
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -53,16 +54,18 @@ def _plan(settings, tap):
 
 def install(settings, cache, tap):
     cfg, sl, old = _plan(settings, tap)
+    tap = shlex.quote(tap)
     if old == tap:
         return {"changed": False, "old": None, "new": tap, "backup": None}
     backup = _backup_path(settings)
-    shutil.copyfile(settings, backup)
+    shutil.copy2(settings, backup)
+    os.chmod(backup, os.stat(settings).st_mode & 0o777)
     os.makedirs(cache, exist_ok=True)
     state = {"had_statusline": "statusLine" in cfg, "statusLine": sl}
     _write_atomic(os.path.join(cache, STATE), json.dumps(state, ensure_ascii=False))
     orig = os.path.join(cache, ORIG)
     if isinstance(old, str) and old.strip():
-        _write_atomic(orig, old.splitlines()[0] + "\n" if old.splitlines() else "")
+        _write_atomic(orig, old)
     elif os.path.exists(orig):
         os.unlink(orig)
     if isinstance(sl, dict):
@@ -142,6 +145,7 @@ def main(argv):
         print(json.dumps(uninstall(settings, cache)))
         return 0
     _cfg, _sl, old = _plan(settings, tap)
+    tap = shlex.quote(tap)
     if old == tap:
         print("already installed; nothing to change")
         return 0

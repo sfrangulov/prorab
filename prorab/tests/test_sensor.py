@@ -1,0 +1,196 @@
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+SCRIPTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+)
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
+import sensor  # noqa: E402
+
+TAP = os.path.join(SCRIPTS_DIR, "statusline_tap.py")
+SENSOR_PY = os.path.join(SCRIPTS_DIR, "sensor.py")
+
+STATUS_LINE = {"type": "command", "command": "/home/user/.claude/statusline.sh",
+               "padding": 0, "refreshInterval": 60}
+
+
+class SensorCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.home = os.path.join(self.tmp, "home")
+        self.cache = os.path.join(self.tmp, "cache")
+        os.makedirs(os.path.join(self.home, ".claude"))
+        self.settings = os.path.join(self.home, ".claude", "settings.json")
+
+    def write_settings(self, obj):
+        with open(self.settings, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+
+    def read_settings(self):
+        with open(self.settings, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def backups(self):
+        d = os.path.dirname(self.settings)
+        return [f for f in os.listdir(d) if f.startswith("settings.prorab-backup-")]
+
+    def run_tap(self, stdin, orig=None, session=True):
+        env = dict(os.environ, HOME=self.home, PRORAB_CACHE=self.cache)
+        os.makedirs(self.cache, exist_ok=True)
+        if orig is not None:
+            with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
+                fh.write(orig + "\n")
+        return subprocess.run(["sh", "-c", TAP], input=stdin, env=env,
+                              capture_output=True)
+
+
+class TestSensor(SensorCase):
+    def base(self):
+        return {"theme": "dark", "statusLine": dict(STATUS_LINE), "z": [1, 2]}
+
+    def test_install_preserves_fields_and_backs_up(self):
+        self.write_settings(self.base())
+        with open(self.settings, "rb") as fh:
+            before = fh.read()
+        sensor.install(self.settings, self.cache, TAP)
+        got = self.read_settings()
+        self.assertEqual(got["statusLine"]["command"], TAP)
+        for k in ("type", "padding", "refreshInterval"):
+            self.assertEqual(got["statusLine"][k], STATUS_LINE[k])
+        self.assertEqual(got["theme"], "dark")
+        self.assertEqual(list(got), ["theme", "statusLine", "z"])
+        b = self.backups()
+        self.assertEqual(len(b), 1)
+        with open(os.path.join(os.path.dirname(self.settings), b[0]), "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        with open(os.path.join(self.cache, "statusline.orig")) as fh:
+            self.assertEqual(fh.read().strip(), STATUS_LINE["command"])
+
+    def test_install_idempotent(self):
+        self.write_settings(self.base())
+        sensor.install(self.settings, self.cache, TAP)
+        with open(self.settings, "rb") as fh:
+            once = fh.read()
+        res = sensor.install(self.settings, self.cache, TAP)
+        with open(self.settings, "rb") as fh:
+            self.assertEqual(fh.read(), once)
+        self.assertEqual(len(self.backups()), 1)
+        self.assertFalse(res["changed"])
+        with open(os.path.join(self.cache, "statusline.orig")) as fh:
+            self.assertEqual(fh.read().strip(), STATUS_LINE["command"])
+
+    def test_uninstall_restores_exactly(self):
+        self.write_settings(self.base())
+        sensor.install(self.settings, self.cache, TAP)
+        sensor.uninstall(self.settings, self.cache)
+        self.assertEqual(self.read_settings()["statusLine"], STATUS_LINE)
+        self.assertEqual(list(self.read_settings()["statusLine"]), list(STATUS_LINE))
+        sensor.uninstall(self.settings, self.cache)  # idempotent
+        self.assertEqual(self.read_settings()["statusLine"], STATUS_LINE)
+
+    def test_uninstall_removes_statusline_if_none_before(self):
+        self.write_settings({"theme": "dark"})
+        sensor.install(self.settings, self.cache, TAP)
+        self.assertEqual(self.read_settings()["statusLine"]["command"], TAP)
+        sensor.uninstall(self.settings, self.cache)
+        self.assertEqual(self.read_settings(), {"theme": "dark"})
+        self.assertEqual(os.listdir(self.cache) if os.path.isdir(self.cache) else [], [])
+
+    def test_uninstall_removes_usage_dir(self):
+        self.write_settings(self.base())
+        sensor.install(self.settings, self.cache, TAP)
+        self.run_tap(json.dumps({"session_id": "s1"}).encode())
+        self.assertTrue(os.path.isdir(os.path.join(self.cache, "usage")))
+        sensor.uninstall(self.settings, self.cache)
+        self.assertFalse(os.path.exists(os.path.join(self.cache, "usage")))
+
+    def test_status(self):
+        self.write_settings(self.base())
+        self.assertFalse(sensor.status(self.cache, 300)["installed"])
+        sensor.install(self.settings, self.cache, TAP)
+        st = sensor.status(self.cache, 300)
+        self.assertTrue(st["installed"])
+        self.assertFalse(st["fresh"])
+        self.assertEqual(st["sessions"], 0)
+        self.run_tap(json.dumps({"session_id": "s1"}).encode())
+        st = sensor.status(self.cache, 300)
+        self.assertTrue(st["fresh"])
+        self.assertEqual(st["sessions"], 1)
+        self.assertLess(st["age_s"], 60)
+
+    def test_tap_passes_output_through(self):
+        data = json.dumps({"session_id": "s1", "x": 1}).encode()
+        r = self.run_tap(data, orig="printf X")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, b"X")
+        with open(os.path.join(self.cache, "usage", "s1.json"), "rb") as fh:
+            self.assertEqual(fh.read(), data)
+
+    def test_tap_passes_stdin_to_orig(self):
+        data = json.dumps({"session_id": "s1"}).encode()
+        r = self.run_tap(data, orig="cat; exit 3")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, data)
+
+    def test_tap_per_session_files_and_cleanup(self):
+        self.run_tap(json.dumps({"session_id": "a"}).encode())
+        self.run_tap(json.dumps({"session_id": "b"}).encode())
+        usage = os.path.join(self.cache, "usage")
+        self.assertEqual(sorted(os.listdir(usage)), ["a.json", "b.json"])
+        old = os.path.join(usage, "old.json")
+        with open(old, "w") as fh:
+            fh.write("{}")
+        t = time.time() - 90000
+        os.utime(old, (t, t))
+        self.run_tap(json.dumps({"session_id": "a"}).encode())
+        self.assertEqual(sorted(os.listdir(usage)), ["a.json", "b.json"])
+
+    def test_tap_without_orig_prints_nothing(self):
+        r = self.run_tap(json.dumps({"session_id": "s1"}).encode())
+        self.assertEqual((r.returncode, r.stdout), (0, b""))
+
+    def test_tap_bad_input_still_runs_orig(self):
+        r = self.run_tap(b"not json", orig="printf Y")
+        self.assertEqual((r.returncode, r.stdout), (0, b"Y"))
+        self.assertFalse(os.path.exists(os.path.join(self.cache, "usage")))
+        r = self.run_tap(b'{"session_id": "../evil"}', orig="printf Y")
+        self.assertEqual(r.stdout, b"Y")
+        self.assertFalse(os.path.exists(os.path.join(self.cache, "evil.json")))
+
+    def test_cli_install_requires_yes(self):
+        self.write_settings(self.base())
+        with open(self.settings, "rb") as fh:
+            before = fh.read()
+        env = dict(os.environ, HOME=self.home, PRORAB_CACHE=self.cache)
+        r = subprocess.run([sys.executable, SENSOR_PY, "install"], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn(STATUS_LINE["command"], r.stdout)
+        with open(self.settings, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        self.assertEqual(self.backups(), [])
+        r = subprocess.run([sys.executable, SENSOR_PY, "install", "--yes"], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self.read_settings()["statusLine"]["command"], TAP)
+        r = subprocess.run([sys.executable, SENSOR_PY, "status"], env=env,
+                           capture_output=True, text=True)
+        self.assertTrue(json.loads(r.stdout)["installed"])
+        r = subprocess.run([sys.executable, SENSOR_PY, "uninstall"], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self.read_settings()["statusLine"], STATUS_LINE)
+
+
+if __name__ == "__main__":
+    unittest.main()

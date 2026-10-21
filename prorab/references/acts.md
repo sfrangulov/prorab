@@ -21,3 +21,21 @@
 ```
 [customer decision] drop
 ```
+
+## Message by file
+
+```
+Read the file {path} and do what it says.
+```
+
+## Continue
+
+```
+Continue from where you stopped.
+```
+
+## Fix the report
+
+```
+The stage report failed the check; the mismatches are listed in the file {path}. Fix the report or the work and send the report again.
+```

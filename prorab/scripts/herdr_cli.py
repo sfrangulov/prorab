@@ -263,12 +263,14 @@ def _wait_args(timeout_ms, untils=("working", "done", "blocked")):
 
 
 def send(name, text, timeout_ms=None):
-    """Send one line to a crew. "accepted" | "blocked" | "stalled" | "unconfirmed".
+    """Send one line to a crew (multi-line text raises ValueError). "accepted" | "blocked" | "stalled" | "unconfirmed".
 
     The text is sent once and never re-sent; nothing is pressed afterwards. There is no
     `--until idle`: the agent is idle before the prompt, so a swallowed Enter would read
     as delivery.
     """
+    if "\n" in text:
+        raise ValueError("send takes one line; a multi-line message goes by file")
     ms = _send_timeout_ms(timeout_ms)
     try:
         data = run(["agent", "prompt", name, text, "--wait"] + _wait_args(ms),

@@ -193,6 +193,12 @@ class TestSend(FakeBase):
                          [c for c in self.calls() if c.startswith("agent prompt")])
         self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
 
+    def test_send_refuses_multiline(self):
+        for text in ("one\ntwo", "line\n"):
+            with self.assertRaises(ValueError):
+                herdr_cli.send("a1", text)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "calls.log")))
+
     def test_send_stalled(self):
         self.route("agent prompt a1", err("agent_prompt_stalled"), exit_code=1)
         self.assertEqual(herdr_cli.send("a1", "hi"), "stalled")

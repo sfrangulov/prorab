@@ -70,6 +70,14 @@ class TestTranscript(unittest.TestCase):
              "output": 1415, "messages": 2},
         )
 
+    def test_usage_totals_dedups_by_message_id(self):
+        # three lines share one id (last usage wins), one more id
+        self.assertEqual(
+            transcript.usage_totals(os.path.join(FIX, "session_multiline.jsonl")),
+            {"input": 6, "cache_creation": 20, "cache_read": 200,
+             "output": 47, "messages": 2},
+        )
+
     def test_find_transcript_glob_fallback(self):
         with tempfile.TemporaryDirectory() as home:
             d = os.path.join(home, ".claude", "projects", "-other-slug")

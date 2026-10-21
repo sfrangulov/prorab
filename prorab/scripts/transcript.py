@@ -89,11 +89,19 @@ def last_text(path):
 
 
 def usage_totals(path):
-    t = {"input": 0, "cache_creation": 0, "cache_read": 0, "output": 0, "messages": 0}
+    """Sum usage once per API message: lines sharing message.id count once (last wins)."""
+    by_id = {}
+    anon = []
     for msg in _assistant_entries(path):
         usage = msg.get("usage")
         if not isinstance(usage, dict):
             continue
+        if msg.get("id"):
+            by_id[msg["id"]] = usage
+        else:
+            anon.append(usage)
+    t = {"input": 0, "cache_creation": 0, "cache_read": 0, "output": 0, "messages": 0}
+    for usage in list(by_id.values()) + anon:
         t["input"] += int(usage.get("input_tokens") or 0)
         t["cache_creation"] += int(usage.get("cache_creation_input_tokens") or 0)
         t["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)

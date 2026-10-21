@@ -5,6 +5,7 @@ Every bd call runs with BEADS_DIR set (default ~/projects/prorab/.beads, overrid
 with PRORAB_BEADS_DIR) and with the journal's parent directory as cwd.
 """
 import argparse
+import datetime
 import json
 import os
 import subprocess
@@ -18,6 +19,7 @@ import _defaults  # noqa: E402
 ACT_KINDS = ("acceptance", "handover", "shift", "answer")
 WORK_ORDER_LABEL = "prorab:work-order"
 SPENT_KEYS = ("sessions", "runs", "tokens")
+ESTIMATE_KEYS = ("usd", "heavy_runs_per_stage")
 
 
 class JournalError(Exception):
@@ -98,7 +100,24 @@ def _kv_int(key, default=0):
 
 # ---- наряды and stages ------------------------------------------------------
 
+def _check_estimate(estimate):
+    est = dict(estimate or {})
+    unknown = sorted(set(est) - set(ESTIMATE_KEYS))
+    if unknown:
+        raise ValueError("unknown estimate key %s (expected %s)" % (
+            ", ".join(unknown), ", ".join(ESTIMATE_KEYS)))
+    usd = est.get("usd")
+    if isinstance(usd, bool) or not isinstance(usd, (int, float)) or not usd > 0:
+        raise ValueError("estimate needs usd > 0")
+    runs = est.get("heavy_runs_per_stage")
+    if runs is not None and (isinstance(runs, bool) or not isinstance(runs, int) or runs <= 0):
+        raise ValueError("estimate heavy_runs_per_stage must be an integer > 0")
+    return est
+
+
 def create_work_order(site, title, body, estimate, goal=None):
+    """Create a work order; `estimate` holds `usd` (> 0) and may hold `heavy_runs_per_stage`."""
+    est = _check_estimate(estimate)
     labels = "%s,site:%s" % (WORK_ORDER_LABEL, site)
     if goal:
         labels += ",goal:%s" % goal
@@ -106,9 +125,20 @@ def create_work_order(site, title, body, estimate, goal=None):
               "--silent"], json_out=False).strip()
     if not nid:
         raise JournalError("bd create returned no id")
-    for k, v in (estimate or {}).items():
-        kv_set("estimate.%s.%s" % (nid, k), v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+    kv_set("estimate.%s.usd" % nid, float(est["usd"]))
+    if "heavy_runs_per_stage" in est:
+        kv_set("estimate.%s.heavy_runs_per_stage" % nid, est["heavy_runs_per_stage"])
     return nid
+
+
+def estimate(work_order, kv=None):
+    """``{"usd": float | None, "heavy_runs_per_stage": int}`` of a work order."""
+    kv = kv_all() if kv is None else kv
+    usd = _kv_value(kv, "estimate.%s.usd" % work_order)
+    runs = _kv_value(kv, "estimate.%s.heavy_runs_per_stage" % work_order)
+    return {"usd": None if usd is None else float(usd),
+            "heavy_runs_per_stage": int(runs) if runs is not None
+            else machine(kv)["heavy_runs_per_stage"]}
 
 
 def create_stage(parent, title, body, blocked_by=(), files=(), duration_min=None, kind=None):
@@ -352,18 +382,24 @@ def acts(bead, kind=None):
 # ---- budget -----------------------------------------------------------------
 
 def budget(kv=None):
-    b = dict(_defaults.load()["budget"])
+    """``{"usd", "week_pp"}`` (floats): the defaults overlaid with kv ``budget.<key>``."""
+    b = {k: float(v) for k, v in _defaults.load()["budget"].items()}
     kv = kv_all() if kv is None else kv
     for k in list(b):
         v = kv.get("budget.%s" % k)
         if v not in (None, ""):
-            b[k] = int(v)
+            b[k] = float(v)
     return b
 
 
 def set_budget(**kw):
+    known = _defaults.load()["budget"]
+    unknown = sorted(set(kw) - set(known))
+    if unknown:
+        raise ValueError("unknown budget key %s (expected %s)" % (
+            ", ".join(unknown), ", ".join(known)))
     for k, v in kw.items():
-        kv_set("budget.%s" % k, v)
+        kv_set("budget.%s" % k, float(v))
 
 
 def machine(kv=None):
@@ -390,29 +426,263 @@ def spend(work_order, sessions=0, runs=0, tokens=0):
         kv_set("shift.spent.%s" % name, _kv_int("shift.spent.%s" % name) + n)
 
 
+def set_spent(work_order, usd):
+    """Record the latest computed total dollars of a work order (never an increment)."""
+    kv_set("spent.%s.usd" % work_order, float(usd))
+
+
 def shift_spent(kv=None):
     kv = kv_all() if kv is None else kv
-    return {k: int(kv.get("shift.spent.%s" % k) or 0) for k in SPENT_KEYS}
+    out = {k: int(kv.get("shift.spent.%s" % k) or 0) for k in SPENT_KEYS}
+    out["usd"] = float(kv.get("shift.spent.usd") or 0)
+    return out
 
 
-def over_budget(week_pp_now, kv=None):
+def over_budget(week_pp_now, spend=None, kv=None):
+    """Items over budget: ``usd``, ``week_pp``, ``estimate:<id>``, ``research:<key>``.
+
+    Without `spend` (the result of `shift_spend`) only ``week_pp`` can appear.
+    """
     b = budget(kv=kv)
-    over = []  # counts never count as budget; the dollar items come with 8c.4
+    over = []  # counts never count as budget
+    if spend is not None and spend["usd"] > b["usd"]:
+        over.append("usd")
     start = kv_get("shift.week_start") if kv is None else _kv_value(kv, "shift.week_start")
     if week_pp_now is not None and start is not None:
         if float(week_pp_now) - float(start) > b["week_pp"]:
             over.append("week_pp")
+    if spend is not None:
+        over += ["estimate:%s" % n for n, w in spend["work_orders"].items() if w["over"]]
+        over += ["research:%s" % k for k, r in spend["research"].items() if r["over"]]
     return over
 
 
-def begin_shift(week_pct):
-    for k in SPENT_KEYS:
+def _iso_ts(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
+def _last_acceptance_ts(work_order):
+    """Time of the last `acceptance` act on the work order or on any of its stages."""
+    beads = [work_order] + [c["id"] for c in bd(["list", "--parent", work_order, "--all",
+                                                 "--limit", "0"])]
+    best = None
+    for bead in beads:
+        for c in bd(["comments", bead]) or []:
+            if c.get("text", "").startswith("[act:acceptance]"):
+                ts = _iso_ts(c.get("created_at"))
+                if ts is not None and (best is None or ts > best):
+                    best = ts
+    return best
+
+
+def _closed_at(work_order):
+    """When the work-order bead was closed (unix time): bd's `closed_at`, else the time of
+    its last acceptance act; None when it is open or no time is known."""
+    item = _show(work_order)
+    if item.get("status") != "closed":
+        return None
+    ts = _iso_ts(item.get("closed_at"))
+    return ts if ts is not None else _last_acceptance_ts(work_order)
+
+
+def begin_shift(week_pct, foreman_session=None):
+    for k in SPENT_KEYS + ("usd",):
         kv_set("shift.spent.%s" % k, 0)
     if week_pct is None:
         kv_clear("shift.week_start")
     else:
         kv_set("shift.week_start", week_pct)
     kv_set("shift.budget", json.dumps(budget()))
+    started = time.time()
+    kv_set("shift.started_at", started)
+    if foreman_session:
+        kv_set("shift.foreman_sessions", foreman_session)
+    else:
+        kv_clear("shift.foreman_sessions")
+    # R44: read once per shift, so the monitor's spend recomputation never starts bd
+    closed = []
+    for n, rec in issues().items():
+        if rec.get("worktree"):
+            at = _closed_at(n)
+            if at is not None and at < started:
+                closed.append(n)
+    if closed:
+        kv_set("shift.closed_before", ",".join(sorted(closed)))
+    else:
+        kv_clear("shift.closed_before")
+
+
+def _foreman_sessions(kv):
+    v = _kv_value(kv, "shift.foreman_sessions")
+    return [x for x in v.split(",") if x] if v else []
+
+
+def add_foreman_session(session_id):
+    """A foreman handover adds the new session; the shift's spend is kept."""
+    names = _foreman_sessions(kv_all())
+    if session_id not in names:
+        kv_set("shift.foreman_sessions", ",".join(names + [session_id]))
+
+
+# ---- research items and spend in dollars --------------------------------------------
+
+def research_begin(key, estimate_usd, session_id, run_cwd=None):
+    if isinstance(estimate_usd, bool) or not isinstance(estimate_usd, (int, float)) \
+            or not estimate_usd > 0:
+        raise ValueError("research estimate needs usd > 0")
+    kv_set("research.%s" % key, json.dumps(
+        {"estimate_usd": float(estimate_usd), "since": time.time(),
+         "session": session_id, "run_cwd": run_cwd}, ensure_ascii=False))
+
+
+def research_items(kv=None):
+    kv = kv_all() if kv is None else kv
+    out = {}
+    for k, v in kv.items():
+        if not k.startswith("research."):
+            continue
+        try:
+            rec = json.loads(v)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            out[k[len("research."):]] = rec
+    return out
+
+
+def _first_ts(path):
+    import transcript
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                ts = transcript._parse_ts(entry.get("timestamp")) if isinstance(entry, dict) else None
+                if ts is not None:
+                    return ts
+    except OSError:
+        pass
+    return None
+
+
+def _attribute_research(items, foreman_subagents, foreman_files, home):
+    """``{key: [files]}``: each candidate file goes to the latest item registered before the
+    file's first entry. Candidates: a foreman subagent file for the items of its session; for
+    an item with `run_cwd`, a session file of that directory that is not a foreman file."""
+    import transcript
+    files = {k: [] for k in items}
+    by_since = sorted(items.items(), key=lambda kv_: kv_[1].get("since") or 0)
+
+    def give(path, eligible):
+        ts = _first_ts(path)
+        if ts is None:
+            return
+        owner = None
+        for key, rec in by_since:
+            if key in eligible and (rec.get("since") or 0) <= ts:
+                owner = key
+        if owner is not None:
+            files[owner].append(path)
+    for session, paths in foreman_subagents.items():
+        eligible = {k for k, rec in items.items() if rec.get("session") == session}
+        for path in paths:
+            give(path, eligible)
+    for cwd in {rec.get("run_cwd") for rec in items.values() if rec.get("run_cwd")}:
+        eligible = {k for k, rec in items.items() if rec.get("run_cwd") == cwd}
+        for path in transcript.worktree_files(cwd, home):
+            if path not in foreman_files:
+                give(path, eligible)
+    return files
+
+
+def shift_spend(d, now=None, kv=None, home=None):
+    """Dollars of the shift: work orders, research items and the foreman; no `bd` process
+    when `kv` is given. A message counts once, in the first category that holds it."""
+    import transcript
+    kv = kv_all() if kv is None else kv
+    start = _kv_value(kv, "shift.started_at")
+    since = float(start) if start is not None else None
+    skipped = set((_kv_value(kv, "shift.closed_before") or "").split(","))
+    seen = {}
+    out = {"since": since, "usd": 0.0, "work_orders": {}, "research": {}, "foreman_usd": 0.0,
+           "at": now}
+    for n, rec in sorted(issues(kv=kv).items()):
+        if not rec.get("worktree") or n in skipped:
+            continue
+        files = transcript.worktree_files(rec["worktree"], home)
+        usd_shift = transcript.cost(files, d, since=since, seen=seen)["usd"]
+        before = 0.0 if since is None else transcript.cost(files, d, until=since)["usd"]
+        est = estimate(n, kv)["usd"]
+        total = usd_shift + before
+        out["work_orders"][n] = {"usd_shift": usd_shift, "usd_total": total,
+                                 "estimate_usd": est, "over": est is not None and total > est}
+        out["usd"] += usd_shift
+    foreman_main, foreman_subs = [], {}
+    for session in _foreman_sessions(kv):
+        path = transcript.find_transcript("", session, home)
+        if path is None:
+            continue
+        foreman_main.append(path)
+        foreman_subs[session] = transcript.session_cost_files(path)[1:]
+    items = research_items(kv)
+    foreman_files = set(foreman_main) | {p for ps in foreman_subs.values() for p in ps}
+    taken = _attribute_research(items, foreman_subs, foreman_files, home)
+    for key, rec in sorted(items.items()):
+        usd = transcript.cost(taken[key], d, since=since, seen=seen)["usd"]
+        est = rec.get("estimate_usd")
+        out["research"][key] = {"usd": usd, "estimate_usd": est,
+                                "over": est is not None and usd > est}
+        out["usd"] += usd
+    claimed = {p for ps in taken.values() for p in ps}
+    rest = foreman_main + [p for ps in foreman_subs.values() for p in ps if p not in claimed]
+    out["foreman_usd"] = transcript.cost(rest, d, since=since, seen=seen)["usd"]
+    out["usd"] += out["foreman_usd"]
+    return out
+
+
+def _rate_text(rate):
+    per = rate.get("usd_per_pp")
+    if per is None:
+        return "unknown"
+    if rate.get("source") == "estimated":
+        return "%.2f $/pp (estimated over %d intervals)" % (per, rate.get("intervals", 0))
+    return "%.2f $/pp (%s)" % (per, rate.get("source", "default"))
+
+
+def spend_block(spend, rates, work_order=None, kv=None):
+    """The `Spend:` block appended to stage acts and the foreman's handover act."""
+    import limits
+    kv = kv_all() if kv is None else kv
+    lines = ["Spend:"]
+    if work_order:
+        w = spend.get("work_orders", {}).get(work_order) or {}
+        usd = w.get("usd_total", 0.0)
+        est = w.get("estimate_usd", estimate(work_order, kv)["usd"])
+        line = "- work order %s: $%.2f" % (work_order, usd)
+        if est is not None:
+            line += " of $%.2f estimated" % est
+        parts = []
+        for label, key in (("window", "five_hour"), ("week", "seven_day")):
+            pp = limits.to_pp(usd, rates[key])
+            if pp is not None:
+                parts.append("%.2f pp of the %s" % (pp, label))
+        if parts:
+            line += " (%s)" % ", ".join(parts)
+        lines.append(line)
+    lines.append("- shift: $%.2f of $%.2f budget" % (spend.get("usd", 0.0), budget(kv)["usd"]))
+    lines.append("- window rate: " + _rate_text(rates["five_hour"]))
+    lines.append("- week rate: " + _rate_text(rates["seven_day"]))
+    return "\n".join(lines)
 
 
 # ---- cycle counters, one push per gate, site passport, issue records ---------
@@ -506,9 +776,9 @@ def issue_set(work_order, state, **fields):
     kv_set("issue.%s" % work_order, json.dumps(rec, ensure_ascii=False))
 
 
-def issues(state=None):
+def issues(state=None, kv=None):
     out = {}
-    for k, v in kv_all().items():
+    for k, v in (kv_all() if kv is None else kv).items():
         if not k.startswith("issue."):
             continue
         try:
@@ -598,8 +868,8 @@ def main(argv=None):
     sub.add_parser("ensure")
     p = sub.add_parser("work-order")
     p.add_argument("site"); p.add_argument("title")
-    p.add_argument("--body", default=""); p.add_argument("--estimate", action="append", default=[])
-    p.add_argument("--goal")
+    p.add_argument("--body", default=""); p.add_argument("--estimate-usd", type=float, required=True)
+    p.add_argument("--heavy-runs", type=int); p.add_argument("--goal")
     p = sub.add_parser("stage")
     p.add_argument("parent"); p.add_argument("title")
     p.add_argument("--body", default=""); p.add_argument("--blocked-by", action="append", default=[])
@@ -634,7 +904,13 @@ def main(argv=None):
     p = sub.add_parser("over")
     p.add_argument("--week-pp", type=float)
     p = sub.add_parser("shift-begin")
-    p.add_argument("--week-pct", type=float)
+    p.add_argument("--week-pct", type=float); p.add_argument("--foreman-session")
+    sub.add_parser("foreman-session").add_argument("session")
+    p = sub.add_parser("research")
+    p.add_argument("key"); p.add_argument("--estimate-usd", type=float, required=True)
+    p.add_argument("--session", required=True); p.add_argument("--run-cwd")
+    p = sub.add_parser("shift-spend")
+    p.add_argument("--week-pp", type=float)
     p = sub.add_parser("lock")
     p.add_argument("pane_id")
     p = sub.add_parser("wait")
@@ -661,7 +937,14 @@ def main(argv=None):
         return _emit({"ok": True})
     ensure_db()
     if a.cmd == "work-order":
-        return _emit({"id": create_work_order(a.site, a.title, a.body, _pairs(a.estimate), goal=a.goal)})
+        est = {"usd": a.estimate_usd}
+        if a.heavy_runs is not None:
+            est["heavy_runs_per_stage"] = a.heavy_runs
+        try:
+            nid = create_work_order(a.site, a.title, a.body, est, goal=a.goal)
+        except ValueError as e:
+            raise SystemExit(str(e))
+        return _emit({"id": nid})
     if a.cmd == "stage":
         return _emit({"id": create_stage(
             a.parent, a.title, a.body, a.blocked_by, a.file, a.duration, a.kind)})
@@ -697,9 +980,12 @@ def main(argv=None):
     if a.cmd == "acts":
         return _emit(acts(a.bead, a.kind))
     if a.cmd == "budget":
-        kw = {k: int(v) for k, v in _pairs(a.set).items()}
+        kw = {k: float(v) for k, v in _pairs(a.set).items()}
         if kw:
-            set_budget(**kw)
+            try:
+                set_budget(**kw)
+            except ValueError as e:
+                raise SystemExit(str(e))
         return _emit(budget())
     if a.cmd == "machine":
         kw = {k: int(v) for k, v in _pairs(a.set).items()}
@@ -714,8 +1000,27 @@ def main(argv=None):
     if a.cmd == "over":
         return _emit(over_budget(a.week_pp))
     if a.cmd == "shift-begin":
-        begin_shift(a.week_pct)
+        begin_shift(a.week_pct, a.foreman_session)
         return _emit({"ok": True})
+    if a.cmd == "foreman-session":
+        add_foreman_session(a.session)
+        return _emit({"ok": True})
+    if a.cmd == "shift-spend":
+        sp = shift_spend(_defaults.load())
+        sp["over"] = over_budget(a.week_pp, sp)
+        return _emit(sp)
+    if a.cmd == "research":
+        kv = kv_all()
+        left = max(0.0, budget(kv)["usd"] - shift_spend(_defaults.load(), kv=kv)["usd"])
+        lifted = override(kv=kv) is not None  # R42: "ignore limits and finish" lifts the budget
+        if a.estimate_usd > left and not lifted:
+            _emit({"fits": False, "left_usd": left})
+            return 1
+        research_begin(a.key, a.estimate_usd, a.session, a.run_cwd)
+        res = {"fits": True, "left_usd": left}
+        if lifted:
+            res["override"] = True
+        return _emit(res)
     if a.cmd == "lock":
         got = acquire_active(a.pane_id)
         _emit({"acquired": got})

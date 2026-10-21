@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 SCRIPTS_DIR = os.path.join(
@@ -55,6 +56,10 @@ class JournalBase(unittest.TestCase):
             json.dump({"agent list": "agents.json"}, fh)
 
 
+def new_work_order(title="T", goal=None, usd=10, site="o"):
+    return journal.create_work_order(site, title, "b", {"usd": usd}, goal=goal)
+
+
 class TestJournal(JournalBase):
     def test_ensure_db_is_idempotent_and_local(self):
         journal.ensure_db()
@@ -64,9 +69,7 @@ class TestJournal(JournalBase):
             self.assertFalse(os.path.exists(os.path.join(self.pr, name)), name)
 
     def test_work_order_and_stage_ready_order(self):
-        n = journal.create_work_order("site1", "Наряд", "Тело", {"допуск": "да", "n": 3})
-        self.assertEqual(journal.kv_get("estimate.%s.допуск" % n), "да")
-        self.assertEqual(journal.kv_get("estimate.%s.n" % n), "3")
+        n = journal.create_work_order("site1", "Наряд", "Тело", {"usd": 12.5})
         s1 = journal.create_stage(n, "Этап 1", "b")
         s2 = journal.create_stage(n, "Этап 2", "b", blocked_by=[s1])
         ids = [i["id"] for i in journal.ready()]
@@ -78,14 +81,14 @@ class TestJournal(JournalBase):
         self.assertIn(s2, ids)
 
     def test_ready_ignores_foreign_beads(self):
-        n = journal.create_work_order("o", "T", "b", {})
+        n = new_work_order()
         other = journal.bd(["create", "alien", "-d", "x", "--silent"], json_out=False).strip()
         ids = [i["id"] for i in journal.ready()]
         self.assertIn(n, ids)
         self.assertNotIn(other, ids)
 
     def test_acts_roundtrip(self):
-        n = journal.create_work_order("o", "T", "b", {})
+        n = new_work_order()
         journal.add_act(n, "acceptance", "принято")
         journal.add_act(n, "shift", "смена 1")
         journal.add_act(n, "acceptance", "принято снова")
@@ -108,10 +111,11 @@ class TestJournal(JournalBase):
         self.assertEqual((m["parallel_ceiling"], m["heavy_slots"]), (3, 2))
 
     def test_counts_never_over_budget(self):
-        n = journal.create_work_order("o", "T", "b", {})
+        n = new_work_order()
         journal.spend(n, sessions=31, runs=2, tokens=10)
         self.assertEqual(journal.over_budget(None), [])
-        self.assertEqual(journal.shift_spent(), {"sessions": 31, "runs": 2, "tokens": 10})
+        self.assertEqual(journal.shift_spent(),
+                         {"sessions": 31, "runs": 2, "tokens": 10, "usd": 0.0})
         self.assertEqual(journal.kv_get("spent.%s.sessions" % n), "31")
         journal.begin_shift(25.0)
         self.assertEqual(journal.over_budget(35.5), ["week_pp"])
@@ -125,10 +129,11 @@ class TestJournal(JournalBase):
         self.assertEqual(json.loads(journal.kv_get("shift.budget"))["usd"], 700)
 
     def test_begin_shift_resets_spent(self):
-        n = journal.create_work_order("o", "T", "b", {})
+        n = new_work_order()
         journal.spend(n, sessions=3)
         journal.begin_shift(None)
-        self.assertEqual(journal.shift_spent(), {"sessions": 0, "runs": 0, "tokens": 0})
+        self.assertEqual(journal.shift_spent(),
+                         {"sessions": 0, "runs": 0, "tokens": 0, "usd": 0.0})
 
     def test_lock_refuses_live_takes_dead(self):
         self.set_panes("p-a", "p-b")
@@ -151,7 +156,7 @@ class TestJournal(JournalBase):
         self.assertIsNone(journal.kv_get("prorab:handoff"))
 
     def test_wait_customer_blocks(self):
-        n = journal.create_work_order("o", "T", "b", {})
+        n = new_work_order()
         gate = journal.wait_customer(n, "нужен выбор")
         self.assertTrue(gate)
         self.assertNotIn(n, [i["id"] for i in journal.ready()])
@@ -160,7 +165,7 @@ class TestJournal(JournalBase):
         self.assertIn(n, [i["id"] for i in journal.ready()])
 
     def test_restarts_counter(self):
-        n = journal.create_work_order("o", "T", "b", {})
+        n = new_work_order()
         self.assertEqual(journal.bump_restarts(n), 1)
         self.assertEqual(journal.bump_restarts(n), 2)
         self.assertEqual(journal.kv_get("restarts.%s" % n), "2")
@@ -201,10 +206,10 @@ class TestJournal(JournalBase):
             with redirect_stdout(buf):
                 rc = journal.main(list(argv))
             return rc, json.loads(buf.getvalue())
-        rc, out = run("work-order", "o", "Заголовок", "--body", "т", "--estimate", "k=v")
+        rc, out = run("work-order", "o", "Заголовок", "--body", "т", "--estimate-usd", "10")
         self.assertEqual(rc, 0)
         nid = out["id"]
-        self.assertEqual(journal.kv_get("estimate.%s.k" % nid), "v")
+        self.assertEqual(journal.kv_get("estimate.%s.usd" % nid), "10.0")
         rc, out = run("ready")
         self.assertIn(nid, [i["id"] for i in out])
         self.set_panes("p-a")
@@ -216,7 +221,7 @@ class TestJournal(JournalBase):
     # ---- Amendment S: files, estimates, durations, override ----------------
 
     def test_stage_files_duration_and_actual(self):
-        n = journal.create_work_order("o", "T", "b", {})
+        n = new_work_order()
         s = journal.create_stage(n, "Этап", "b", files=["src/a.py", "docs/b.md"],
                                  duration_min=12.5, kind="tests")
         info = journal.stage_info(s)
@@ -241,7 +246,7 @@ class TestJournal(JournalBase):
         self.assertEqual((info["files"], info["duration_min"], info["kind"]), ([], None, None))
 
     def test_work_order_files_union(self):
-        n = journal.create_work_order("o", "T", "b", {}, goal="g1")
+        n = new_work_order("T", goal="g1")
         self.assertEqual(journal.work_order_files(n), [])
         journal.create_stage(n, "A", "b", files=["a.py", "common.py"])
         journal.create_stage(n, "B", "b", files=["common.py", "b.py"])
@@ -263,9 +268,9 @@ class TestJournal(JournalBase):
         # a goal without наряды does not expire the override
         journal.set_override("g1")
         self.assertIsNotNone(journal.override())
-        n1 = journal.create_work_order("o", "T1", "b", {}, goal="g1")
-        n2 = journal.create_work_order("o", "T2", "b", {}, goal="g1")
-        other = journal.create_work_order("o", "T3", "b", {}, goal="g2")
+        n1 = new_work_order("T1", goal="g1")
+        n2 = new_work_order("T2", goal="g1")
+        other = new_work_order("T3", goal="g2")
         s = journal.create_stage(n1, "S", "b")
         self.assertIsNotNone(journal.override())
         # stages inherit the goal label but are not наряды (--no-parent)
@@ -285,7 +290,7 @@ class TestJournal(JournalBase):
 
     def test_override_expires_when_stage_waits(self):
         journal.set_override("g1")
-        n = journal.create_work_order("o", "T", "b", {}, goal="g1")
+        n = new_work_order("T", goal="g1")
         s1 = journal.create_stage(n, "S1", "b")
         s2 = journal.create_stage(n, "S2", "b", blocked_by=[s1])
         s3 = journal.create_stage(n, "S3", "b")
@@ -318,7 +323,7 @@ class TestJournal(JournalBase):
             with redirect_stdout(buf):
                 rc = journal.main(list(argv))
             return rc, json.loads(buf.getvalue())
-        _, out = run("work-order", "o", "T", "--goal", "g1")
+        _, out = run("work-order", "o", "T", "--goal", "g1", "--estimate-usd", "10")
         nid = out["id"]
         _, out = run("stage", nid, "S", "--file", "a.py", "--file", "b.py",
                      "--duration", "20", "--kind", "docs")
@@ -338,9 +343,9 @@ class TestJournal(JournalBase):
         self.assertEqual(run("override", "get")[1], {"override": None})
 
     def test_graph_open_stages_and_ready_work_orders(self):
-        a = journal.create_work_order("o", "A", "b", {})
-        b = journal.create_work_order("o", "B", "b", {})
-        c = journal.create_work_order("o", "C", "b", {})
+        a = new_work_order("A")
+        b = new_work_order("B")
+        c = new_work_order("C")
         journal._run(["dep", "add", b, a])  # b is blocked by a
         journal._run(["dep", "add", c, b])
         sa1 = journal.create_stage(a, "A1", "b")
@@ -360,6 +365,258 @@ class TestJournal(JournalBase):
         journal.kv_set("crew.br-a.work_order", a)
         self.assertNotIn(a, journal.ready_work_orders())
         self.assertEqual(journal.working_work_orders(), [a])
+
+
+# ---- 8c.4: estimates, budget and spend in dollars -----------------------------------
+
+T0 = 1790000000.0
+OPUS = "claude-opus-5-5"
+
+
+def _iso(ts):
+    import datetime
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
+
+
+class TestJournalDollars(JournalBase):
+    def run_cli(self, *argv):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = journal.main(list(argv))
+        return rc, json.loads(buf.getvalue())
+
+    def write(self, cwd, session, msgs, sub=None):
+        """Synthetic transcript; msgs = [(message id, ts, usd)], priced as opus input tokens."""
+        import transcript
+        proj = os.path.join(self.home, ".claude", "projects", transcript.project_slug(cwd))
+        path = os.path.join(proj, session + ".jsonl")
+        if sub:
+            path = os.path.join(proj, session, "subagents", sub + ".jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            for mid, ts, usd in msgs:
+                fh.write(json.dumps({"type": "assistant", "cwd": cwd, "timestamp": _iso(ts),
+                                     "message": {"id": mid, "model": OPUS, "usage": {
+                                         "input_tokens": int(usd / 4.0 * 1000000),
+                                         "output_tokens": 0}}}) + "\n")
+        return path
+
+    def start(self, at=T0, foreman=None):
+        journal.begin_shift(None, foreman)
+        journal.kv_set("shift.started_at", at)
+
+    def spend(self, kv=None):
+        import _defaults
+        return journal.shift_spend(_defaults.load(), kv=kv or journal.kv_all(), home=self.home)
+
+    def test_work_order_estimate_usd(self):
+        n = journal.create_work_order("o", "T", "b", {"usd": 12.5, "heavy_runs_per_stage": 7})
+        self.assertEqual(journal.estimate(n), {"usd": 12.5, "heavy_runs_per_stage": 7})
+        m = new_work_order()
+        self.assertEqual(journal.estimate(m), {"usd": 10.0, "heavy_runs_per_stage": 20})
+        self.assertEqual(journal.estimate("wo-none"), {"usd": None, "heavy_runs_per_stage": 20})
+        for bad in ({}, {"usd": 0}, {"usd": -1}, {"usd": 5, "tokens": 3},
+                    {"usd": 5, "heavy_runs_per_stage": 0}, {"heavy_runs_per_stage": 3}):
+            with self.assertRaises(ValueError, msg=bad):
+                journal.create_work_order("o", "T", "b", bad)
+
+    def test_budget_usd_override(self):
+        journal.set_budget(usd=500.5, week_pp=7.5)
+        self.assertEqual(journal.budget(), {"usd": 500.5, "week_pp": 7.5})
+        with self.assertRaises(ValueError):
+            journal.set_budget(tokens=5)
+        rc, out = self.run_cli("budget", "--set", "usd=12.5", "--set", "week_pp=2.5")
+        self.assertEqual((rc, out), (0, {"usd": 12.5, "week_pp": 2.5}))
+
+    def test_shift_spend_attributes_by_worktree(self):
+        a, b = new_work_order("A", usd=10), new_work_order("B", usd=10)
+        journal.issue_set(a, "issued", worktree="/home/user/projects/demo-app-a")
+        journal.issue_set(b, "issued", worktree="/home/user/projects/demo-app-b")
+        self.start()
+        self.write("/home/user/projects/demo-app-a", "s1", [("m1", T0 - 600, 3.0), ("m2", T0 + 60, 2.0)])
+        self.write("/home/user/projects/demo-app-b", "s2", [("m3", T0 + 90, 4.0)])
+        sp = self.spend()
+        self.assertAlmostEqual(sp["work_orders"][a]["usd_shift"], 2.0)
+        self.assertAlmostEqual(sp["work_orders"][a]["usd_total"], 5.0)
+        self.assertAlmostEqual(sp["work_orders"][b]["usd_shift"], 4.0)
+        self.assertEqual((sp["work_orders"][a]["estimate_usd"], sp["work_orders"][a]["over"]), (10.0, False))
+        self.assertAlmostEqual(sp["usd"], 6.0)
+        self.assertEqual(sp["since"], T0)
+
+    def test_research_items_by_start_time(self):
+        self.start(foreman="fs1")
+        own = "/home/user/projects/demo-app"
+        self.write(own, "fs1", [("f1", T0 + 10, 1.0)])
+        self.write(own, "fs1", [("s1", T0 + 50, 0.5)], sub="agent-1")
+        self.write(own, "fs1", [("s2", T0 + 150, 2.0)], sub="agent-2")
+        self.write(own, "fs1", [("s3", T0 + 250, 3.0)], sub="agent-3")
+        self.write(own, "fs1", [("s4", T0 + 260, 4.0)], sub="agent-4")
+        self.write("/home/user/projects/demo-app-r", "run1", [("r1", T0 + 310, 5.0)])
+        for key, since, est, cwd in (("a", 100, 1.5, None), ("b", 200, 20.0, None),
+                                     ("c", 300, 4.0, "/home/user/projects/demo-app-r")):
+            journal.research_begin(key, est, "fs1", cwd)
+            rec = journal.research_items()[key]
+            self.assertEqual((rec["estimate_usd"], rec["session"], rec["run_cwd"]), (est, "fs1", cwd))
+            rec["since"] = T0 + since
+            journal.kv_set("research.%s" % key, json.dumps(rec))
+        sp = self.spend()
+        self.assertAlmostEqual(sp["research"]["a"]["usd"], 2.0)
+        self.assertTrue(sp["research"]["a"]["over"])
+        self.assertAlmostEqual(sp["research"]["b"]["usd"], 7.0)
+        self.assertFalse(sp["research"]["b"]["over"])
+        self.assertAlmostEqual(sp["research"]["c"]["usd"], 5.0)
+        self.assertAlmostEqual(sp["foreman_usd"], 1.5)
+        self.assertAlmostEqual(sp["usd"], 15.5)
+
+    def test_over_budget_items(self):
+        journal.begin_shift(25.0)
+        spend = {"usd": 360.0,
+                 "work_orders": {"wo-1": {"over": True}, "wo-2": {"over": False}},
+                 "research": {"k": {"over": True}, "j": {"over": False}}}
+        self.assertEqual(journal.over_budget(35.5, spend),
+                         ["usd", "week_pp", "estimate:wo-1", "research:k"])
+        spend = {"usd": 350.0, "work_orders": {}, "research": {}}
+        self.assertEqual(journal.over_budget(35.0, spend), [])
+        self.assertEqual(journal.over_budget(35.5), ["week_pp"])
+
+    def test_foreman_handover_keeps_shift_spend(self):
+        own = "/home/user/projects/demo-app"
+        self.start(foreman="fs1")
+        self.write(own, "fs1", [("f1", T0 + 10, 1.0)])
+        self.write(own, "fs2", [("f2", T0 + 20, 2.0)])
+        journal.kv_set("shift.spent.usd", 3.0)
+        self.assertAlmostEqual(self.spend()["foreman_usd"], 1.0)
+        journal.add_foreman_session("fs2")
+        self.assertEqual(journal.kv_get("shift.foreman_sessions"), "fs1,fs2")
+        self.assertEqual(journal.kv_get("shift.started_at"), str(T0))
+        self.assertEqual(journal.shift_spent()["usd"], 3.0)
+        self.assertAlmostEqual(self.spend()["foreman_usd"], 3.0)
+
+    def test_spend_block_names_rate_source(self):
+        n = new_work_order(usd=30)
+        self.start()
+        spend = {"since": T0, "usd": 120.0, "foreman_usd": 0.0, "research": {},
+                 "work_orders": {n: {"usd_shift": 31.0, "usd_total": 31.0,
+                                     "estimate_usd": 30.0, "over": True}}}
+        rates = {"five_hour": {"usd_per_pp": 5.0, "source": "default", "intervals": 0},
+                 "seven_day": {"usd_per_pp": None, "source": "unknown", "intervals": 0}}
+        text = journal.spend_block(spend, rates, n)
+        self.assertTrue(text.startswith("Spend:"))
+        self.assertIn("5.00 $/pp (default)", text)
+        self.assertIn("week rate: unknown", text)
+        self.assertIn("$31.00 of $30.00", text)
+        self.assertIn("6.20 pp of the window", text)
+        self.assertIn("$120.00 of $350.00", text)
+        rates["seven_day"] = {"usd_per_pp": 12.0, "source": "estimated", "intervals": 3}
+        text = journal.spend_block(spend, rates, n)
+        self.assertIn("12.00 $/pp (estimated over 3 intervals)", text)
+        self.assertIn("2.58 pp of the week", text)
+
+    def test_cli_research_refuses_over_budget(self):
+        own = "/home/user/projects/demo-app"
+        self.start(foreman="fs1")
+        self.write(own, "fs1", [("f1", T0 + 10, 2.0)])
+        journal.set_budget(usd=10)
+        rc, out = self.run_cli("research", "big", "--estimate-usd", "15", "--session", "fs1")
+        self.assertEqual((rc, out["fits"], round(out["left_usd"], 2)), (1, False, 8.0))
+        self.assertEqual(journal.research_items(), {})
+        rc, out = self.run_cli("research", "ok", "--estimate-usd", "5", "--session", "fs1")
+        self.assertEqual((rc, out["fits"]), (0, True))
+        self.assertEqual(journal.research_items()["ok"]["estimate_usd"], 5.0)
+
+    def test_cli_research_override_lifts_refusal(self):
+        own = "/home/user/projects/demo-app"
+        self.start(foreman="fs1")
+        self.write(own, "fs1", [("f1", T0 + 10, 2.0)])
+        journal.set_budget(usd=10)
+        journal.set_override("g1")
+        rc, out = self.run_cli("research", "big", "--estimate-usd", "15", "--session", "fs1",
+                               "--run-cwd", "/home/user/projects/demo-app-r")
+        self.assertEqual((rc, out["fits"], out["override"], round(out["left_usd"], 2)),
+                         (0, True, True, 8.0))
+        self.assertEqual(journal.research_items()["big"]["run_cwd"], "/home/user/projects/demo-app-r")
+
+    def test_begin_shift_lists_work_orders_closed_before(self):
+        wt = "/home/user/projects/demo-app-%s"
+        closed, still_open, no_time, late, by_act = (new_work_order(t) for t in "CODLA")
+        for n in (closed, still_open, no_time, late, by_act):
+            journal.issue_set(n, "issued", worktree=wt % n)
+        no_issue = new_work_order("N")  # no worktree record: never a shift-spend item
+        for n in (closed, no_time, late, by_act, no_issue):
+            journal.bd(["close", n])
+        journal.add_act(by_act, "acceptance", "done")
+        real = journal._show
+
+        def patched(bead):
+            item = dict(real(bead))
+            if bead in (no_time, by_act):
+                item.pop("closed_at", None)
+            if bead == late:
+                item["closed_at"] = _iso(time.time() + 3600)
+            return item
+        journal._show = patched
+        self.addCleanup(setattr, journal, "_show", real)
+        journal.begin_shift(None, "fs1")
+        got = journal.kv_get("shift.closed_before").split(",")
+        self.assertEqual(sorted(got), sorted([closed, by_act]))
+        self.assertAlmostEqual(float(journal.kv_get("shift.started_at")), time.time(), delta=60)
+
+    def test_shift_spend_skips_work_orders_closed_before_shift(self):
+        import transcript
+        old, during, over = (new_work_order(t, usd=10) for t in "ODV")
+        wts = {n: "/home/user/projects/demo-app-%s" % t for n, t in ((old, "o"), (during, "d"), (over, "v"))}
+        for n, wt in wts.items():
+            journal.issue_set(n, "issued", worktree=wt)
+            self.write(wt, "s-" + n, [("m-" + n, T0 + 10, 11.0 if n != during else 1.0)])
+        self.start()
+        journal.kv_set("shift.closed_before", old)
+        asked = []
+        real = transcript.worktree_files
+        transcript.worktree_files = lambda wt, home=None: (asked.append(wt), real(wt, home))[1]
+        self.addCleanup(setattr, transcript, "worktree_files", real)
+        sp = self.spend()
+        self.assertNotIn(old, sp["work_orders"])
+        self.assertNotIn(wts[old], asked)
+        self.assertEqual(sorted(sp["work_orders"]), sorted([during, over]))
+        self.assertEqual(journal.over_budget(None, sp), ["estimate:%s" % over])
+
+    def test_snapshot_reads_no_bd_dollars(self):
+        n = new_work_order()
+        journal.issue_set(n, "issued", worktree="/home/user/projects/demo-app-a")
+        self.start(foreman="fs1")
+        self.write("/home/user/projects/demo-app-a", "s1", [("m1", T0 + 60, 2.0)])
+        journal.research_begin("k", 3.0, "fs1")
+        kv = journal.kv_all()
+        calls = []
+        real = journal._run
+
+        def counting(args, check=True):
+            calls.append(list(args))
+            return real(args, check)
+        journal._run = counting
+        self.addCleanup(setattr, journal, "_run", real)
+        self.assertEqual(journal.estimate(n, kv=kv)["usd"], 10.0)
+        self.assertEqual(journal.machine(kv=kv)["heavy_slots"], 2)
+        self.assertEqual(list(journal.research_items(kv=kv)), ["k"])
+        sp = self.spend(kv)
+        self.assertAlmostEqual(sp["work_orders"][n]["usd_shift"], 2.0)
+        self.assertEqual(journal.over_budget(None, sp, kv=kv), [])
+        self.assertEqual(calls, [])
+
+    def test_set_spent_is_latest_total(self):
+        journal.set_spent("wo-1", 4.5)
+        journal.set_spent("wo-1", 6.25)
+        self.assertEqual(journal.kv_get("spent.wo-1.usd"), "6.25")
+
+    def test_cli_shift_commands(self):
+        rc, _ = self.run_cli("shift-begin", "--week-pct", "20", "--foreman-session", "fs1")
+        self.assertEqual(rc, 0)
+        self.run_cli("foreman-session", "fs2")
+        self.assertEqual(journal.kv_get("shift.foreman_sessions"), "fs1,fs2")
+        rc, out = self.run_cli("shift-spend")
+        self.assertEqual((rc, out["usd"], out["over"]), (0, 0.0, []))
 
 
 if __name__ == "__main__":

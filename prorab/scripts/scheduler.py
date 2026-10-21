@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scheduler: how many crews may run at once, in what order to issue наряды, which
+"""Scheduler: how many crews may run at once, in what order to issue work orders, which
 5-hour-limit thresholds apply by day and by night.
 
 ``plan`` is what the prorab calls before issuing (the estimates in pp, checked); ``cap`` prints the current thresholds.
@@ -169,7 +169,7 @@ def machine_load():
 # ---- plan ----------------------------------------------------------------------------
 
 def work_order_durations(j, d, ids):
-    """Estimate of a наряд = the sum over its open stages."""
+    """Estimate of a work order = the sum over its open stages."""
     history = {}
     out = {}
     for n in ids:
@@ -218,7 +218,7 @@ def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None):
         used = fresh[-1][1] if fresh else None
     unknown = used is None
     if unknown and ov:
-        used = 0.0  # «игнорируй лимиты»: usage does not bound the crews
+        used = 0.0  # the customer's command 'ignore limits and finish': usage does not bound the crews
     graph = j.graph()
     ready = [n for n in j.ready_work_orders()]
     order = [n for n in critical_order(graph, work_order_durations(j, d, list(graph)))

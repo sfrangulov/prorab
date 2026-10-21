@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The prorab's journal on beads: наряды, stages, acts, kv, budget, the active-prorab lock.
+"""The foreman's journal on beads: work orders, stages, acts, kv, budget, the active-foreman lock.
 
 Every bd call runs with BEADS_DIR set (default ~/projects/prorab/.beads, override
 with PRORAB_BEADS_DIR) and with the journal's parent directory as cwd.
@@ -98,7 +98,7 @@ def _kv_int(key, default=0):
     return int(v) if v not in (None, "") else default
 
 
-# ---- наряды and stages ------------------------------------------------------
+# ---- work orders and stages ------------------------------------------------------
 
 def _check_estimate(estimate):
     est = dict(estimate or {})
@@ -142,7 +142,7 @@ def estimate(work_order, kv=None):
 
 
 def create_stage(parent, title, body, blocked_by=(), files=(), duration_min=None, kind=None):
-    """Create a stage under a наряд.
+    """Create a stage under a work order.
 
     Storage (bd 1.3.1): files / duration_min / started_at / actual_min live in the
     bead's `metadata` JSON object (bd update merges keys); kind is the label `type:<kind>`.
@@ -186,7 +186,7 @@ def stage_info(stage):
 
 
 def work_order_files(work_order):
-    """Union of the files of the наряд's stages, in first-seen order."""
+    """Union of the files of the work order's stages, in first-seen order."""
     out = []
     for child in bd(["list", "--parent", work_order, "--all", "--limit", "0"]):
         for f in _info(child)["files"]:
@@ -201,7 +201,7 @@ def start_stage(stage):
 
 
 def accept_stage(stage, act):
-    """Record the приёмка act and the actual duration (minutes), close the stage."""
+    """Record the acceptance act and the actual duration (minutes), close the stage."""
     started = stage_info(stage)["started_at"]
     if started is None:
         raise JournalError("stage %s was never started" % stage)
@@ -240,7 +240,7 @@ def _open_gate(item):
 
 
 def _work_order_settled(work_order_id):
-    """An open наряд is settled when it, or all of its open work, waits for the customer."""
+    """An open work order is settled when it, or all of its open work, waits for the customer."""
     if _open_gate(_show(work_order_id)):
         return True
     stages = [c for c in bd(["list", "--parent", work_order_id, "--all", "--limit", "0"])
@@ -264,7 +264,7 @@ def _work_order_settled(work_order_id):
 
 
 def _goal_done(goal):
-    """True when the goal has наряды and each is closed or waits for the customer."""
+    """True when the goal has work orders and each is closed or waits for the customer."""
     work_orders = bd(["list", "--label", WORK_ORDER_LABEL, "--label", "goal:%s" % goal,
                   "--no-parent", "--all", "--limit", "0"])
     if not work_orders:
@@ -308,7 +308,7 @@ def ready():
     return out
 
 
-# ---- the scheduler's view: наряды as units of issue ---------------------------------
+# ---- the scheduler's view: work orders as units of issue ---------------------------------
 
 def _open_work_orders():
     return [n for n in bd(["list", "--label", WORK_ORDER_LABEL, "--no-parent", "--limit", "0"])
@@ -316,7 +316,7 @@ def _open_work_orders():
 
 
 def graph():
-    """``{open наряд: [open наряды that block it]}`` (stage-level edges are not included)."""
+    """``{open work order: [open work orders that block it]}`` (stage-level edges are not included)."""
     items = _open_work_orders()
     ids = {n["id"] for n in items}
     out = {}
@@ -327,13 +327,13 @@ def graph():
 
 
 def open_stages(work_order):
-    """Ids of the наряд's stages that are not closed."""
+    """Ids of the work order's stages that are not closed."""
     return [c["id"] for c in bd(["list", "--parent", work_order, "--all", "--limit", "0"])
             if c.get("status") != "closed"]
 
 
 def working_work_orders():
-    """Наряды a registered crew is working on."""
+    """Work orders a registered crew is working on."""
     out = []
     for name in crews():
         n = kv_get("crew.%s.work_order" % name)
@@ -343,7 +343,7 @@ def working_work_orders():
 
 
 def ready_work_orders():
-    """Наряды with a ready stage (or ready themselves) and no crew working on them."""
+    """Work orders with a ready stage (or ready themselves) and no crew working on them."""
     busy = set(working_work_orders())
     out = []
     for it in ready():
@@ -790,10 +790,10 @@ def issues(state=None, kv=None):
     return out
 
 
-# ---- active-prorab lock -----------------------------------------------------
+# ---- active-foreman lock -----------------------------------------------------
 
 def acquire_active(pane_id):
-    """Take the active-prorab lock if free, own, handed off to us, or held by a dead pane."""
+    """Take the active-foreman lock if free, own, handed off to us, or held by a dead pane."""
     holder = kv_get("prorab:active")
     if holder is None or holder == pane_id:
         kv_set("prorab:active", pane_id)

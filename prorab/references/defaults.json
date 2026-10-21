@@ -1,0 +1,43 @@
+{
+  "context": {
+    "soft_pct": 60,
+    "soft_max_tokens": 500000,
+    "hard_pct": 80,
+    "windows": {
+      "claude-opus-5-5": 1000000
+    },
+    "unknown_window": 200000
+  },
+  "limits": {
+    "five_hour": {
+      "no_new_mass": 60,
+      "stop": 80
+    },
+    "seven_day": {
+      "notify": 50,
+      "dopusk_only": 70
+    },
+    "sensor_path": "~/.cache/prorab/usage.json",
+    "sensor_max_age_s": 300,
+    "message_patterns": [
+      "usage limit reached",
+      "limit will reset",
+      "approaching usage limit",
+      "you've used"
+    ]
+  },
+  "budget": {
+    "sessions": 30,
+    "runs": 200,
+    "week_pp": 10,
+    "parallel": 2,
+    "per_object": 1
+  },
+  "monitor": {
+    "interval_s": 90,
+    "heartbeat_s": 1200,
+    "hung_s": 1800,
+    "max_restarts": 2
+  },
+  "polish_cmd": null
+}

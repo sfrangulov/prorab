@@ -1,0 +1,4 @@
+.beads/
+logs/
+__pycache__/
+*.pyc

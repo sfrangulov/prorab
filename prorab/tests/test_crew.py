@@ -503,7 +503,7 @@ class TestSendState(CrewBase):
         self.assertEqual(crew.deliver("a1", "t", "N1"), "blocked")
 
     def test_state_and_summary(self):
-        self.write_transcript("/work", "sess-1", "готово")
+        self.write_transcript("/work", "sess-1", "done")
         self.route("agent list", ok({"agents": [agent_entry(status="working")]}))
         self.route("agent read a1 --source visible", "text · 2 shells\n")
         st = crew.state("a1")
@@ -515,7 +515,7 @@ class TestSendState(CrewBase):
         self.assertEqual(st["session_id"], "sess-1")
         self.assertEqual(st["cwd"], "/work")
         self.assertEqual(st["ctx"]["tokens"], 10 + 20 + 999 + 30)
-        self.assertEqual(crew.summary("a1"), "готово")
+        self.assertEqual(crew.summary("a1"), "done")
 
     def test_state_finds_agent_by_pane_and_reads_transcript_from_kv(self):
         self.write_transcript("/work", "sess-1", "x")
@@ -587,13 +587,13 @@ class TestHandover(CrewBase):
         super().setUp()
         self.wt = "/home/user/projects/demo-app/.claude/worktrees/prorab-N1"
         self.j.kv["crew.a1.worktree"] = self.wt
-        self.write_transcript("/work", "sess-1", "Акт: сделано A\nHANDOVER READY")
+        self.write_transcript("/work", "sess-1", "Act: done A\nHANDOVER READY")
         self.route("agent read a1 --source visible", "idle\n")
 
     def test_complete_handover_refuses_with_bg_shells(self):
         self.route("agent list", ok({"agents": [agent_entry()]}))
         self.route("agent read a1 --source visible", "bar · 1 shell\n")
-        r = crew.complete_handover("a1", "N1", "наряд", timeout_s=1, poll_s=0.01)
+        r = crew.complete_handover("a1", "N1", "work order", timeout_s=1, poll_s=0.01)
         self.assertEqual(r["status"], "bg_shells")
         self.assertEqual(self.j.act_log, [])
         for c in self.calls():
@@ -607,7 +607,7 @@ class TestHandover(CrewBase):
         self.route("pane run w:p9", ok({}))
         self.route("agent start a1", ok({}))
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
-        r = crew.complete_handover("a1", "N1", "Текст наряда", timeout_s=2, poll_s=0.01)
+        r = crew.complete_handover("a1", "N1", "Work order text", timeout_s=2, poll_s=0.01)
         self.assertEqual(r["status"], "restarted")
         calls = self.calls()
         i_exit = calls.index("agent prompt a1 /exit --wait --until working --until done --until blocked --timeout 60000")
@@ -620,12 +620,12 @@ class TestHandover(CrewBase):
         path = os.path.join(self.home, ".cache", "prorab", "work-orders", "N1-1.md")
         with open(path, encoding="utf-8") as fh:
             body = fh.read()
-        self.assertTrue(body.startswith("Текст наряда"))
-        self.assertIn("Акт: сделано A", body)
+        self.assertTrue(body.startswith("Work order text"))
+        self.assertIn("Act: done A", body)
         self.assertNotIn("HANDOVER READY", body)
         self.assertEqual(len(self.j.act_log), 1)
         self.assertEqual(self.j.act_log[0][:2], ("N1", "handover"))
-        self.assertTrue(self.j.act_log[0][2].startswith("Акт: сделано A"))
+        self.assertTrue(self.j.act_log[0][2].startswith("Act: done A"))
         self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
         self.assertEqual(self.j.set_spent_log, [("N1", 0.0)])
         self.assertIn("Spend:", self.j.act_log[0][2])
@@ -654,7 +654,7 @@ class TestHandover(CrewBase):
         return crew.complete_handover("a1", "N1", "t", timeout_s=2, poll_s=0.01)
 
     def test_act_missing_sends_nothing(self):
-        self.write_transcript("/work", "sess-1", "ещё работаю")
+        self.write_transcript("/work", "sess-1", "still working")
         self.route("agent list", ok({"agents": [agent_entry()]}))
         self.assertEqual(self.go(), {"status": "act_missing"})
         self.assertEqual(self.j.act_log, [])
@@ -737,7 +737,7 @@ class TestHandover(CrewBase):
         self.assertIn("?? dirty.txt", act)
         self.assertIn("add g file", act)
         self.assertIn("in_progress", act)
-        self.assertTrue(act.startswith("Акт: сделано A"))
+        self.assertTrue(act.startswith("Act: done A"))
 
     def test_no_exit_when_act_not_saved(self):
         self.restart_routes()
@@ -827,7 +827,7 @@ class TestGit(CrewBase):
         repo = self.make_repo()
         wt = self.add_worktree(repo, "N1", "prorab/N1")
         self.commit(wt, "g.txt", "1\n", "one")
-        self.j.add_act("N1", "answer", crew.DROP_MARKER + " (слова заказчика)")
+        self.j.add_act("N1", "answer", crew.DROP_MARKER + " (customer's words)")
         self.assertEqual(crew.cleanup(repo, "N1")["status"], "removed")
         self.assertFalse(os.path.exists(wt))
 
@@ -835,7 +835,7 @@ class TestGit(CrewBase):
         repo = self.make_repo()
         wt = self.add_worktree(repo, "N1", "prorab/N1")
         self.commit(wt, "g.txt", "1\n", "one")
-        for text in ("drop the unused column", "dropdown меню", "решение: drop"):
+        for text in ("drop the unused column", "dropdown menu", "decision: drop"):
             self.j.add_act("N1", "answer", text)
         self.assertEqual(crew.cleanup(repo, "N1"), {"status": "kept", "reason": "unmerged"})
         self.assertTrue(os.path.isdir(wt))
@@ -883,13 +883,13 @@ class TestAnswer(CrewBase):
         self.assertTrue(self.j.act_log[0][2].startswith("choice for crew a1: 2. "))
 
     def test_answer_moves_up_from_highlighted_option(self):
-        shifted = DIALOG.replace("❯ 1.", "  1.").replace("  3. Вариант C", "❯ 3. Вариант C")
+        shifted = DIALOG.replace("❯ 1.", "  1.").replace("  3. Option C", "❯ 3. Option C")
         self.route("agent read a1 --source visible", shifted)
         crew.answer("a1", choice=1)
         self.assertIn("agent send-keys a1 up up enter", self.calls())
 
     def test_answer_ignores_numbered_lines_above_dialog(self):
-        above = "Итоги:\n  1. первый\n  2. второй\n\n"
+        above = "Summary:\n  1. first\n  2. second\n\n"
         self.route("agent read a1 --source visible", above + DIALOG)
         crew.answer("a1", choice=3)
         self.assertIn("agent send-keys a1 down down enter", self.calls())
@@ -897,10 +897,10 @@ class TestAnswer(CrewBase):
     def test_answer_text_selects_type_something(self):
         self.route("agent read a1 --source visible", DIALOG)
         self.route("pane send-text w:p9", ok({}))
-        crew.answer("a1", text="свой ответ")
+        crew.answer("a1", text="own answer")
         calls = self.calls()
         i_nav = calls.index("agent send-keys a1 down down down")
-        i_txt = calls.index("pane send-text w:p9 свой ответ")
+        i_txt = calls.index("pane send-text w:p9 own answer")
         i_enter = calls.index("agent send-keys a1 enter")
         self.assertTrue(i_nav < i_txt < i_enter)
         self.assertTrue(self.j.act_log[0][2].startswith("answer to crew a1 (free text): "))

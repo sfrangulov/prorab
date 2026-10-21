@@ -155,7 +155,7 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(self._ap(burn_pp_per_h=0.0), 6)  # idle: no bound
 
     def test_allowed_parallel_override_keeps_machine_bounds(self):
-        # «игнорируй лимиты»: cap 100, the ceiling and the load bound still hold
+        # the customer's command 'ignore limits and finish': cap 100, the ceiling and the load bound still hold
         self.assertEqual(self._ap(cap_pct=100.0, used_pct=95.0), 6)
         self.assertEqual(self._ap(cap_pct=100.0, used_pct=95.0, load1=9.0), 2)
         self.assertEqual(self._ap(cap_pct=100.0, ready=50), 6)

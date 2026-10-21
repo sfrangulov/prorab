@@ -69,9 +69,9 @@ class TestJournal(JournalBase):
             self.assertFalse(os.path.exists(os.path.join(self.pr, name)), name)
 
     def test_work_order_and_stage_ready_order(self):
-        n = journal.create_work_order("site1", "Наряд", "Тело", {"usd": 12.5})
-        s1 = journal.create_stage(n, "Этап 1", "b")
-        s2 = journal.create_stage(n, "Этап 2", "b", blocked_by=[s1])
+        n = journal.create_work_order("site1", "Work order", "Body", {"usd": 12.5})
+        s1 = journal.create_stage(n, "Stage 1", "b")
+        s2 = journal.create_stage(n, "Stage 2", "b", blocked_by=[s1])
         ids = [i["id"] for i in journal.ready()]
         self.assertIn(n, ids)
         self.assertIn(s1, ids)
@@ -89,11 +89,11 @@ class TestJournal(JournalBase):
 
     def test_acts_roundtrip(self):
         n = new_work_order()
-        journal.add_act(n, "acceptance", "принято")
-        journal.add_act(n, "shift", "смена 1")
-        journal.add_act(n, "acceptance", "принято снова")
-        self.assertEqual(journal.acts(n, "acceptance"), ["принято", "принято снова"])
-        self.assertEqual(journal.acts(n, "shift"), ["смена 1"])
+        journal.add_act(n, "acceptance", "accepted")
+        journal.add_act(n, "shift", "shift 1")
+        journal.add_act(n, "acceptance", "accepted again")
+        self.assertEqual(journal.acts(n, "acceptance"), ["accepted", "accepted again"])
+        self.assertEqual(journal.acts(n, "shift"), ["shift 1"])
         self.assertEqual(len(journal.acts(n)), 3)
         self.assertTrue(journal.acts(n)[0].startswith("[act:acceptance]"))
         with self.assertRaises(ValueError):
@@ -157,10 +157,10 @@ class TestJournal(JournalBase):
 
     def test_wait_customer_blocks(self):
         n = new_work_order()
-        gate = journal.wait_customer(n, "нужен выбор")
+        gate = journal.wait_customer(n, "a choice is needed")
         self.assertTrue(gate)
         self.assertNotIn(n, [i["id"] for i in journal.ready()])
-        self.assertEqual(journal.acts(n, "answer"), ["нужен выбор"])
+        self.assertEqual(journal.acts(n, "answer"), ["a choice is needed"])
         journal.bd(["gate", "resolve", gate], json_out=False)
         self.assertIn(n, [i["id"] for i in journal.ready()])
 
@@ -183,8 +183,8 @@ class TestJournal(JournalBase):
 
     def test_kv_missing_and_roundtrip(self):
         self.assertIsNone(journal.kv_get("nope"))
-        journal.kv_set("a.b", "значение с пробелами")
-        self.assertEqual(journal.kv_get("a.b"), "значение с пробелами")
+        journal.kv_set("a.b", "value with spaces")
+        self.assertEqual(journal.kv_get("a.b"), "value with spaces")
 
     def test_cli_budget_set(self):
         import io
@@ -206,7 +206,7 @@ class TestJournal(JournalBase):
             with redirect_stdout(buf):
                 rc = journal.main(list(argv))
             return rc, json.loads(buf.getvalue())
-        rc, out = run("work-order", "o", "Заголовок", "--body", "т", "--estimate-usd", "10")
+        rc, out = run("work-order", "o", "Title", "--body", "b", "--estimate-usd", "10")
         self.assertEqual(rc, 0)
         nid = out["id"]
         self.assertEqual(journal.kv_get("estimate.%s.usd" % nid), "10.0")
@@ -222,7 +222,7 @@ class TestJournal(JournalBase):
 
     def test_stage_files_duration_and_actual(self):
         n = new_work_order()
-        s = journal.create_stage(n, "Этап", "b", files=["src/a.py", "docs/b.md"],
+        s = journal.create_stage(n, "Stage", "b", files=["src/a.py", "docs/b.md"],
                                  duration_min=12.5, kind="tests")
         info = journal.stage_info(s)
         self.assertEqual(info["files"], ["src/a.py", "docs/b.md"])
@@ -234,14 +234,14 @@ class TestJournal(JournalBase):
         journal.start_stage(s)
         self.assertEqual(journal.bd(["show", s])[0]["status"], "in_progress")
         self.assertIsNotNone(journal.stage_info(s)["started_at"])
-        mins = journal.accept_stage(s, "принято")
+        mins = journal.accept_stage(s, "accepted")
         self.assertGreater(mins, 0)
         self.assertEqual(journal.bd(["show", s])[0]["status"], "closed")
-        self.assertEqual(journal.acts(s, "acceptance"), ["принято"])
+        self.assertEqual(journal.acts(s, "acceptance"), ["accepted"])
         self.assertEqual(journal.stage_info(s)["actual_min"], mins)
         self.assertEqual(journal.durations("tests"), [mins])
         self.assertEqual(journal.durations("docs"), [])
-        plain = journal.create_stage(n, "Без полей", "b")
+        plain = journal.create_stage(n, "No fields", "b")
         info = journal.stage_info(plain)
         self.assertEqual((info["files"], info["duration_min"], info["kind"]), ([], None, None))
 
@@ -265,7 +265,7 @@ class TestJournal(JournalBase):
         self.assertIsNone(journal.kv_get("override.ignore_limits"))
 
     def test_override_expires_with_goal(self):
-        # a goal without наряды does not expire the override
+        # a goal without work orders does not expire the override
         journal.set_override("g1")
         self.assertIsNotNone(journal.override())
         n1 = new_work_order("T1", goal="g1")
@@ -273,14 +273,14 @@ class TestJournal(JournalBase):
         other = new_work_order("T3", goal="g2")
         s = journal.create_stage(n1, "S", "b")
         self.assertIsNotNone(journal.override())
-        # stages inherit the goal label but are not наряды (--no-parent)
+        # stages inherit the goal label but are not work orders (--no-parent)
         listed = journal.bd(["list", "--label", "goal:g1", "--no-parent", "--all", "--limit", "0"])
         self.assertEqual(sorted(i["id"] for i in listed), sorted([n1, n2]))
         self.assertIsNotNone(journal.override())  # n1 has an open stage, n2 is open
         journal.bd(["close", s])
         journal.bd(["close", n1])
         self.assertIsNotNone(journal.override())  # n2 still open
-        journal.wait_customer(n2, "нужен выбор")
+        journal.wait_customer(n2, "a choice is needed")
         self.assertIsNone(journal.override())  # closed + waiting for the customer
         self.assertIsNone(journal.kv_get("override.ignore_limits"))
         journal.set_override("g2")
@@ -296,7 +296,7 @@ class TestJournal(JournalBase):
         s3 = journal.create_stage(n, "S3", "b")
         journal.bd(["close", s3])
         self.assertIsNotNone(journal.override())
-        gate = journal.wait_customer(s1, "нужен выбор")  # on a STAGE, not the наряд
+        gate = journal.wait_customer(s1, "a choice is needed")  # on a STAGE, not the work order
         self.assertIsNone(journal.override())  # s2 is blocked by the waiting s1
         self.assertIsNone(journal.kv_get("override.ignore_limits"))
         # an open stage that does not wait keeps the override alive
@@ -358,7 +358,7 @@ class TestJournal(JournalBase):
         self.assertEqual(journal.open_stages(a), [sa2])
         journal._run(["close", c, "--force"])
         self.assertNotIn(c, journal.graph())
-        # a ready stage makes its наряд issuable; a working crew hides it
+        # a ready stage makes its work order issuable; a working crew hides it
         self.assertIn(a, journal.ready_work_orders())
         self.assertNotIn(b, journal.ready_work_orders())  # blocked by a
         journal.register_crew("br-a")

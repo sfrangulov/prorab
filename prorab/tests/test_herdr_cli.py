@@ -17,16 +17,16 @@ FAKES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fakes")
 
 DIALOG = """\
 ────────────────────────────────────────────────────────────────────────────────
- ☐ Выбор
+ ☐ Choice
 
-Какой вариант использовать?
+Which option should we use?
 
-❯ 1. Вариант A (Recommended)
-     Описание варианта A
-  2. Вариант B
-     Описание варианта B
-  3. Вариант C
-     Описание варианта C
+❯ 1. Option A (Recommended)
+     Description of option A
+  2. Option B
+     Description of option B
+  3. Option C
+     Description of option C
   4. Type something.
 ────────────────────────────────────────────────────────────────────────────────
   5. Chat about this
@@ -124,14 +124,20 @@ class TestParsing(unittest.TestCase):
 
     def test_choice_dialog_parses_options(self):
         self.assertEqual(herdr_cli.choice_dialog(DIALOG), [
-            "Вариант A (Recommended)", "Вариант B", "Вариант C",
+            "Option A (Recommended)", "Option B", "Option C",
+            "Type something.", "Chat about this"])
+
+    def test_choice_dialog_cyrillic_labels(self):
+        # crews work on sites whose screens may hold Russian: non-ASCII labels must parse
+        self.assertEqual(herdr_cli.choice_dialog(fixture("choice_dialog_cyrillic.txt")), [
+            "\u0412\u0430\u0440\u0438\u0430\u043d\u0442 A (Recommended)", "\u0412\u0430\u0440\u0438\u0430\u043d\u0442 B", "\u0412\u0430\u0440\u0438\u0430\u043d\u0442 C",
             "Type something.", "Chat about this"])
 
     def test_choice_dialog_ignores_numbered_lines_above(self):
-        above = "Итоги:\n  1. первый пункт\n  2. второй пункт\n\n"
+        above = "Summary:\n  1. first item\n  2. second item\n\n"
         st = herdr_cli.choice_state(above + DIALOG.replace("❯ 1.", "  1.")
-                                    .replace("  2. Вариант B", "❯ 2. Вариант B"))
-        self.assertEqual(st[0][0], "Вариант A (Recommended)")
+                                    .replace("  2. Option B", "❯ 2. Option B"))
+        self.assertEqual(st[0][0], "Option A (Recommended)")
         self.assertEqual(len(st[0]), 5)
         self.assertEqual(st[1], 1)
 

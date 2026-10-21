@@ -1,0 +1,7 @@
+● Ready for the next work order.
+
+────────────────────────────────────────────────────────────────────────────
+> Read the work order in /home/user/.cache/prorab/work-orders/N1.md and start
+────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 · xhigh │ ▓▓░░░░░░░░ 17.0% │ ⎇ main (+0,-0)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

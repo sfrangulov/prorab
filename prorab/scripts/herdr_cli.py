@@ -157,17 +157,23 @@ def consent_dialog(visible, tail_lines=None):
     return None
 
 
-_COMPOSER = re.compile(r"^[\s│┃║╭╰╮╯─━]*>(?: (.*))?$")
-_BOX_TRAIL = " \t│┃║╮╯─━"
+_COMPOSER = re.compile(r"^[❯>](?: (.*))?$")
+_COMPOSER_RULE = re.compile(r"^\s*[─━]{3,}\s*$")
+_CHOICE_ROW = re.compile(r"^\d+\.\s")
 
 
 def composer_text(visible, tail_lines=None):
-    """Text of Claude Code's input line in the bottom block (the last line that starts
-    with the prompt marker `>`), "" for an empty composer, None when none is visible."""
-    for ln in reversed(bottom_block(visible, _tail_lines(tail_lines)).splitlines()):
-        m = _COMPOSER.match(ln.rstrip())
-        if m:
-            return (m.group(1) or "").rstrip(_BOX_TRAIL)
+    """Text of Claude Code's input line in the bottom block, "" for an empty composer,
+    None when none is visible. The composer is the last line starting with the prompt
+    marker (`❯`, or `>` in older versions) that sits directly between two horizontal
+    rules; a choice-dialog row such as `❯ 1. Yes` is never a composer."""
+    lines = bottom_block(visible, _tail_lines(tail_lines)).splitlines()
+    for i in range(len(lines) - 2, 0, -1):
+        if not (_COMPOSER_RULE.match(lines[i - 1]) and _COMPOSER_RULE.match(lines[i + 1])):
+            continue
+        m = _COMPOSER.match(lines[i].strip())
+        if m and not _CHOICE_ROW.match(m.group(1) or ""):
+            return (m.group(1) or "").strip()
     return None
 
 
@@ -222,22 +228,38 @@ def _send_timeout_ms(timeout_ms):
     return timeout_ms or _defaults.load()["send"]["timeout_ms"]
 
 
+STATUSES = ("idle", "working", "blocked", "done", "unknown")
+
+
 def _status_in(data):
-    """agent_status found in a herdr JSON answer (result.agent, result, or result.status)."""
+    """A known agent status in a herdr JSON answer (result.agent or result), else None."""
     res = data.get("result") if isinstance(data, dict) else None
     if not isinstance(res, dict):
         return None
     for node in (res.get("agent"), res):
         if isinstance(node, dict):
             st = node.get("agent_status") or node.get("status")
-            if isinstance(st, str):
+            if st in STATUSES:
                 return st
     return None
 
 
-def _wait_args(timeout_ms):
-    return ["--until", "working", "--until", "done", "--until", "blocked",
-            "--timeout", str(timeout_ms)]
+def _settled_status(data, name):
+    """The status in a wait/prompt answer; without one, ask `agent get` (None if that fails)."""
+    st = _status_in(data)
+    if st:
+        return st
+    try:
+        return _status_in(run(["agent", "get", name]))
+    except HerdrError:
+        return None
+
+
+def _wait_args(timeout_ms, untils=("working", "done", "blocked")):
+    args = []
+    for u in untils:
+        args += ["--until", u]
+    return args + ["--timeout", str(timeout_ms)]
 
 
 def send(name, text, timeout_ms=None):
@@ -260,14 +282,19 @@ def send(name, text, timeout_ms=None):
             a = agent(name)
             return "accepted" if a and a.get("agent_status") == "working" else "unconfirmed"
         raise
-    return "blocked" if _status_in(data) == "blocked" else "accepted"
+    st = _settled_status(data, name)
+    if st == "blocked":
+        return "blocked"
+    return "accepted" if st in ("working", "done") else "unconfirmed"
 
 
 def recover_stalled(name, text, timeout_ms=None):
     """After "stalled": press Enter exactly once, and only when the agent is idle or done
     and the visible composer line holds the start of our text. Never on an empty composer
     (a grey prompt suggestion there could be submitted), never over a dialog.
-    Returns "accepted" | "blocked" | "stalled"."""
+    Afterwards it waits only for `working` or `blocked`: the wait matches the current
+    state, so `done`/`idle` would not prove the Enter was taken.
+    Returns "accepted" | "blocked" | "stalled" (nothing pressed) | "unconfirmed"."""
     ms = _send_timeout_ms(timeout_ms)
     st = _status_in(run(["agent", "get", name]))
     if st not in ("idle", "done"):
@@ -278,15 +305,16 @@ def recover_stalled(name, text, timeout_ms=None):
         return "stalled"
     send_keys(name, ["enter"])
     try:
-        data = run(["agent", "wait", name] + _wait_args(ms),
+        data = run(["agent", "wait", name] + _wait_args(ms, ("working", "blocked")),
                    timeout_s=ms // 1000 + 30)
     except HerdrError as e:
         if e.code in ("timeout", "agent_prompt_stalled"):
-            return "stalled"
+            return "unconfirmed"
         if e.code == "agent_blocked":
             return "blocked"
         raise
-    return "blocked" if _status_in(data) == "blocked" else "accepted"
+    st = _settled_status(data, name)
+    return {"working": "accepted", "blocked": "blocked"}.get(st, "unconfirmed")
 
 
 def wait_ready(name, timeout_ms=None):

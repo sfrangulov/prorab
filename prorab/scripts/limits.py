@@ -158,7 +158,7 @@ def detect_messages(text, patterns, tail_lines=None):
 
 _RESETS = re.compile(
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?"
-    r"(?:\s*\(([A-Za-z][A-Za-z_+-]*(?:/[A-Za-z0-9_+-]+)+)\))?", re.I)
+    r"(?:\s*\(([A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*)\))?", re.I)
 
 
 def parse_resets(text, now):

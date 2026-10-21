@@ -261,7 +261,7 @@ class TestSendState(CrewBase):
         self.assertEqual(crew.state("a1")["status"], "gone")
 
     def test_pause_and_handover_request_use_acts_md(self):
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         crew.pause("a1")
         crew.request_handover("a1")
         calls = self.calls()
@@ -294,7 +294,7 @@ class TestHandover(CrewBase):
         self.route_seq("pane get w:p9", [ok(pane_info), ok(pane_info), ok(inwt)])
         self.route("pane run w:p9", ok({}))
         self.route("agent start a1", ok({}))
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         r = crew.complete_handover("a1", "N1", "Текст наряда", timeout_s=2, poll_s=0.01)
         self.assertEqual(r["status"], "restarted")
         calls = self.calls()
@@ -316,7 +316,7 @@ class TestHandover(CrewBase):
         pane_info = {"pane": {"pane_id": "w:p9", "foreground_cwd": "/home/user/projects/demo-app"}}
         self.route("pane get w:p9", ok(pane_info))
         self.route("pane run w:p9", ok({}))
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         r = crew.complete_handover("a1", "N1", "t", timeout_s=0.1, poll_s=0.01)
         self.assertEqual(r["status"], "restart_failed")
         for c in self.calls():
@@ -354,7 +354,7 @@ class TestHandover(CrewBase):
     def test_tokens_spent_before_exit_even_if_restart_fails(self):
         self.restart_routes()
         self.route("agent start a1", err("agent_start_failed"), exit_code=1)
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.assertEqual(self.go()["status"], "restart_failed")
         self.assertEqual(self.j.spent, [("N1", 1, 0, 60)])
 
@@ -362,7 +362,7 @@ class TestHandover(CrewBase):
         self.restart_routes()
         self.route("agent start a1", err("agent_not_ready"), exit_code=1)
         self.route("pane read w:p9 --source visible", "Do you trust the files here?\nYes, I trust this folder\n")
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.assertEqual(self.go()["status"], "needs_trust")
         calls = self.calls()
         self.assertEqual([c for c in calls if c.startswith(("agent prompt", "agent send-keys",
@@ -381,7 +381,7 @@ class TestHandover(CrewBase):
         self.j.kv["crew.a1.worktree"] = wt
         self.restart_routes(wt)
         self.route("agent start a1", ok({}))
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.go()
         import shlex
         cd = [c for c in self.calls() if c.startswith("pane run w:p9 ")][0]
@@ -497,7 +497,7 @@ class TestAnswer(CrewBase):
 
     def test_answer_without_dialog_sends_text(self):
         self.route("agent read a1 --source visible", "just a prompt\n")
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         crew.answer("a1", text="продолжай")
         self.assertIn("agent prompt a1 продолжай --wait --until working --until done --until blocked --timeout 60000", self.calls())
 

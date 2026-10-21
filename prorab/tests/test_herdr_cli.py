@@ -175,7 +175,7 @@ class TestRun(FakeBase):
 
 class TestSend(FakeBase):
     def test_send_ok(self):
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.assertEqual(herdr_cli.send("a1", "hi"), "accepted")
         self.assertIn("agent prompt a1 hi --wait --until working --until done "
                       "--until blocked --timeout 60000", self.calls())
@@ -210,7 +210,7 @@ class TestSend(FakeBase):
 
 class TestSendWait(FakeBase):
     def test_send_waits_until_working_done_blocked(self):
-        self.route("agent prompt a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         herdr_cli.send("a1", "hi", timeout_ms=60000)
         line = self.calls()[0]
         for until in ("--until working", "--until done", "--until blocked", "--timeout 60000"):
@@ -222,6 +222,20 @@ class TestSendWait(FakeBase):
         self.assertEqual(herdr_cli.send("a1", "hi"), "blocked")
         self.route("agent prompt a1", ok({"agent": {"agent_status": "done"}}))
         self.assertEqual(herdr_cli.send("a1", "hi"), "accepted")
+
+    def test_send_without_status_falls_back_to_agent_get(self):
+        self.route("agent prompt a1", ok({}))
+        self.route("agent get a1", ok({"agent": {"agent_status": "blocked"}}))
+        self.assertEqual(herdr_cli.send("a1", "hi"), "blocked")
+        self.route("agent get a1", ok({"agent": {"agent_status": "working"}}))
+        self.assertEqual(herdr_cli.send("a1", "hi"), "accepted")
+        self.route("agent get a1", ok({"agent": {"agent_status": "idle"}}))
+        self.assertEqual(herdr_cli.send("a1", "hi"), "unconfirmed")
+
+    def test_status_in_known_statuses_only(self):
+        self.assertIsNone(herdr_cli._status_in({"result": {"status": "ok"}}))
+        self.assertEqual(herdr_cli._status_in({"result": {"agent": {"agent_status": "done"}}}),
+                         "done")
 
     def test_wait_ready_until_idle_or_done(self):
         self.route("agent wait a1", ok({"agent": {"agent_status": "done"}}))
@@ -239,10 +253,23 @@ class TestComposer(unittest.TestCase):
         self.assertEqual(herdr_cli.composer_text(fixture("composer", "empty.txt")), "")
         self.assertIsNone(herdr_cli.composer_text("● just output\nmore output\n"))
 
-    def test_composer_text_bare_marker(self):
-        self.assertEqual(herdr_cli.composer_text("output\n>\n"), "")
-        self.assertEqual(herdr_cli.composer_text("output\n> hi there  \n"), "hi there")
-        self.assertIsNone(herdr_cli.composer_text("> old\n" + "x\n" * 20))
+    def test_composer_text_legacy_marker(self):
+        self.assertTrue(herdr_cli.composer_text(fixture("composer", "legacy_marker.txt"))
+                        .startswith("Read the work order"))
+
+    def test_composer_text_needs_rules_around(self):
+        rule = "─" * 40
+        self.assertEqual(herdr_cli.composer_text("out\n%s\n❯\n%s\nstatus\n" % (rule, rule)), "")
+        self.assertEqual(herdr_cli.composer_text("out\n%s\n❯ hi there  \n%s\n" % (rule, rule)),
+                         "hi there")
+        self.assertIsNone(herdr_cli.composer_text("out\n❯ hi\nstatus\n"))
+        self.assertIsNone(herdr_cli.composer_text("out\n> hi\n%s\n" % rule))
+
+    def test_choice_dialog_line_is_not_a_composer(self):
+        self.assertIsNone(herdr_cli.composer_text(DIALOG))
+        rule = "─" * 40
+        self.assertIsNone(herdr_cli.composer_text(
+            "%s\n❯ 1. Yes\n%s\n  2. No\n" % (rule, rule)))
 
 
 class TestRecoverStalled(FakeBase):
@@ -264,15 +291,27 @@ class TestRecoverStalled(FakeBase):
             self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "accepted")
             self.assertEqual(self.keys(), ["agent send-keys a1 enter"])
             self.assertFalse([c for c in self.calls() if c.startswith("agent prompt")])
-            self.assertIn("agent wait a1 --until working --until done --until blocked "
+            self.assertIn("agent wait a1 --until working --until blocked "
                           "--timeout 60000", self.calls())
 
     def test_recover_stalled_wait_outcomes(self):
         self.setup_agent("idle", "ours.txt")
         self.route("agent wait a1", err("timeout"), exit_code=1)
-        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "unconfirmed")
         self.route("agent wait a1", ok({"agent": {"agent_status": "blocked"}}))
         self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "blocked")
+
+    def test_recover_stalled_swallowed_enter_is_never_accepted(self):
+        # the wait matches the CURRENT state: the pane is still done, so done is no evidence
+        self.setup_agent("done", "ours.txt")
+        self.route("agent wait a1", ok({"agent": {"agent_status": "done"}}))
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "unconfirmed")
+        self.assertEqual(self.keys(), ["agent send-keys a1 enter"])
+
+    def test_recover_stalled_without_status_falls_back_to_agent_get(self):
+        self.setup_agent("done", "ours.txt")
+        self.route("agent wait a1", ok({}))
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "unconfirmed")
 
     def test_recover_stalled_empty_composer_presses_nothing(self):
         self.setup_agent("done", "empty.txt")

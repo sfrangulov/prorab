@@ -97,6 +97,15 @@ class TestLimitScreens(unittest.TestCase):
         self.assertIsNone(limits.parse_resets("resets 7", base))
         self.assertIsNone(limits.parse_resets("", base))
 
+    def test_parse_resets_zone_names_under_foreign_tz(self):
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        base = self.at(21, 15)
+        self.assertEqual(limits.parse_resets("resets 7pm (UTC)", base), self.at(21, 19))
+        self.assertEqual(limits.parse_resets("resets 7pm (GMT)", base), self.at(21, 19))
+        self.assertEqual(limits.parse_resets("resets 7pm (Europe/Berlin)", base), self.at(21, 17))
+        self.assertIsNone(limits.parse_resets("resets 7pm (XYZ)", base))
+
     def test_provider_error_final(self):
         self.assertEqual(limits.provider_error(_read("provider_error.txt"), self.d),
                          "quota_exceeded")

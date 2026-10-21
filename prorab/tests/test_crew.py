@@ -495,8 +495,16 @@ class TestSendState(CrewBase):
     def test_state_takes_a_screen_already_read(self):
         self.route("agent list", ok({"agents": [agent_entry(status="blocked")]}))
         a = crew.herdr_cli.agents()[0]
-        st = crew.state("a1", a, read_screen=fixture("consent", "mcp.txt"))
+        st = crew.state("a1", a, read_screen=False, screen=fixture("consent", "mcp.txt"))
         self.assertEqual(st["consent"], "mcp")
+        self.assertFalse([c for c in self.calls() if c.startswith("agent read")])
+
+    def test_state_empty_screen_is_a_read_screen(self):
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        a = crew.herdr_cli.agents()[0]
+        st = crew.state("a1", a, read_screen=False, screen="")
+        self.assertEqual([st[k] for k in ("bg_shells", "consent", "limit_screen",
+                                          "provider_error")], [0, None, None, None])
         self.assertFalse([c for c in self.calls() if c.startswith("agent read")])
 
     def test_state_uses_kv_snapshot(self):

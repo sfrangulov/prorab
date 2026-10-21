@@ -73,7 +73,7 @@ class Stub:
 
     def deps(self):
         return {
-            "state": lambda n, a, read_screen=True, kv=None: (
+            "state": lambda n, a, read_screen=True, screen=None, kv=None: (
                 self.crews[n] if a is not None else st("gone")),
             "agents": self._agents,
             "kv_all": self._kv_all,
@@ -392,6 +392,15 @@ class TestMonitorG(PollBase):
         self.s.crews["b1"] = st("idle", bg=0, provider_error="invalid api key")
         self.assertIn("provider_error b1 invalid api key", self.poll())
 
+    def test_provider_error_episode_replaces_settled(self):
+        self.s.crews["b1"] = st("idle", bg=0, provider_error="invalid api key")
+        self.assertEqual(self.poll(), ["provider_error b1 invalid api key"])
+        self.assertEqual(self.poll(), [])
+        self.s.crews["b1"] = st("working")
+        self.poll()
+        self.s.crews["b1"] = st("done", bg=0)  # the error is gone: settled again
+        self.assertEqual(self.poll(), ["settled b1 done"])
+
     def test_priority_order_new_events(self):
         self.s.crews["b1"] = st("blocked", consent="mcp")
         self.s.crews["b2"] = st("idle", pane="p2", limit_screen={"kind": "limit", "resets_at": None})
@@ -400,7 +409,7 @@ class TestMonitorG(PollBase):
         self.s.limits = lim(90.0, 10.0)
         out = self.poll(names=("b1", "b2", "b3", "b4"))
         self.assertEqual([e.split()[0] for e in out],
-                         ["consent", "provider_error", "limit_screen", "limit", "settled", "settled"])
+                         ["consent", "provider_error", "limit_screen", "limit", "settled"])
 
     def test_limit_pass_lazy_and_reuses_screens(self):
         for n, pane, status in (("b1", "p1", "working"), ("b2", "p2", "idle"),
@@ -446,6 +455,83 @@ class TestMonitorG(PollBase):
         self.assertEqual(self.mem["last_reading"]["seven_day"], None)
         self.assertEqual(self.mem["last_reading"]["five_hour"], None)
         self.assertEqual(json.loads(json.dumps(self.mem["last_reading"]))["seven_day"], None)
+
+
+class TestNewestAge(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.wt = self.tmp.name
+
+    def _file(self, rel, age, now):
+        path = os.path.join(self.wt, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        os.utime(path, (now - age, now - age))
+
+    def test_newest_file_wins_and_skip_dirs_are_ignored(self):
+        now = 1000000.0
+        self._file("src/a.py", 5000, now)
+        self._file("src/b.py", 3000, now)
+        for skipped in (".git", "node_modules", ".venv", "__pycache__", "src/__pycache__"):
+            self._file(skipped + "/fresh", 1, now)  # fresh files in skipped dirs do not count
+        self.assertEqual(monitor._newest_age(self.wt, now, 1000), 3000)
+
+    def test_skipped_dirs_do_not_count_toward_the_cap(self):
+        now = 1000000.0
+        self._file("a.py", 10, now)
+        for i in range(50):
+            self._file("node_modules/m%d" % i, 1, now)
+        self.assertEqual(monitor._newest_age(self.wt, now, 5), 10)
+
+    def test_more_than_max_files_is_none(self):
+        now = 1000000.0
+        for i in range(6):
+            self._file("f%d" % i, 10, now)
+        self.assertIsNone(monitor._newest_age(self.wt, now, 5))
+        self.assertEqual(monitor._newest_age(self.wt, now, 6), 10)
+
+    def test_empty_tree_uses_its_own_mtime(self):
+        now = 1000000.0
+        os.utime(self.wt, (now - 700, now - 700))
+        self.assertEqual(monitor._newest_age(self.wt, now, 10), 700)
+
+    def test_missing_or_unreadable_tree_is_none(self):
+        self.assertIsNone(monitor._newest_age(os.path.join(self.wt, "nope"), 1.0, 10))
+        locked = os.path.join(self.wt, "locked")
+        os.makedirs(locked)
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        if os.access(locked, os.R_OK):
+            self.skipTest("directory permissions are not enforced here")
+        self.assertIsNone(monitor._newest_age(self.wt, 1.0, 10))
+
+    def test_unreadable_tree_gives_hung_unclear_never_hung(self):
+        locked = os.path.join(self.wt, "locked")
+        os.makedirs(locked)
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o755)
+        if os.access(locked, os.R_OK):
+            self.skipTest("directory permissions are not enforced here")
+        s = Stub()
+        s.crews["b1"] = st(cwd=self.wt)
+        deps = s.deps()
+        deps["newest_age"] = monitor._newest_age
+        mem, now = {}, at(12)
+        monitor.poll(["b1"], D, mem, now, deps=deps)
+        out = monitor.poll(["b1"], D, mem, now + 1800, deps=deps)
+        self.assertEqual(out, ["hung_unclear b1 scan_capped"])
+
+    def test_real_scan_old_tree_is_hung(self):
+        now = at(12)
+        self._file("a.py", 5000, now)
+        s = Stub()
+        s.crews["b1"] = st(cwd=self.wt)
+        deps = s.deps()
+        deps["newest_age"] = monitor._newest_age
+        mem = {}
+        monitor.poll(["b1"], D, mem, now, deps=deps)
+        self.assertEqual(monitor.poll(["b1"], D, mem, now + 1800, deps=deps), ["hung b1"])
 
 
 class Boom(RuntimeError):

@@ -285,7 +285,7 @@ def _poll(crews, d, mem, now, dp):
             if need and pane:
                 screen = read(pane)
         st = guard("state.%s" % name, dp["state"], name, a,
-                   read_screen=False if screen is None else screen, kv=kv_arg)
+                   read_screen=False, screen=screen, kv=kv_arg)
         if st is None:
             continue
         status = st.get("status")
@@ -302,7 +302,7 @@ def _poll(crews, d, mem, now, dp):
         if st.get("ctx") is None and screen is None and pane:
             screen = read(pane)  # the context can only come from the status line
             if screen is not None:
-                st = guard("state.%s" % name, dp["state"], name, a, read_screen=screen,
+                st = guard("state.%s" % name, dp["state"], name, a, read_screen=False, screen=screen,
                            kv=kv_arg) or st
         seen_crews.append((pane, status))
         if status != prev.get("status") or status == "working":
@@ -372,7 +372,8 @@ def _poll(crews, d, mem, now, dp):
         else:
             hung.pop(name, None)
             if (status in SETTLED and (status == "blocked" or not bg)
-                    and name not in ep["consent"] and not on_limit_screen):
+                    and name not in ep["consent"] and name not in ep["provider_error"]
+                    and not on_limit_screen):
                 if settled.get(name) != status:
                     ev["settled"].append("settled %s %s" % (name, status))
                 settled[name] = status

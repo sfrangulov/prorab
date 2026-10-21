@@ -322,10 +322,11 @@ def gone_state():
             "session_id": None, "cwd": None, "pane_id": None}
 
 
-def state(name, a=None, *, read_screen=True, kv=None):
+def state(name, a=None, *, read_screen=True, screen=None, kv=None):
     """The crew's agent (found by its pane, the name only as a fallback) with its status,
     context and, with `read_screen`, the markers of one screen read; without it those are
-    None (unknown, not 0). `read_screen` may also be the screen text already read."""
+    None (unknown, not 0). `screen` is a screen text already read (None: read it here when
+    `read_screen`); an empty text is a read screen with no markers."""
     if a is None:
         pane = _kv_of(kv, _kv(name, "pane"))
         listed = herdr_cli.agents()
@@ -340,10 +341,8 @@ def state(name, a=None, *, read_screen=True, kv=None):
            "ctx": transcript.context_status(path, _defaults.load()) if path else None,
            "session_id": (a.get("agent_session") or {}).get("value"),
            "cwd": a.get("cwd"), "pane_id": a.get("pane_id")}
-    if read_screen:
-        if isinstance(read_screen, str):
-            screen = read_screen
-        else:
+    if screen is not None or read_screen:
+        if screen is None:
             screen = (herdr_cli.agent_visible(a["name"]) if a.get("name")
                       else herdr_cli.pane_visible(a["pane_id"]))
         d = _defaults.load()

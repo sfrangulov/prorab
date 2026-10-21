@@ -1,0 +1,1 @@
+{"type": "assistant", "isSidechain": true, "cwd": "__CWD__", "timestamp": "2026-10-21T10:03:00.000Z", "message": {"id": "msg_S", "model": "claude-sonnet-5", "content": [], "usage": {"input_tokens": 2000, "cache_read_input_tokens": 0, "output_tokens": 1000}}}

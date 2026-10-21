@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Read Claude Code transcripts (JSONL): context size, last text, usage totals."""
+"""Read Claude Code transcripts (JSONL): context size, last text, usage totals, spend in dollars."""
 import argparse
+import datetime
 import glob
 import json
 import os
@@ -132,12 +133,259 @@ def usage_totals(path):
     return t
 
 
+# ---- spend in dollars ---------------------------------------------------------------------
+
+def _int(v):
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def price_for(model, d):
+    """Dollars per million tokens ``{"input", "output", "cache_read"}`` for a model name.
+
+    The first ``cost.prices`` family whose name is a substring of the model; an unknown
+    model gets the column-wise maximum over all families (never cheaper than a known one).
+    """
+    prices = d["cost"]["prices"]
+    low = (model or "").lower()
+    for family, row in prices.items():
+        if family in low:
+            return dict(row)
+    cols = ("input", "output", "cache_read")
+    return {c: max(row[c] for row in prices.values()) for c in cols}
+
+
+def _cache_write_tokens(usage):
+    """``(tokens written for 5 minutes, tokens written for 1 hour)``.
+
+    Without a split the whole ``cache_creation_input_tokens`` counts as 1-hour writes.
+    """
+    split = usage.get("cache_creation")
+    if isinstance(split, dict) and (
+            "ephemeral_5m_input_tokens" in split or "ephemeral_1h_input_tokens" in split):
+        return _int(split.get("ephemeral_5m_input_tokens")), _int(split.get("ephemeral_1h_input_tokens"))
+    return 0, _int(usage.get("cache_creation_input_tokens"))
+
+
+def message_cost(usage, model, d):
+    """Dollars for one API message's ``usage``."""
+    price = price_for(model, d)
+    c = d["cost"]
+    w5, w1 = _cache_write_tokens(usage)
+    total = (_int(usage.get("input_tokens")) * price["input"]
+             + w5 * c["cache_write_5m_factor"] * price["input"]
+             + w1 * c["cache_write_1h_factor"] * price["input"]
+             + _int(usage.get("cache_read_input_tokens")) * price["cache_read"]
+             + _int(usage.get("output_tokens")) * price["output"])
+    return total / 1000000.0
+
+
+def session_files(project_dir):
+    """The transcripts of a project directory: its ``*.jsonl`` and ``*/subagents/*.jsonl``."""
+    base = glob.escape(project_dir)
+    return sorted(glob.glob(os.path.join(base, "*.jsonl"))
+                  + glob.glob(os.path.join(base, "*", "subagents", "*.jsonl")))
+
+
+def session_cost_files(transcript_path):
+    """A session's transcript plus the transcripts of its subagents."""
+    stem, _ = os.path.splitext(transcript_path)
+    subs = sorted(glob.glob(os.path.join(glob.escape(stem), "subagents", "*.jsonl")))
+    return [transcript_path] + subs
+
+
+def _projects_dir(home):
+    return os.path.join(home or os.path.expanduser("~"), ".claude", "projects")
+
+
+def _first_cwd(files):
+    for path in files:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if '"cwd"' not in line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
+                        return entry["cwd"]
+        except OSError:
+            continue
+    return None
+
+
+def worktree_files(worktree, home=None):
+    """Transcripts of every run made in a worktree or in a directory below it."""
+    base = _projects_dir(home)
+    slug = project_slug(worktree)
+    root = os.path.realpath(worktree)
+    out = []
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return out
+    for name in names:
+        if name != slug and not name.startswith(slug + "-"):
+            continue
+        files = session_files(os.path.join(base, name))
+        cwd = _first_cwd(files)
+        if cwd is None:
+            continue
+        real = os.path.realpath(cwd)
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            out.extend(files)
+    return out
+
+
+def machine_files(since=None, home=None):
+    """Every transcript on the machine; files untouched since ``since`` are left out unopened."""
+    out = []
+    try:
+        names = sorted(os.listdir(_projects_dir(home)))
+    except OSError:
+        return out
+    for name in names:
+        for path in session_files(os.path.join(_projects_dir(home), name)):
+            if since is not None:
+                try:
+                    if os.path.getmtime(path) < since:
+                        continue
+                except OSError:
+                    continue
+            out.append(path)
+    return out
+
+
+def _parse_ts(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
+
+
+def _messages(paths, d, since, until, seen):
+    """Deduplicated assistant messages with usage in the window, in time order."""
+    best = {}
+    anon = []
+    for path in paths:
+        if since is not None:
+            try:
+                if os.path.getmtime(path) < since:
+                    continue
+            except OSError:
+                continue
+        try:
+            fh = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict) or entry.get("type") != "assistant":
+                    continue
+                msg = entry.get("message")
+                usage = msg.get("usage") if isinstance(msg, dict) else None
+                if not isinstance(usage, dict):
+                    continue
+                ts = _parse_ts(entry.get("timestamp"))
+                if ts is None or (since is not None and ts < since) \
+                        or (until is not None and ts >= until):
+                    continue
+                rec = {"ts": ts, "usage": usage, "model": msg.get("model") or "",
+                       "out": _int(usage.get("output_tokens"))}
+                mid = msg.get("id")
+                if not mid:
+                    anon.append(rec)
+                elif mid not in best or rec["out"] > best[mid]["out"]:
+                    best[mid] = rec
+    recs = list(anon)
+    for mid, rec in best.items():
+        if seen is not None:
+            if mid in seen:
+                continue
+            seen[mid] = True
+        recs.append(rec)
+    recs.sort(key=lambda r: r["ts"])
+    for rec in recs:
+        rec["usd"] = message_cost(rec["usage"], rec["model"], d)
+    return recs
+
+
+def spend_series(paths, d, since=None, until=None, seen=None):
+    """``(timestamp, usd)`` per assistant message, in time order; each message id counts once."""
+    return [(r["ts"], r["usd"]) for r in _messages(paths, d, since, until, seen)]
+
+
+def cost(paths, d, since=None, until=None, seen=None):
+    """Total dollars, message count, token sums and dollars per model over the same set."""
+    out = {"usd": 0.0, "messages": 0,
+           "tokens": {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0},
+           "models": {}}
+    for r in _messages(paths, d, since, until, seen):
+        u = r["usage"]
+        w5, w1 = _cache_write_tokens(u)
+        out["usd"] += r["usd"]
+        out["messages"] += 1
+        t = out["tokens"]
+        t["input"] += _int(u.get("input_tokens"))
+        t["cache_write"] += w5 + w1
+        t["cache_read"] += _int(u.get("cache_read_input_tokens"))
+        t["output"] += r["out"]
+        out["models"][r["model"]] = out["models"].get(r["model"], 0.0) + r["usd"]
+    return out
+
+
+def _ts_arg(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        ts = _parse_ts(value)
+        if ts is None:
+            raise SystemExit("bad timestamp %r" % value)
+        return ts
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("cmd", choices=["status", "text", "usage"])
-    ap.add_argument("--cwd", required=True)
-    ap.add_argument("--session", required=True)
+    ap.add_argument("cmd", choices=["status", "text", "usage", "cost"])
+    ap.add_argument("--cwd")
+    ap.add_argument("--session")
+    ap.add_argument("--worktree")
+    ap.add_argument("--machine", action="store_true")
+    ap.add_argument("--file", action="append", default=[])
+    ap.add_argument("--since")
+    ap.add_argument("--until")
     args = ap.parse_args(argv)
+    if args.cmd == "cost":
+        since, until = _ts_arg(args.since), _ts_arg(args.until)
+        if args.worktree:
+            paths = worktree_files(args.worktree)
+        elif args.machine:
+            paths = machine_files(since)
+        elif args.file:
+            paths = list(args.file)
+        else:
+            ap.error("cost needs --worktree, --machine or --file")
+        print(json.dumps(cost(paths, _defaults.load(), since, until)))
+        return 0
+    if not args.cwd or not args.session:
+        ap.error("--cwd and --session are required")
     path = find_transcript(args.cwd, args.session)
     if path is None:
         print(json.dumps({"error": "transcript not found"}), file=sys.stderr)

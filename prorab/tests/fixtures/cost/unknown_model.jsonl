@@ -1,0 +1,1 @@
+{"type": "assistant", "isSidechain": false, "cwd": "__CWD__", "timestamp": "2026-10-21T10:01:00.000Z", "message": {"id": "msg_U", "model": "claude-mystery-1", "content": [], "usage": {"input_tokens": 1000, "cache_read_input_tokens": 0, "output_tokens": 1000}}}

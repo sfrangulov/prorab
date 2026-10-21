@@ -1,3 +1,7 @@
+import builtins
+import contextlib
+import datetime
+import io
 import json
 import os
 import sys
@@ -16,6 +20,11 @@ import transcript  # noqa: E402
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 MAIN = os.path.join(FIX, "session_main.jsonl")
 SIDE = os.path.join(FIX, "session_sidechain.jsonl")
+COST = os.path.join(FIX, "cost")
+
+
+def _ts(hh, mm):
+    return datetime.datetime(2026, 10, 21, hh, mm, tzinfo=datetime.timezone.utc).timestamp()
 
 
 def _entry(tokens, model):
@@ -139,6 +148,171 @@ class TestTranscript(unittest.TestCase):
             p2 = os.path.join(d2, "sess1.jsonl")
             open(p2, "w").close()
             self.assertEqual(transcript.find_transcript("/a/b", "sess1", home), p2)
+
+
+class TestCost(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = os.path.join(tmp.name, "home")
+        self.root = os.path.realpath(tmp.name)
+        self.wt = os.path.join(self.root, "wt")
+        os.makedirs(self.wt)
+        self.d = _defaults.load()
+
+    def put(self, fixture, cwd, rel, slug_of=None):
+        """Copy a cost fixture under the temp HOME, its cwd pointing at ``cwd``."""
+        slug = transcript.project_slug(slug_of or cwd)
+        dest = os.path.join(self.home, ".claude", "projects", slug, rel)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(os.path.join(COST, fixture), encoding="utf-8") as fh:
+            text = fh.read().replace("__CWD__", cwd)
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return dest
+
+    def test_message_cost_formula(self):
+        usage = {"input_tokens": 1000, "output_tokens": 1000, "cache_read_input_tokens": 10000,
+                 "cache_creation": {"ephemeral_5m_input_tokens": 1000,
+                                    "ephemeral_1h_input_tokens": 1000}}
+        # (4000 + 5000 + 8000 + 2000 + 20 000) / 10^6
+        self.assertAlmostEqual(transcript.message_cost(usage, "claude-opus-5-5", self.d), 0.039)
+
+    def test_no_split_priced_as_1h(self):
+        p = self.put("no_split.jsonl", self.wt, "s.jsonl")
+        c = transcript.cost([p], self.d)
+        self.assertAlmostEqual(c["usd"], 0.008)
+        self.assertEqual(c["tokens"]["cache_write"], 1000)
+
+    def test_family_by_substring(self):
+        self.assertEqual(transcript.price_for("claude-opus-5-5", self.d),
+                         {"input": 4.0, "output": 20.0, "cache_read": 0.2})
+        self.assertEqual(transcript.price_for("claude-haiku-4-5", self.d),
+                         {"input": 0.1, "output": 0.5, "cache_read": 0.01})
+
+    def test_unknown_model_priced_at_column_max(self):
+        self.assertEqual(transcript.price_for("claude-mystery-1", self.d),
+                         {"input": 10.0, "output": 50.0, "cache_read": 0.25})
+        self.assertEqual(transcript.price_for(None, self.d),
+                         {"input": 10.0, "output": 50.0, "cache_read": 0.25})
+        synth = {"cost": {"prices": {
+            "a": {"input": 1.0, "output": 9.0, "cache_read": 0.5},
+            "b": {"input": 2.0, "output": 3.0, "cache_read": 0.1}}}}
+        self.assertEqual(transcript.price_for("zzz", synth),
+                         {"input": 2.0, "output": 9.0, "cache_read": 0.5})
+
+    def test_unknown_model_cost_file(self):
+        p = self.put("unknown_model.jsonl", self.wt, "s.jsonl")
+        self.assertAlmostEqual(transcript.cost([p], self.d)["usd"], 0.06)
+
+    def test_dedupe_by_message_id_across_files(self):
+        a = self.put("main.jsonl", self.wt, "s1.jsonl")
+        b = self.put("fork.jsonl", self.wt, "s2.jsonl")
+        c = transcript.cost([a, b], self.d)
+        self.assertEqual(c["messages"], 2)
+        self.assertEqual(c["tokens"]["output"], 1050)  # A: 1000, B once with 50
+        self.assertAlmostEqual(c["usd"], 0.0404)
+        self.assertEqual(list(c["models"]), ["claude-opus-5-5"])
+        series = transcript.spend_series([a, b], self.d)
+        self.assertEqual([round(t) for t, _ in series], [round(_ts(10, 1)), round(_ts(10, 2))])
+
+    def test_subagents_and_print_runs_counted(self):
+        sub = os.path.join(self.wt, "sub")
+        os.makedirs(sub)
+        self.put("main.jsonl", self.wt, "sess1.jsonl")
+        self.put("subagent.jsonl", self.wt, os.path.join("sess1", "subagents", "agent-a.jsonl"))
+        self.put("no_split.jsonl", sub, "print1.jsonl")
+        files = transcript.worktree_files(self.wt, self.home)
+        self.assertEqual(len(files), 3)
+        self.assertTrue(any(f.endswith("agent-a.jsonl") for f in files))
+        c = transcript.cost(files, self.d)
+        self.assertAlmostEqual(c["usd"], 0.0404 + 0.014 + 0.008)
+        self.assertEqual(c["messages"], 4)
+
+    def test_session_cost_files(self):
+        main = self.put("main.jsonl", self.wt, "sess1.jsonl")
+        agent = self.put("subagent.jsonl", self.wt, os.path.join("sess1", "subagents", "a.jsonl"))
+        self.put("subagent.jsonl", self.wt, os.path.join("other", "subagents", "b.jsonl"))
+        self.assertEqual(transcript.session_cost_files(main), [main, agent])
+
+    def test_worktree_files_skip_sibling_paths(self):
+        other = os.path.join(self.root, "wt-other")
+        os.makedirs(other)
+        mine = self.put("main.jsonl", self.wt, "s.jsonl")
+        self.put("main.jsonl", other, "s.jsonl")
+        self.assertEqual(transcript.worktree_files(self.wt, self.home), [mine])
+
+    def test_cost_time_window_and_old_files(self):
+        p = self.put("main.jsonl", self.wt, "s.jsonl")
+        # A at 10:01, B at 10:02: [10:01, 10:02) holds A only
+        c = transcript.cost([p], self.d, since=_ts(10, 1), until=_ts(10, 2))
+        self.assertEqual(c["messages"], 1)
+        self.assertAlmostEqual(c["usd"], 0.039)
+        self.assertEqual(transcript.cost([p], self.d, since=_ts(10, 3))["messages"], 0)
+        # a file older than since is not opened, though a line of it is inside the window
+        old = _ts(10, 0) - 3600
+        os.utime(p, (old, old))
+        real_open = builtins.open
+        opened = []
+
+        def spy(path, *a, **k):
+            opened.append(path)
+            return real_open(path, *a, **k)
+        builtins.open = spy
+        try:
+            c = transcript.cost([p], self.d, since=_ts(10, 0))
+            files = transcript.machine_files(since=_ts(10, 0), home=self.home)
+        finally:
+            builtins.open = real_open
+        self.assertEqual(c["messages"], 0)
+        self.assertEqual(files, [])
+        self.assertNotIn(p, opened)
+        self.assertEqual(transcript.machine_files(home=self.home), [p])
+
+    def test_sidechain_counts_in_cost_not_in_context(self):
+        p = self.put("sidechain.jsonl", self.wt, "s.jsonl")
+        self.assertAlmostEqual(transcript.cost([p], self.d)["usd"], 0.00024 + 0.03)
+        self.assertEqual(transcript.last_usage(p), (20, "claude-opus-5-5"))
+
+    def test_shared_seen_counts_once(self):
+        a = self.put("main.jsonl", self.wt, "s1.jsonl")
+        b = self.put("fork.jsonl", self.wt, "s2.jsonl")
+        seen = {}
+        first = transcript.cost([a], self.d, seen=seen)
+        second = transcript.cost([b], self.d, seen=seen)
+        self.assertEqual(first["messages"], 2)
+        self.assertEqual(second["messages"], 0)
+        self.assertEqual(second["usd"], 0.0)
+
+    def test_bad_usage_values_do_not_raise(self):
+        p = os.path.join(self.root, "bad.jsonl")
+        with open(p, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "timestamp": "2026-10-21T10:00:00Z",
+                                 "message": {"model": "x", "usage": {"input_tokens": "n/a"}}}) + "\n")
+            fh.write("not json \"usage\"\n")
+            fh.write(json.dumps({"type": "assistant", "timestamp": "garbage",
+                                 "message": {"usage": {"input_tokens": 5}}}) + "\n")
+        c = transcript.cost([p], self.d)
+        self.assertEqual((c["messages"], c["usd"]), (1, 0.0))
+
+    def test_cli_cost_worktree(self):
+        self.put("main.jsonl", self.wt, "s.jsonl")
+        saved = os.environ.get("HOME")
+        os.environ["HOME"] = self.home
+        self.addCleanup(lambda: os.environ.__setitem__("HOME", saved) if saved is not None
+                        else os.environ.pop("HOME", None))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = transcript.main(["cost", "--worktree", self.wt])
+        self.assertEqual(rc, 0)
+        out = json.loads(buf.getvalue())
+        self.assertAlmostEqual(out["usd"], 0.0404)
+        self.assertEqual(out["messages"], 2)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            transcript.main(["cost", "--machine", "--since", "2026-10-21T10:02:00Z"])
+        # main.jsonl was written just now, so its mtime passes; only B is in the window
+        self.assertEqual(json.loads(buf.getvalue())["messages"], 1)
 
 
 if __name__ == "__main__":

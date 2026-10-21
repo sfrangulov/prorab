@@ -319,7 +319,7 @@ def estimate_rate(readings, spend_between, d, now, window="five_hour"):
     ivs = _counted(readings, window, d, now)
     usd = sum(spend_between(t0, t1) for t0, t1, _ in ivs)
     pp = sum(rise for _, _, rise in ivs)
-    if ivs and pp > 0:
+    if usd > 0 and pp > 0:
         return {"window": window, "usd_per_pp": usd / pp, "source": "estimated",
                 "intervals": len(ivs), "usd": usd, "pp": pp, "at": now}
     default = d["rate"]["default_window_usd_per_pp" if window == "five_hour"

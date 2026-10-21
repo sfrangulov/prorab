@@ -405,6 +405,15 @@ class TestRate(unittest.TestCase):
         self.assertEqual((r["intervals"], r["source"], r["usd"], r["pp"], r["window"], r["at"]),
                          (2, "estimated", 40.0, 6.0, "five_hour", self.t + 3000))
 
+    def test_rate_zero_spend_falls_back_to_default(self):
+        rs = [self.five(0, 10), self.five(20, 12)]
+        r = limits.estimate_rate(rs, lambda a, b: 0.0, self.d, self.t + 1500)
+        self.assertEqual((r["usd_per_pp"], r["source"], r["intervals"]), (5.0, "default", 0))
+        self.assertEqual(limits.to_pp(10.0, r), 2.0)
+        wk = [self.week(0, 10, 1761500000), self.week(20, 12, 1761500000)]
+        r = limits.estimate_rate(wk, lambda a, b: 0.0, self.d, self.t + 1500, "seven_day")
+        self.assertEqual((r["usd_per_pp"], r["source"]), (None, "unknown"))
+
     def test_rate_window_horizon(self):
         rs = [self.five(0, 10), self.five(20, 12)]
         r = limits.estimate_rate(rs, lambda a, b: 4.0, self.d, self.t + 1200 + 6 * 3600)

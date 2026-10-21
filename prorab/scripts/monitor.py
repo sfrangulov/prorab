@@ -8,6 +8,7 @@ the dedupe state lives in ``$PRORAB_LOG_DIR/monitor-state.json`` and level condi
 on change, not on every poll.
 """
 import argparse
+import copy
 import json
 import os
 import sys
@@ -114,6 +115,7 @@ def real_deps():
         "over_budget": journal.over_budget,
         "override": journal.override,
         "own_context": _own_context,
+        "brigades": journal.brigades,
     }
 
 
@@ -142,25 +144,56 @@ def _limit_state(lim, cap, d):
 
 
 def poll(brigades, d, mem, now, *, deps=None):
-    """Event lines in priority order; `mem` carries the dedupe state between polls."""
-    dp = real_deps() if deps is None else deps
-    ev = {k: [] for k in ("gone", "limit", "blind", "blind_week", "smeta", "prorab_context",
-                          "context_hard", "context_soft", "hung", "settled")}
-    kv_get = dp["kv_get"]
-    override = dp["override"]() is not None
+    """Event lines in priority order; `mem` carries the dedupe state between polls.
 
-    lim = dp["limits"](d, now)
+    The state is updated on a copy and committed only when the whole poll returns, so a
+    failure in the middle never swallows an event. A failing source is isolated: it is
+    recorded in ``mem["poll_errors"]`` and the other sources are still polled.
+    """
+    dp = real_deps() if deps is None else deps
+    work = copy.deepcopy(mem)
+    out = _poll(brigades, d, work, now, dp)
+    mem.clear()
+    mem.update(work)
+    return out
+
+
+def _poll(brigades, d, mem, now, dp):
+    ev = {k: [] for k in ("gone", "limit", "blind", "blind_week", "smeta", "prorab_context",
+                          "context_hard", "context_soft", "hung", "settled", "error")}
+    errors = {}
+
+    def guard(source, fn, *args, default=None):
+        try:
+            return fn(*args)
+        except Exception as e:  # one broken source must not stop the others
+            errors.setdefault(source, "%s: %s" % (type(e).__name__, e))
+            return default
+
+    def kv_get(key):
+        return guard("kv", dp["kv_get"], key)
+
+    override = guard("override", dp["override"]) is not None
+    lim = guard("limits", dp["limits"], d, now)
+    if lim is None:
+        lim = {}
+        have_lim = False
+    else:
+        have_lim = True
     resets_at = lim.get("five_hour_resets_at")
     if resets_at is None and lim.get("five_hour_resets_in_s") is not None:
         resets_at = now + lim["five_hour_resets_in_s"]
     five, week, source = lim.get("five_hour"), lim.get("seven_day"), lim.get("source")
-    mem["last_reading"] = {"ts": now, "five_hour": five, "seven_day": week,
-                           "source": source, "resets_at": resets_at}
+    if have_lim:
+        mem["last_reading"] = {"ts": now, "five_hour": five, "seven_day": week,
+                               "source": source, "resets_at": resets_at}
+    else:
+        mem.pop("last_reading", None)
 
     # limit: fires when a component of the state gets worse; falling back re-arms it
     cap = scheduler.cap_for(now, resets_at, d["night"]["morning"], d,
                             night=kv_get("shift.night") == "1", week_known=week is not None)
-    if not override:
+    if have_lim and not override:
         cur = _limit_state(lim, cap, d)
         prev = mem.get("limit") or [0, False, False]
         if any(c > p for c, p in zip(cur, prev)):
@@ -168,7 +201,9 @@ def poll(brigades, d, mem, now, *, deps=None):
         mem["limit"] = cur
 
     # blind: the source is unknown twice in a row
-    if source == "unknown":
+    if not have_lim:
+        pass
+    elif source == "unknown":
         mem["unknown_streak"] = mem.get("unknown_streak", 0) + 1
         if (mem["unknown_streak"] >= 2 and not mem.get("blind_fired")
                 and not kv_get("limits.blind_ack")):
@@ -178,7 +213,9 @@ def poll(brigades, d, mem, now, *, deps=None):
         mem["unknown_streak"], mem["blind_fired"] = 0, False
 
     # blind_week: the weekly figure is missing for longer than week_unknown_blind_s
-    if week is None:
+    if not have_lim:
+        pass
+    elif week is None:
         since = mem.get("week_unknown_since")
         if since is None:
             since = mem["week_unknown_since"] = now
@@ -190,14 +227,15 @@ def poll(brigades, d, mem, now, *, deps=None):
         mem["week_unknown_since"], mem["blind_week_fired"] = None, False
 
     # smeta: the set of exceeded budget items changed
-    if not override:
-        over = list(dp["over_budget"](week))
+    over = None if (override or not have_lim) else guard("over_budget", dp["over_budget"], week)
+    if over is not None:
+        over = list(over)
         if over and over != mem.get("smeta"):
             ev["smeta"].append("smeta %s" % ",".join(over))
         mem["smeta"] = over
 
     # the prorab's own context
-    own = dp["own_context"](d)
+    own = guard("own_context", dp["own_context"], d)
     ctx_mem = mem.setdefault("ctx", {})
     if own:
         lv = _level(own)
@@ -207,7 +245,9 @@ def poll(brigades, d, mem, now, *, deps=None):
 
     gone, settled, hung = (mem.setdefault(k, {}) for k in ("gone", "settled", "hung"))
     for name in brigades:
-        st = dp["state"](name)
+        st = guard("state.%s" % name, dp["state"], name)
+        if st is None:
+            continue
         status = st.get("status")
         if status == "gone":
             if not gone.get(name):
@@ -218,7 +258,7 @@ def poll(brigades, d, mem, now, *, deps=None):
 
         c, suffix = st.get("ctx"), ""
         if c is None:
-            pct = dp["statusline_ctx"](name)
+            pct = guard("statusline.%s" % name, dp["statusline_ctx"], name)
             if pct is not None:
                 c, suffix = _pct_ctx(pct, d), " (statusline)"
         if c:
@@ -230,9 +270,11 @@ def poll(brigades, d, mem, now, *, deps=None):
 
         if status == "working":
             settled.pop(name, None)
-            size = dp["transcript_size"](st)
+            size = guard("transcript.%s" % name, dp["transcript_size"], st)
             h = hung.get(name)
-            if h is None or h["size"] != size:
+            if size is None:  # no transcript to watch: never call a brigade hung blindly
+                hung.pop(name, None)
+            elif h is None or h["size"] != size:
                 hung[name] = {"size": size, "since": now, "fired": False}
             elif not h["fired"] and now - h["since"] >= d["monitor"]["hung_s"]:
                 h["fired"] = True
@@ -243,6 +285,24 @@ def poll(brigades, d, mem, now, *, deps=None):
                 if settled.get(name) != status:
                     ev["settled"].append("settled %s %s" % (name, status))
                 settled[name] = status
+
+    # errors: `error <source>` after error_polls consecutive failing polls, once per streak
+    streak, fired = mem.setdefault("err_streak", {}), mem.setdefault("err_fired", [])
+    for src in list(streak):
+        if src not in errors:
+            del streak[src]
+            if src in fired:
+                fired.remove(src)
+    for src in errors:
+        streak[src] = streak.get(src, 0) + 1
+        if streak[src] >= d["monitor"]["error_polls"] and src not in fired:
+            fired.append(src)
+            ev["error"].append("error %s" % src)
+    mem["poll_errors"] = ["%s: %s" % (k, v) for k, v in errors.items()]
+    if errors:
+        mem["last_error"] = list(errors)[-1]
+    else:
+        mem.pop("last_error", None)
     return [line for k in ev for line in ev[k]]
 
 
@@ -258,28 +318,41 @@ def main(argv=None, *, deps=None):
     interval = a.interval if a.interval is not None else d["monitor"]["interval_s"]
     heartbeat = a.heartbeat if a.heartbeat is not None else d["monitor"]["heartbeat_s"]
     dp = real_deps() if deps is None else deps
-    names = a.brigade
-    if not names:
-        import journal
-        names = journal.brigades()
+    names = list(a.brigade)
     mem = load_mem()
     started = time.monotonic()
     while True:
         now = time.time()
+        list_err = None
         try:
+            if not a.brigade:  # no explicit list: follow the journal on every poll
+                try:
+                    names = list(dp["brigades"]())
+                    list_err = None
+                except Exception as e:  # keep the previous list
+                    list_err = "brigades: %s" % e
             events = poll(names, d, mem, now, deps=dp)
+            if list_err:
+                mem["poll_errors"] = mem.get("poll_errors", []) + [list_err]
+                mem["last_error"] = "brigades"
         except Exception as e:  # herdr/bd hiccup: keep watching, the heartbeat still wakes us
             print("monitor: poll failed: %s" % e, file=sys.stderr)
             events = []
+            mem["last_error"] = "poll"
+            append_log({"ts": now, "events": [], "errors": ["poll: %s" % e]})
         else:
             save_mem(mem)
-            append_log(dict(mem.get("last_reading") or {"ts": now}, events=events))
+            entry = dict(mem.get("last_reading") or {"ts": now}, events=events)
+            if mem.get("poll_errors"):
+                entry["errors"] = mem["poll_errors"]
+            append_log(entry)
         if events:
             for line in events:
                 print("EVENT %s" % line, flush=True)
             return 0
         if time.monotonic() - started >= heartbeat:
-            print("EVENT heartbeat", flush=True)
+            last = mem.get("last_error")
+            print("EVENT heartbeat" + (" last_error=%s" % last if last else ""), flush=True)
             return 0
         time.sleep(interval)
 

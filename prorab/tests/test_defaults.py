@@ -60,7 +60,8 @@ class TestDefaults(unittest.TestCase):
             d["schedule"], {"default_estimate_min": 30, "burn_min_span_s": 600})
         self.assertEqual(
             d["monitor"],
-            {"interval_s": 90, "heartbeat_s": 1200, "hung_s": 1800, "max_restarts": 2},
+            {"interval_s": 90, "heartbeat_s": 1200, "hung_s": 1800, "max_restarts": 2,
+             "error_polls": 3},
         )
         self.assertIsNone(d["polish_cmd"])
 

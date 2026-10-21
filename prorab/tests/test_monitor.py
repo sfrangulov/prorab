@@ -63,11 +63,20 @@ def ctx(pct, soft=False, hard=False):
     return {"pct": pct, "soft": soft, "hard": hard, "tokens": 0, "window": 1, "model": ""}
 
 
-class TestMonitorPoll(unittest.TestCase):
+class PollBase(unittest.TestCase):
     def setUp(self):
         self.s = Stub()
         self.mem = {}
         self.now = at(12)
+        saved_tz = os.environ.get("TZ")
+
+        def restore_tz():
+            if saved_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = saved_tz
+            time.tzset()
+        self.addCleanup(restore_tz)
         os.environ["TZ"] = "UTC"
         time.tzset()
 
@@ -77,6 +86,9 @@ class TestMonitorPoll(unittest.TestCase):
         return monitor.poll(list(names), D, self.mem, self.now if now is None else now,
                             deps=self.s.deps())
 
+
+
+class TestMonitorPoll(PollBase):
     def test_settled_suppressed_by_bg_shell(self):
         self.s.brigades["b1"] = st("idle", bg=1)
         self.assertEqual(self.poll(), [])
@@ -233,6 +245,75 @@ class TestMonitorPoll(unittest.TestCase):
         self.assertEqual(self.poll(), [])
 
 
+class Boom(RuntimeError):
+    pass
+
+
+class TestMonitorFaults(PollBase):
+    def test_mid_poll_exception_keeps_events(self):
+        del self.s.brigades["b1"]
+        self.s.limits = lim(90.0, 10.0)
+        self.s.over = ["runs"]
+        calls = {"n": 0}
+        deps = self.s.deps()
+
+        def flaky(d):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise Boom("transient")
+            return None
+        deps["own_context"] = flaky
+        # an unguarded failure (the brigade list is not a guarded source) aborts the poll
+        bad = dict(deps, state=lambda n: (_ for _ in ()).throw(KeyboardInterrupt()))
+        with self.assertRaises(KeyboardInterrupt):
+            monitor.poll(["b1"], D, self.mem, self.now, deps=bad)
+        self.assertEqual(self.mem, {})  # nothing committed
+        out = monitor.poll(["b1"], D, self.mem, self.now, deps=deps)
+        self.assertEqual([e.split()[0] for e in out], ["gone", "limit", "smeta"])
+
+    def test_failing_source_does_not_block_others(self):
+        del self.s.brigades["b1"]
+        self.s.limits = lim(90.0, 10.0)
+        deps = self.s.deps()
+
+        def broken(d):
+            raise Boom("pane read")
+        deps["own_context"] = broken
+        out = monitor.poll(["b1"], D, self.mem, self.now, deps=deps)
+        self.assertEqual(out, ["gone b1", "limit 90 10 sensor day"])
+        self.assertIn("own_context", self.mem["poll_errors"][0])
+
+    def test_error_event_after_n_polls_once_per_streak(self):
+        deps = self.s.deps()
+
+        def broken(d):
+            raise Boom("x")
+        deps["own_context"] = broken
+        run = lambda: monitor.poll(["b1"], D, self.mem, self.now, deps=deps)  # noqa: E731
+        self.assertEqual([run(), run()], [[], []])
+        self.assertEqual(run(), ["error own_context"])
+        self.assertEqual(run(), [])
+        deps["own_context"] = lambda d: None
+        self.assertEqual(run(), [])
+        deps["own_context"] = broken
+        run(), run()
+        self.assertEqual(run(), ["error own_context"])
+
+    def test_unknown_streak_not_inflated_by_failed_poll(self):
+        self.s.limits = lim(source="unknown")
+        deps = self.s.deps()
+        with self.assertRaises(KeyboardInterrupt):
+            monitor.poll(["b1"], D, self.mem, self.now,
+                         deps=dict(deps, state=lambda n: (_ for _ in ()).throw(KeyboardInterrupt())))
+        self.assertEqual(self.poll(), [])
+        self.assertEqual(self.poll(), ["blind"])
+
+    def test_no_hung_without_transcript(self):
+        self.s.brigades["b1"] = st(size=None)
+        self.assertEqual(self.poll(self.now), [])
+        self.assertEqual(self.poll(self.now + 5000), [])
+
+
 class TestMonitorMain(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -258,6 +339,38 @@ class TestMonitorMain(unittest.TestCase):
         rc, out = self.run_main("--interval", "0.01", "--heartbeat", "0.05")
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "EVENT heartbeat")
+
+    def test_brigade_list_reread_every_poll(self):
+        deps = self.s.deps()
+        seen = []
+        lists = iter([[], ["b1"]])
+        deps["brigades"] = lambda: next(lists)
+        self.s.brigades["b1"] = st("done")
+        orig = deps["state"]
+        deps["state"] = lambda n: (seen.append(n), orig(n))[1]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            monitor.main(["--interval", "0.01", "--heartbeat", "5"], deps=deps)
+        self.assertEqual(buf.getvalue().strip(), "EVENT settled b1 done")
+
+    def test_errors_logged_and_heartbeat_carries_last_error(self):
+        deps = self.s.deps()
+
+        def broken(d):
+            raise Boom("x")
+        deps["own_context"] = broken
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            monitor.main(["--brigade", "b1", "--interval", "0.01", "--heartbeat", "5"],
+                         deps=deps)
+        self.assertEqual(buf.getvalue().strip(), "EVENT error own_context")
+        rows = monitor.readings()
+        self.assertTrue(all("own_context" in r["errors"][0] for r in rows))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            monitor.main(["--brigade", "b1", "--interval", "0.01", "--heartbeat", "0.02"],
+                         deps=deps)
+        self.assertEqual(buf.getvalue().strip(), "EVENT heartbeat last_error=own_context")
 
     def test_event_exit_and_log(self):
         self.s.brigades["b1"] = st("done")

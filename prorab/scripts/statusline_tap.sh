@@ -47,25 +47,24 @@ if [ -r "$__prorab_cache/statusline.orig" ]; then
 fi
 case $__prorab_orig in
   *[!\ \	$__prorab_nl]*)
-    # A single plain command (no newline, control syntax or leading assignment) is
-    # exec'd: the shell is replaced by the original, as without the sensor, and its exit
-    # code passes through. Anything else runs in a subshell; its code passes through too.
+    # A single plain command whose first word is a FILE is exec'd: the shell is replaced
+    # by the original, as without the sensor, and its exit code passes through. Builtins,
+    # keywords, functions, assignments, control syntax: subshell (its code passes too).
     __prorab_o=${__prorab_orig%"$__prorab_nl"}
-    __prorab_w=${__prorab_o%% *}
+    __prorab_w=${__prorab_o%%[ 	]*}
     case $__prorab_o in
       *"$__prorab_nl"* | *[\;\&\|\<\>\`\(\)]*) __prorab_o= ;;
     esac
     case $__prorab_w in
-      "" | *=* | "{" | "!" | time | "[[" ) __prorab_o= ;;
+      "" | *[!A-Za-z0-9._+/-]*) __prorab_o= ;;
+      /*) [ -f "$__prorab_w" ] && [ -x "$__prorab_w" ] || __prorab_o= ;;
+      *)
+        __prorab_p=$(command -v -- "$__prorab_w")
+        case $__prorab_p in /*) ;; *) __prorab_o= ;; esac
+        ;;
     esac
-    if [ -n "$__prorab_o" ]; then
-      if [ -n "$__prorab_src" ]; then
-        eval "exec $__prorab_o" <"$__prorab_src"
-      else
-        eval "exec $__prorab_o" <<__PRORAB_EOF__
-$__prorab_in
-__PRORAB_EOF__
-      fi
+    if [ -n "$__prorab_o" ] && [ -n "$__prorab_src" ]; then
+      eval "exec $__prorab_o" <"$__prorab_src"
     fi
     if [ -n "$__prorab_src" ]; then
       (eval "$__prorab_orig") <"$__prorab_src"

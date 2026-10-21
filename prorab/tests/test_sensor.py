@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -144,7 +145,7 @@ class TestSensor(SensorCase):
         data = json.dumps({"session_id": "q1"}).encode()
         with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
             fh.write("printf Z")
-        r = subprocess.run(["sh", "-c", cmd], input=data, env=env, capture_output=True)
+        r = subprocess.run([self.SHELL, "-c", cmd], input=data, env=env, capture_output=True)
         self.assertEqual(r.stdout, b"Z")
         with open(self.settings, "rb") as fh:
             once = fh.read()
@@ -174,7 +175,7 @@ class TestSensor(SensorCase):
         with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
             fh.write("printf OUT")
         data = json.dumps({"session_id": "c1"}).encode()
-        r = subprocess.run(["sh", "-c", cmd], input=data, env=env, capture_output=True)
+        r = subprocess.run([self.SHELL, "-c", cmd], input=data, env=env, capture_output=True)
         self.assertEqual(r.stdout, b"OUT")
         r = subprocess.run([sys.executable, os.path.join(d, "sensor.py"), "install",
                             "--yes"], env=env, capture_output=True, text=True)
@@ -211,22 +212,97 @@ class TestSensor(SensorCase):
         r = self.run_tap(data, orig="printf A; printf B")
         self.assertEqual(r.stdout, b"AB")
 
-    def test_exec_path_for_plain_commands(self):
+    def _env(self):
+        return dict(os.environ, HOME=self.home, PRORAB_CACHE=self.cache)
+
+    def _direct(self, orig, data):
+        return subprocess.run([self.SHELL, "-c", orig], input=data, env=self._env(),
+                              capture_output=True, cwd=self.tmp)
+
+    def _script(self, path, body):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(body)
+        os.chmod(path, 0o755)
+        return path
+
+    def test_every_kind_of_original_matches_running_it_directly(self):
+        body = "#!/bin/sh\nread -r line\nprintf 'ok %s [%s]' \"$1\" \"$line\"\nexit 4\n"
+        s = self._script(os.path.join(self.tmp, "s.sh"), body)
+        self._script(os.path.join(self.home, "s.sh"), body)
+        sp = self._script(os.path.join(self.tmp, "sp ace", "s.sh"), body)
+        with open(os.path.join(self.tmp, "f.sh"), "w") as fh:
+            fh.write("echo sourced\n")
+        data = json.dumps({"session_id": "s1"}).encode() + b"\n"
+        origs = ["%s arg" % s, "exec %s arg" % s, "eval echo hi", ". %s/f.sh" % self.tmp,
+                 "command echo hi", "export X=1; echo $X", "'%s' arg" % sp,
+                 "~/s.sh arg", "$HOME/s.sh arg", "X=1 %s arg" % s, "echo hi",
+                 "cd %s" % self.tmp, "exit 6", "{ echo a; }", "! false", "cat",
+                 "\t%s arg" % s, "nonexistent-command-xyz"]
+        for orig in origs:
+            want = self._direct(orig, data)
+            got = self.run_tap(data, orig=orig)
+            self.assertEqual((got.returncode, got.stdout), (want.returncode, want.stdout),
+                             (self.SHELL, orig))
+
+    def test_exec_path_replaces_the_shell(self):
+        script = self._script(os.path.join(self.tmp, "pid.sh"),
+                              "#!/bin/sh\ncat >/dev/null\nprintf '%s' \"$$\"\n")
+        os.makedirs(self.cache, exist_ok=True)
+        with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
+            fh.write(script)
         data = json.dumps({"session_id": "s1"}).encode()
-        script = os.path.join(self.tmp, "orig.sh")
-        with open(script, "w") as fh:
-            fh.write("#!/bin/sh\ncat >/dev/null\nprintf 'ok %s' \"$1\"\nexit 4\n")
-        os.chmod(script, 0o755)
-        r = self.run_tap(data, orig="%s arg" % script)
-        self.assertEqual((r.returncode, r.stdout), (4, b"ok arg"))
-        # leading assignment and trailing newline in the stored file use the safe path
-        r = self.run_tap(data, orig="X=1 %s arg" % script)
-        self.assertEqual((r.returncode, r.stdout), (4, b"ok arg"))
-        # the original sees the saved JSON on stdin
-        r = self.run_tap(data, orig="cat")
-        self.assertEqual(r.stdout, data)
-        r = self.run_tap(data, orig="wc -c < /dev/null")
-        self.assertEqual(r.stdout.strip(), b"0")
+        p = subprocess.Popen([self.SHELL, "-c", SRC], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, env=self._env())
+        out, _ = p.communicate(data)
+        self.assertEqual(int(out), p.pid)  # exec: the original IS the shell process
+        with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
+            fh.write(script + "; true")  # control syntax: subshell, another pid
+        p = subprocess.Popen([self.SHELL, "-c", SRC], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, env=self._env())
+        out, _ = p.communicate(data)
+        self.assertNotEqual(int(out), p.pid)
+
+    def test_stdin_is_exact_on_every_path(self):
+        payloads = [b'{"session_id": "s1", "a": "x\\by\\n"}',
+                    b'{"session_id": "s1",\n "a": "line\\\nb"}\n',
+                    b'{"session_id": "s1"}\n\n',
+                    b'a\\b\nc', b'a\\b\nc\n', b'not json \\ ` $x "q"']
+        for orig in ("cat", "cat; true"):
+            for data in payloads:
+                r = self.run_tap(data, orig=orig)
+                self.assertEqual(r.stdout, data, (orig, data))
+
+    def test_timing_overhead_with_realistic_payload(self):
+        orig = self._script(os.path.join(self.tmp, "o.sh"),
+                            "#!/bin/sh\ncat >/dev/null\nprintf 'line'\n")
+        os.makedirs(self.cache, exist_ok=True)
+        with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
+            fh.write(orig)
+        data = json.dumps({"session_id": "t1", "cwd": "/home/user/p",
+                           "pad": "x" * 4000}).encode()
+        cmds = {"base": orig, "tap": SRC}
+
+        def once(cmd):
+            t = time.perf_counter()
+            subprocess.run([self.SHELL, "-c", cmd], input=data, env=self._env(),
+                           capture_output=True)
+            return (time.perf_counter() - t) * 1000
+
+        for c in cmds.values():
+            for _ in range(3):
+                once(c)
+        res = {k: [] for k in cmds}
+        for _ in range(20):
+            for k, c in cmds.items():
+                res[k].append(once(c))
+        base = sorted(res["base"])
+        med = statistics.median(base)
+        if (base[-5] - base[4]) / med > 0.5:
+            self.skipTest("machine too loaded to measure (baseline jitter %.0f%%)"
+                          % (100 * (base[-5] - base[4]) / med))
+        overhead = statistics.median(res["tap"]) - med
+        self.assertLessEqual(overhead, 10.0, "median overhead %.1f ms" % overhead)
 
     def test_status(self):
         self.write_settings(self.base())
@@ -286,7 +362,7 @@ class TestSensor(SensorCase):
     def test_tap_orig_gets_same_stdin_when_invalid(self):
         for orig in ("cat", "cat; true"):  # exec path and subshell path
             r = self.run_tap(b"plain text\nline2", orig=orig)
-            self.assertEqual(r.stdout.rstrip(b"\n"), b"plain text\nline2", orig)
+            self.assertEqual(r.stdout, b"plain text\nline2", orig)
 
     def test_tap_silent_on_stderr_and_failures(self):
         data = json.dumps({"session_id": "s1"}).encode()

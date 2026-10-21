@@ -1,3 +1,4 @@
+import calendar
 import json
 import os
 import sys
@@ -25,6 +26,108 @@ def _read(name):
 SENSOR = {"rate_limits": {
     "five_hour": {"used_percentage": 17.0, "resets_at": 1761060000},
     "seven_day": {"used_percentage": 26.0, "resets_at": 1761400000}}}
+
+
+class TestLimitScreens(unittest.TestCase):
+    def setUp(self):
+        saved = os.environ.get("TZ")
+
+        def restore():
+            if saved is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = saved
+            time.tzset()
+        self.addCleanup(restore)
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = _defaults.load()
+        self.d["limits"]["sensor_dir"] = os.path.join(self.tmp.name, "usage")
+        self.now = calendar.timegm((2026, 10, 21, 18, 0, 0))
+
+    def at(self, day, hour, minute=0):
+        return calendar.timegm((2026, 10, day, hour, minute, 0))
+
+    def test_limit_screen_plain(self):
+        r = limits.limit_screen(_read("limit_screen.txt"), self.d, self.now)
+        self.assertEqual(r, {"kind": "limit", "resets_at": None})
+        self.assertIsNone(limits.limit_screen("● all fine\n> \n", self.d, self.now))
+
+    def test_limit_screen_resets_at(self):
+        r = limits.limit_screen("usage limit reached\nresets 7pm\n", self.d, self.now)
+        self.assertEqual(r["resets_at"], self.at(21, 19))
+
+    def test_limit_choice_wait_option_never_upgrade(self):
+        r = limits.limit_screen(_read("limit_choice.txt"), self.d, self.now)
+        self.assertEqual(r["kind"], "limit_choice")
+        self.assertEqual(r["highlighted"], 1)
+        self.assertTrue(r["options"][1].lower().startswith("upgrade"))
+        self.assertEqual(r["wait_option"], 0)
+        self.assertEqual(r["resets_at"], self.at(21, 19))
+
+    def test_limit_choice_without_wait_option(self):
+        text = _read("limit_choice.txt").replace("Stop and wait for limit to reset",
+                                                  "Switch model")
+        r = limits.limit_screen(text, self.d, self.now)
+        self.assertEqual(r["kind"], "limit")  # a plain limit screen; no wait option to pick
+        self.assertNotIn("wait_option", r)
+
+    def test_limit_in_scrollback_ignored(self):
+        text = _read("limit_in_scrollback.txt")
+        self.assertIsNone(limits.limit_screen(text, self.d, self.now))
+        pats = self.d["limits"]["message_patterns"]
+        self.assertTrue(limits.detect_messages(text, pats))
+        self.assertFalse(limits.detect_messages(text, pats, tail_lines=15))
+        r = limits.get_limits([text], self.d, now=self.now)
+        self.assertFalse(r["reached"])
+
+    def test_parse_resets_variants(self):
+        base = calendar.timegm((2026, 10, 21, 18, 0, 0))
+        self.assertEqual(limits.parse_resets("resets 7pm", base), self.at(21, 19))
+        self.assertEqual(limits.parse_resets("resets 7pm", self.at(21, 20)), self.at(22, 19))
+        self.assertEqual(limits.parse_resets("resets 7:30pm", base), self.at(21, 19, 30))
+        self.assertEqual(limits.parse_resets("resets 19:00", base), self.at(21, 19))
+        self.assertEqual(limits.parse_resets("resets 12am", base), self.at(22, 0))
+        self.assertEqual(limits.parse_resets("resets 7pm (Europe/Berlin)", self.at(21, 15)),
+                         self.at(21, 17))  # 19:00 CEST is 17:00 UTC
+        self.assertIsNone(limits.parse_resets("resets 7pm (Nowhere/Land)", base))
+        self.assertIsNone(limits.parse_resets("resets soon", base))
+        self.assertIsNone(limits.parse_resets("resets 7", base))
+        self.assertIsNone(limits.parse_resets("", base))
+
+    def test_provider_error_final(self):
+        self.assertEqual(limits.provider_error(_read("provider_error.txt"), self.d),
+                         "quota_exceeded")
+        self.assertIsNone(limits.provider_error(_read("limit_screen.txt"), self.d))
+
+    def test_provider_error_only_in_bottom_block(self):
+        text = "quota_exceeded\n" + "x\n" * 30
+        self.assertIsNone(limits.provider_error(text, self.d))
+
+    def test_messages_source_carries_reset(self):
+        r = limits.get_limits(["blah", _read("limit_choice.txt")], self.d, now=self.now)
+        self.assertEqual(r["source"], "messages")
+        self.assertTrue(r["reached"])
+        self.assertEqual(r["five_hour_resets_at"], self.at(21, 19))
+
+    def test_pane_texts_callable_not_called_with_fresh_sensor(self):
+        usage = self.d["limits"]["sensor_dir"]
+        os.makedirs(usage)
+        with open(os.path.join(usage, "s1.json"), "w") as fh:
+            json.dump(SENSOR, fh)
+        m = os.path.getmtime(os.path.join(usage, "s1.json"))
+        calls = []
+
+        def texts():
+            calls.append(1)
+            return ["blah"]
+        self.assertEqual(limits.get_limits(texts, self.d, now=m + 1)["source"], "sensor")
+        self.assertEqual(calls, [])
+        os.unlink(os.path.join(usage, "s1.json"))
+        limits.get_limits(texts, self.d, now=m + 1)
+        self.assertEqual(calls, [1])
 
 
 class TestLimits(unittest.TestCase):

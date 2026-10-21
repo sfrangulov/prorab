@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Claude Max limits: sensor file, status line text, or limit messages."""
 import argparse
+import datetime
 import json
 import os
 import re
 import stat
 import sys
 import time
+import zoneinfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _defaults  # noqa: E402
+import herdr_cli  # noqa: E402
 
 _COUNTDOWN = r"(?:\s*\((?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?\))?"
 _FIVE = re.compile(r"5h\s+\S+\s+([\d.]+)%" + _COUNTDOWN)
@@ -144,9 +147,77 @@ def statusline_context(text):
     return float(m.group(2))
 
 
-def detect_messages(text, patterns):
+def detect_messages(text, patterns, tail_lines=None):
+    """True when a limit message pattern is present; with `tail_lines`, only in the
+    bottom block of the screen (old output above does not count)."""
+    if tail_lines is not None:
+        text = herdr_cli.bottom_block(text, tail_lines)
     low = text.lower()
     return any(p.lower() in low for p in patterns)
+
+
+_RESETS = re.compile(
+    r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?"
+    r"(?:\s*\(([A-Za-z][A-Za-z_+-]*(?:/[A-Za-z0-9_+-]+)+)\))?", re.I)
+
+
+def parse_resets(text, now):
+    """Unix seconds of the first "resets 7pm" / "resets 7:30pm" / "resets 19:00" moment
+    after `now`, optionally with a "(Area/City)" zone; None when absent or unreadable."""
+    for m in _RESETS.finditer(text):
+        hour, minute, meridiem, zone = int(m.group(1)), int(m.group(2) or 0), m.group(3), m.group(4)
+        if meridiem is None and m.group(2) is None:
+            continue  # a bare number is not a time
+        if meridiem:
+            if not 1 <= hour <= 12:
+                continue
+            hour = hour % 12 + (12 if meridiem.lower() == "pm" else 0)
+        if hour > 23 or minute > 59:
+            continue
+        tz = None
+        if zone:
+            try:
+                tz = zoneinfo.ZoneInfo(zone)
+            except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
+                return None
+        today = datetime.datetime.fromtimestamp(now, tz).date()
+        for add in range(3):
+            moment = datetime.datetime.combine(today + datetime.timedelta(days=add),
+                                               datetime.time(hour, minute), tzinfo=tz)
+            if moment.timestamp() > now:
+                return int(moment.timestamp())
+        return None
+    return None
+
+
+def limit_screen(text, d, now=None):
+    """A limit screen in the bottom block: a choice dialog with a "wait" option, or a plain
+    limit message. Carries the reset time when the screen shows one; else None."""
+    lim = d["limits"]
+    now = time.time() if now is None else now
+    block = herdr_cli.bottom_block(text, d["screen"]["tail_lines"])
+    wait, upgrade = lim["limit_choice"]["wait"].lower(), lim["limit_choice"]["upgrade"].lower()
+    st = herdr_cli.choice_state(block)
+    if st:
+        labels, highlighted = st
+        for i, label in enumerate(labels):
+            low = label.lower()
+            if low.startswith(wait) and not low.startswith(upgrade):
+                return {"kind": "limit_choice", "options": labels, "highlighted": highlighted,
+                        "wait_option": i, "resets_at": parse_resets(block, now)}
+    if detect_messages(block, lim["limit_screen"]):
+        return {"kind": "limit", "resets_at": parse_resets(block, now)}
+    return None
+
+
+def provider_error(text, d):
+    """The first final provider error pattern (an account problem, not a limit) in the
+    bottom block, else None."""
+    block = herdr_cli.bottom_block(text, d["screen"]["tail_lines"]).lower()
+    for pat in d["limits"]["fatal_patterns"]:
+        if pat.lower() in block:
+            return pat
+    return None
 
 
 def _from_panes(pane_texts):
@@ -175,16 +246,24 @@ def _from_panes(pane_texts):
 
 
 def get_limits(pane_texts, d, now=None):
+    """`pane_texts`: a list of screens or a zero-argument callable returning one; the
+    callable runs only when the sensor gives nothing."""
     lim = d["limits"]
     prune_sensor(lim["sensor_dir"], lim["sensor_retention_s"])  # real clock
     r = read_sensor(lim["sensor_dir"], lim["sensor_max_age_s"], now)
     if r:
         return r
+    if callable(pane_texts):
+        pane_texts = pane_texts()
     r = _from_panes(pane_texts)
     if r:
         return r
-    if any(detect_messages(t, lim["message_patterns"]) for t in pane_texts):
-        return _make(source="messages", reached=True)
+    tail = d["screen"]["tail_lines"]
+    for t in pane_texts:
+        if detect_messages(t, lim["message_patterns"], tail):
+            at = parse_resets(herdr_cli.bottom_block(t, tail),
+                              time.time() if now is None else now)
+            return _make(source="messages", reached=True, five_at=at)
     return _make()
 
 

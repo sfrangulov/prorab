@@ -1,0 +1,27 @@
+  Claude usage limit reached. Your limit will reset at 7pm.
+
+● finished item 1
+● finished item 2
+● finished item 3
+● finished item 4
+● finished item 5
+● finished item 6
+● finished item 7
+● finished item 8
+● finished item 9
+● finished item 10
+● finished item 11
+● finished item 12
+● finished item 13
+● finished item 14
+● finished item 15
+● finished item 16
+● finished item 17
+● finished item 18
+● finished item 19
+● finished item 20
+
+╭────────────╮
+│ >          │
+╰────────────╯
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

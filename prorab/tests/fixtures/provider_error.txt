@@ -1,0 +1,7 @@
+● Starting the run.
+
+  API Error: 429 {"error": {"type": "quota_exceeded", "message": "Quota exhausted for this account"}}
+
+╭──────────────────────────────────────────────────╮
+│ >                                                │
+╰──────────────────────────────────────────────────╯

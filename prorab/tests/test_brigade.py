@@ -177,6 +177,25 @@ class TestStart(BrigadeBase):
         self.assertEqual(self.j.kv["brigade.a1.naryad"], "N1")
         self.assertEqual(self.j.act_log[0][:2], ("N1", "ответ"))
 
+    def test_start_without_worktree_is_distinct(self):
+        repo = self.make_repo()
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        r = brigade.start(repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["status"], "started_no_worktree")
+        self.assertEqual(r["pane_id"], "w:p9")
+        self.assertNotIn("brigade.a1.worktree", self.j.kv)
+
+    def test_start_needs_consent_for_other_prompts(self):
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start(not_ready=True)
+        self.route("pane read w:p9 --source visible", "New MCP server found in .mcp.json\n")
+        r = brigade.start(OBJ_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "needs_consent", "pane_id": "w:p9"})
+        for c in self.calls():
+            self.assertNotIn("send", c)
+            self.assertNotIn("prompt", c)
+
     def test_split_down_when_pane_is_narrow(self):
         repo = self.make_repo()
         self.j.files = {"N1": ["x"]}
@@ -280,7 +299,7 @@ class TestHandover(BrigadeBase):
         self.assertEqual(r["status"], "restarted")
         calls = self.calls()
         i_exit = calls.index("agent prompt a1 /exit --wait --timeout 15000")
-        i_cd = calls.index("pane run w:p9 cd '%s'" % self.wt)
+        i_cd = calls.index("pane run w:p9 cd %s" % self.wt)
         i_start = calls.index("agent start a1 --kind claude --pane w:p9")
         i_prompt = next(i for i, c in enumerate(calls)
                         if c.startswith("agent prompt a1 Текст наряда"))
@@ -302,7 +321,71 @@ class TestHandover(BrigadeBase):
         self.assertEqual(r["status"], "restart_failed")
         for c in self.calls():
             self.assertFalse(c.startswith("agent start"))
+        self.assertEqual(self.j.spent, [("N1", 1, 0, 60)])
+
+    def restart_routes(self, wt=None):
+        wt = wt or self.wt
+        self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
+        obj = {"pane": {"pane_id": "w:p9", "foreground_cwd": "/home/user/projects/demo-app"}}
+        inwt = {"pane": {"pane_id": "w:p9", "foreground_cwd": wt}}
+        self.route_seq("pane get w:p9", [ok(obj), ok(obj), ok(inwt)])
+        self.route("pane run w:p9", ok({}))
+
+    def go(self):
+        return brigade.complete_handover("a1", "N1", "t", timeout_s=2, poll_s=0.01)
+
+    def test_act_missing_sends_nothing(self):
+        self.write_transcript("/work", "sess-1", "ещё работаю")
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.assertEqual(self.go(), {"status": "act_missing"})
+        self.assertEqual(self.j.act_log, [])
         self.assertEqual(self.j.spent, [])
+        for c in self.calls():
+            self.assertFalse(c.startswith(("agent prompt", "pane run")))
+
+    def test_unknown_worktree_never_restarts_in_cwd(self):
+        del self.j.kv["brigade.a1.worktree"]
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        r = self.go()
+        self.assertEqual(r["status"], "restart_failed")
+        for c in self.calls():
+            self.assertFalse(c.startswith(("agent prompt", "pane run", "agent start")))
+
+    def test_tokens_spent_before_exit_even_if_restart_fails(self):
+        self.restart_routes()
+        self.route("agent start a1", err("agent_start_failed"), exit_code=1)
+        self.route("agent prompt a1", ok({}))
+        self.assertEqual(self.go()["status"], "restart_failed")
+        self.assertEqual(self.j.spent, [("N1", 1, 0, 60)])
+
+    def test_restart_consent_prompt_sends_nothing(self):
+        self.restart_routes()
+        self.route("agent start a1", err("agent_not_ready"), exit_code=1)
+        self.route("pane read w:p9 --source visible", "Do you trust the files here?\nYes, I trust this folder\n")
+        self.route("agent prompt a1", ok({}))
+        self.assertEqual(self.go()["status"], "needs_trust")
+        calls = self.calls()
+        self.assertEqual([c for c in calls if c.startswith(("agent prompt", "agent send-keys",
+                                                            "pane send"))],
+                         ["agent prompt a1 /exit --wait --timeout 15000"])
+
+    def test_prompt_not_accepted_is_not_restarted(self):
+        self.restart_routes()
+        self.route("agent start a1", ok({}))
+        with mock.patch.object(brigade.herdr_cli, "send",
+                               side_effect=[None, "blocked"]):
+            self.assertEqual(self.go()["status"], "prompt_not_accepted")
+
+    def test_cd_command_is_shell_quoted(self):
+        wt = "/home/user/it's a/prorab-N1"
+        self.j.kv["brigade.a1.worktree"] = wt
+        self.restart_routes(wt)
+        self.route("agent start a1", ok({}))
+        self.route("agent prompt a1", ok({}))
+        self.go()
+        import shlex
+        cd = [c for c in self.calls() if c.startswith("pane run w:p9 ")][0]
+        self.assertEqual(shlex.split(cd[len("pane run w:p9 "):]), ["cd", wt])
 
 
 class TestGit(BrigadeBase):
@@ -336,9 +419,22 @@ class TestGit(BrigadeBase):
         repo = self.make_repo()
         wt = self.add_worktree(repo, "N1", "prorab/N1")
         self.commit(wt, "g.txt", "1\n", "one")
-        self.j.add_act("N1", "ответ", "решение: drop")
+        self.j.add_act("N1", "ответ", brigade.DROP_MARKER + " (слова заказчика)")
         self.assertEqual(brigade.cleanup(repo, "N1")["status"], "removed")
         self.assertFalse(os.path.exists(wt))
+
+    def test_cleanup_drop_needs_the_exact_marker(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.commit(wt, "g.txt", "1\n", "one")
+        for text in ("drop the unused column", "dropdown меню", "решение: drop"):
+            self.j.add_act("N1", "ответ", text)
+        self.assertEqual(brigade.cleanup(repo, "N1"), {"status": "kept", "reason": "unmerged"})
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_drop_marker_matches_acts_md(self):
+        self.assertEqual(brigade._template("Решение заказчика об отказе от ветки"),
+                         brigade.DROP_MARKER)
 
     def test_merge_check_reports_missing_and_conflict(self):
         repo = self.make_repo()

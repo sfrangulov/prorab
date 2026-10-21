@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -35,11 +36,20 @@ CONSENT_MARKERS = (
     "don't ask again",
 )
 TRUST_MARKER = CONSENT_MARKERS[0]
+# The only drop decision: an act `ответ` starting with this line (see acts.md).
+DROP_MARKER = "[решение заказчика] drop"
 
 
 def is_consent(visible):
     low = visible.lower()
     return any(m.lower() in low for m in CONSENT_MARKERS)
+
+
+def _consent_status(visible):
+    """needs_trust / needs_consent for a consent screen, else None. Never sends keys."""
+    if TRUST_MARKER.lower() in visible.lower():
+        return "needs_trust"
+    return "needs_consent" if is_consent(visible) else None
 
 
 def _kv(name, field):
@@ -50,7 +60,7 @@ def _template(heading):
     """First fenced block under `## heading` in references/acts.md."""
     with open(os.path.join(REFERENCES, "acts.md"), encoding="utf-8") as fh:
         text = fh.read()
-    m = re.search(r"^## %s\s*\n+```[^\n]*\n(.*?)\n```" % re.escape(heading), text,
+    m = re.search(r"^## %s\s*\n(?:(?!^## ).*?)```[^\n]*\n(.*?)\n```" % re.escape(heading), text,
                   re.S | re.M)
     if not m:
         raise ValueError("no block under heading %r in acts.md" % heading)
@@ -141,9 +151,8 @@ def start(obj_path, naryad, name, caller_pane):
     except herdr_cli.HerdrError as e:
         if e.code != "agent_not_ready":
             raise
-        if TRUST_MARKER in herdr_cli.pane_visible(pane).lower():
-            return {"status": "needs_trust", "pane_id": pane}
-        return {"status": "not_ready", "pane_id": pane}
+        blocked = _consent_status(herdr_cli.pane_visible(pane))
+        return {"status": blocked or "not_ready", "pane_id": pane}
 
     a = (started.get("result") or {}).get("agent") if isinstance(started, dict) else None
     if not a or not a.get("agent_session"):
@@ -159,10 +168,12 @@ def start(obj_path, naryad, name, caller_pane):
             branch = want
 
     journal.register_brigade(name)
-    for field, value in (("naryad", naryad), ("object", obj_path), ("pane", pane),
-                         ("worktree", worktree or ""), ("branch", branch or "")):
+    fields = [("naryad", naryad), ("object", obj_path), ("pane", pane)]
+    if worktree:
+        fields += [("worktree", worktree), ("branch", branch or "")]
+    for field, value in fields:
         journal.kv_set(_kv(name, field), value)
-    result = {"status": "started", "pane_id": pane, "name": name,
+    result = {"status": "started" if worktree else "started_no_worktree", "pane_id": pane, "name": name,
               "session_id": session_id, "worktree": worktree, "branch": branch}
     journal.add_act(naryad, "ответ", "бригада %s запущена: панель %s, ветка %s, сессия %s"
                     % (name, pane, branch, session_id))
@@ -257,27 +268,44 @@ def complete_handover(name, naryad, naryad_text, timeout_s=60, poll_s=1):
     if st["bg_shells"] > 0:
         return {"status": "bg_shells", "bg_shells": st["bg_shells"]}
     pane = st["pane_id"]
-    worktree = journal.kv_get(_kv(name, "worktree")) or st["cwd"]
     path = _transcript_path(a)
     last = transcript.last_text(path) if path else ""
-    act = "\n".join(ln for ln in last.splitlines() if ln.strip() != HANDOVER_MARKER).strip()
+    lines = last.splitlines()
+    if not any(ln.strip() == HANDOVER_MARKER for ln in lines):
+        return {"status": "act_missing"}
+    worktree = journal.kv_get(_kv(name, "worktree"))
+    if not worktree:
+        return {"status": "restart_failed", "reason": "worktree of the brigade is unknown"}
+    act = "\n".join(ln for ln in lines if ln.strip() != HANDOVER_MARKER).strip()
     tokens = _tokens_of(a)
     journal.add_act(naryad, "пересменка", act)
+    journal.spend(naryad, sessions=1, tokens=tokens)
 
     _exit(name)
     gone = _wait(lambda: herdr_cli.agent(name) is None
                  and not _pane(pane).get("agent"), timeout_s, poll_s)
     if not gone:
         return {"status": "restart_failed", "reason": "agent did not exit"}
-    herdr_cli.run(["pane", "run", pane, "cd '%s'" % worktree])
+    herdr_cli.run(["pane", "run", pane, "cd %s" % shlex.quote(worktree)])
     if not _wait(lambda: _same_dir(_pane(pane).get("foreground_cwd"), worktree),
                  timeout_s, poll_s):
         return {"status": "restart_failed", "reason": "shell did not enter the worktree"}
-    herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane], timeout_s=90)
+    try:
+        herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane],
+                      timeout_s=90)
+    except herdr_cli.HerdrError as e:
+        blocked = None
+        if e.code == "agent_not_ready":
+            blocked = _consent_status(herdr_cli.pane_visible(pane))
+        return {"status": blocked or "restart_failed", "reason": str(e), "pane_id": pane}
 
     text = "\n\n".join([naryad_text] + journal.acts(naryad, "пересменка"))
-    sent = send_naryad(name, text)
-    journal.spend(naryad, sessions=1, tokens=tokens)
+    try:
+        sent = send_naryad(name, text)
+    except herdr_cli.HerdrError as e:
+        return {"status": "prompt_not_accepted", "reason": str(e), "pane_id": pane}
+    if sent != "accepted":
+        return {"status": "prompt_not_accepted", "sent": sent, "pane_id": pane}
     return {"status": "restarted", "sent": sent, "tokens": tokens, "pane_id": pane}
 
 
@@ -382,7 +410,7 @@ def cleanup(obj_path, naryad):
     if wt is None:
         return {"status": "absent"}
     branch = wt["branch"]
-    dropped = any("drop" in a.lower() for a in journal.acts(naryad, "ответ"))
+    dropped = any(a.startswith(DROP_MARKER) for a in journal.acts(naryad, "ответ"))
     merged = False
     if branch:
         out = _git(["branch", "--merged", _default_branch(obj_path)], obj_path).stdout

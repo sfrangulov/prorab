@@ -118,7 +118,8 @@ def cap_for(now, resets_at, morning, d, night=False, week_known=True):
     lim = d["limits"]
     if not night or resets_at is None:
         day = lim["five_hour"]
-        return {"mode": "day", "no_new_mass": day["no_new_mass"], "stop": day["stop"]}
+        no_new = 0 if (night and not week_known) else day["no_new_mass"]
+        return {"mode": "day", "no_new_mass": no_new, "stop": day["stop"]}
     night_cfg = lim["five_hour_night"]
     if resets_at <= _next_morning(now, morning):
         cap = {"mode": "night_before_morning", "no_new_mass": None,
@@ -138,7 +139,9 @@ def allowed_parallel(ready, burn_pp_per_h, used_pct, cap_pct, resets_in_s, activ
                      ncpu, d):
     """Total brigades allowed at once (the active ones included)."""
     ceiling = d["budget"]["parallel_ceiling"]
-    if used_pct >= cap_pct:
+    if used_pct is None:  # unknown usage is not zero: no growth, but one brigade may run
+        limit_bound = max(1, active)
+    elif used_pct >= cap_pct:
         limit_bound = 0
     elif burn_pp_per_h is None or active == 0:
         limit_bound = ceiling
@@ -190,9 +193,13 @@ def build_plan(j, d, now, lim, log, load):
     cap_pct = 100.0 if ov else cap["stop"]
     entries = readings(log, since=now - 6 * 3600)
     used = lim.get("five_hour")
-    if used is None:
-        pts = burn_points(entries)
-        used = pts[-1][1] if pts else 0.0
+    if used is None:  # the log only counts while it is as fresh as a sensor reading
+        fresh = [p for p in burn_points(entries)
+                 if now - p[0] <= d["limits"]["sensor_max_age_s"]]
+        used = fresh[-1][1] if fresh else None
+    unknown = used is None
+    if unknown and ov:
+        used = 0.0  # «игнорируй лимиты»: usage does not bound the brigades
     graph = j.graph()
     ready = [n for n in j.ready_naryads()]
     order = [n for n in critical_order(graph, naryad_estimates(j, d, list(graph)))
@@ -203,12 +210,28 @@ def build_plan(j, d, now, lim, log, load):
     allowed = allowed_parallel(len(order), burn_rate(burn_points(entries), d), used, cap_pct,
                                lim.get("five_hour_resets_in_s"), active, load1, ncpu, d)
     return {"order": order, "allowed": allowed, "active": active,
-            "new": max(0, allowed - active), "cap": cap, "override": ov}
+            "new": max(0, allowed - active), "cap": cap, "override": ov,
+            "limits_unknown": unknown}
 
 
-def _limits(d, now):
-    import limits  # sensor files only: no herdr needed
-    return limits.get_limits([], d, now)
+def live_pane_texts():
+    """Visible text of every herdr agent pane; [] outside herdr or when it fails."""
+    if os.environ.get("HERDR_ENV") != "1":
+        return []
+    try:
+        import herdr_cli
+        return [herdr_cli.pane_visible(a["pane_id"]) for a in herdr_cli.agents()]
+    except Exception:  # herdr is only a fallback source: never fail the plan on it
+        return []
+
+
+def gather_limits(d, now, pane_texts=None):
+    """Sensor first, then the max over all panes' status lines; resets_at filled from the countdown."""
+    import limits
+    lim = limits.get_limits((pane_texts or live_pane_texts)(), d, now)
+    if lim.get("five_hour_resets_at") is None and lim.get("five_hour_resets_in_s") is not None:
+        lim = dict(lim, five_hour_resets_at=now + lim["five_hour_resets_in_s"])
+    return lim
 
 
 def main(argv=None):
@@ -222,7 +245,7 @@ def main(argv=None):
     d = _defaults.load()
     now = a.now if a.now is not None else time.time()
     if a.cmd == "cap":
-        lim = _limits(d, now)
+        lim = gather_limits(d, now)
         resets_at = a.resets_at if a.resets_at is not None else lim.get("five_hour_resets_at")
         night = journal.kv_get("shift.night") == "1"
         cap = cap_for(now, resets_at, d["night"]["morning"], d, night=night,
@@ -230,7 +253,7 @@ def main(argv=None):
         print(json.dumps(cap))
         return 0
     journal.ensure_db()
-    plan = build_plan(journal, d, now, _limits(d, now), log_path(), machine_load())
+    plan = build_plan(journal, d, now, gather_limits(d, now), log_path(), machine_load())
     print(json.dumps(plan, ensure_ascii=False))
     return 0
 

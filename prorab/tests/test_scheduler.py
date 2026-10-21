@@ -30,7 +30,7 @@ class TestScheduler(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        saved = {k: os.environ.get(k) for k in ("TZ", "PATH", "PRORAB_LOG_DIR", "HOME")}
+        saved = {k: os.environ.get(k) for k in ("TZ", "PATH", "PRORAB_LOG_DIR", "HOME", "HERDR_ENV")}
 
         def restore():
             for k, v in saved.items():
@@ -41,6 +41,7 @@ class TestScheduler(unittest.TestCase):
             time.tzset()
         self.addCleanup(restore)
         os.environ["TZ"] = "UTC"
+        os.environ.pop("HERDR_ENV", None)  # tests never reach the real herdr
         time.tzset()
 
     # ---- critical path ----------------------------------------------------------
@@ -113,6 +114,12 @@ class TestScheduler(unittest.TestCase):
     def test_cap_for_unknown_reset_is_day(self):
         c = scheduler.cap_for(at(23), None, "08:00", D, night=True)
         self.assertEqual(c, {"mode": "day", "no_new_mass": 60, "stop": 80})
+
+    def test_cap_for_night_unknown_reset_unknown_week_blocks_mass(self):
+        c = scheduler.cap_for(at(23), None, "08:00", D, night=True, week_known=False)
+        self.assertEqual(c, {"mode": "day", "no_new_mass": 0, "stop": 80})
+        c = scheduler.cap_for(at(23), None, "08:00", D, night=False, week_known=False)
+        self.assertEqual(c["no_new_mass"], 60)  # by day the week does not matter
 
     def test_cap_for_night_unknown_week_blocks_mass(self):
         c = scheduler.cap_for(at(23), at(3, day=22), "08:00", D, night=True, week_known=False)
@@ -202,17 +209,82 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(plan["cap"]["mode"], "day")
         self.assertIsNone(plan["override"])
 
-    def test_build_plan_override_and_night(self):
+    def test_build_plan_night_cap_blocks_without_override(self):
         now = at(23)
-        lim = {"five_hour": 90.0, "seven_day": None, "five_hour_resets_at": at(3, day=22),
+        lim = {"five_hour": 97.0, "seven_day": None, "five_hour_resets_at": at(3, day=22),
+               "five_hour_resets_in_s": 4 * 3600}
+        plan = scheduler.build_plan(self._journal(kv={"shift.night": "1"}), D, now, lim,
+                                    os.path.join(self.tmp.name, "none"), (0.5, 8))
+        self.assertEqual(plan["cap"]["mode"], "night_before_morning")
+        self.assertEqual(plan["cap"]["no_new_mass"], 0)  # week unknown at night
+        self.assertEqual(plan["allowed"], 0)  # 97 >= 95
+
+    def test_build_plan_override_lifts_the_cap(self):
+        now = at(23)
+        lim = {"five_hour": 97.0, "seven_day": None, "five_hour_resets_at": at(3, day=22),
                "five_hour_resets_in_s": 4 * 3600}
         ov = {"goal": "g", "since": 1, "source": "слова заказчика"}
         j = self._journal(kv={"shift.night": "1"}, override=ov)
-        plan = scheduler.build_plan(j, D, now, lim, os.path.join(self.tmp.name, "none"), (0.5, 8))
+        none = os.path.join(self.tmp.name, "none")
+        plan = scheduler.build_plan(j, D, now, lim, none, (0.5, 8))
         self.assertEqual(plan["override"], ov)
-        self.assertEqual(plan["cap"]["mode"], "night_before_morning")
-        self.assertEqual(plan["cap"]["no_new_mass"], 0)  # week unknown at night
-        self.assertGreater(plan["allowed"], 0)  # override: the cap is 100, not 95
+        self.assertEqual(plan["cap"]["stop"], 95)  # the reported cap is unchanged
+        self.assertEqual(plan["allowed"], 3)  # active 1 + 2 ready; the cap is 100
+        # the machine bound still holds under the override
+        plan = scheduler.build_plan(j, D, now, lim, none, (9.0, 8))
+        self.assertEqual(plan["allowed"], 1)  # load > ncpu: only the running brigade
+        # by day: 85 > stop 80
+        lim = dict(lim, five_hour=85.0)
+        day = scheduler.build_plan(self._journal(), D, at(14), lim, none, (0.5, 8))
+        self.assertEqual(day["allowed"], 0)
+        day = scheduler.build_plan(self._journal(override=ov), D, at(14), lim, none, (0.5, 8))
+        self.assertEqual(day["allowed"], 3)
+
+    def test_build_plan_unknown_usage_is_conservative(self):
+        none = os.path.join(self.tmp.name, "none")
+        now = at(14)
+        lim = {"five_hour": None, "seven_day": None, "five_hour_resets_at": None,
+               "five_hour_resets_in_s": None}
+        plan = scheduler.build_plan(self._journal(), D, now, lim, none, (0.5, 8))
+        self.assertTrue(plan["limits_unknown"])
+        self.assertEqual(plan["allowed"], 1)  # max(1, active=1), not active + ready
+        j = self._journal()
+        j.brigades = lambda: ["b1", "b2", "b3"]
+        plan = scheduler.build_plan(j, D, now, lim, none, (0.5, 8))
+        self.assertEqual(plan["allowed"], 3)  # no growth beyond the running brigades
+        j.brigades = lambda: []
+        plan = scheduler.build_plan(j, D, now, lim, none, (0.5, 8))
+        self.assertEqual(plan["allowed"], 1)  # one brigade may start
+        ok = dict(lim, five_hour=10.0)
+        self.assertFalse(scheduler.build_plan(j, D, now, ok, none, (0.5, 8))["limits_unknown"])
+
+    def test_build_plan_stale_log_is_ignored_fresh_log_is_used(self):
+        log = os.path.join(self.tmp.name, "monitor.log")
+        now = at(14)
+        lim = {"five_hour": None, "seven_day": None, "five_hour_resets_at": None,
+               "five_hour_resets_in_s": None}
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": now - 3600, "five_hour": 10.0}) + "\n")
+        plan = scheduler.build_plan(self._journal(), D, now, lim, log, (0.5, 8))
+        self.assertTrue(plan["limits_unknown"])  # an hour old: older than sensor_max_age_s
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": now - 60, "five_hour": 10.0}) + "\n")
+        plan = scheduler.build_plan(self._journal(), D, now, lim, log, (0.5, 8))
+        self.assertFalse(plan["limits_unknown"])
+        self.assertEqual(plan["allowed"], 3)
+
+    def test_gather_limits_reads_pane_texts(self):
+        os.environ["HOME"] = self.tmp.name  # no real sensor files
+        d = _defaults.load()
+        fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
+                               "statusline_wide.txt")
+        with open(fixture, encoding="utf-8") as fh:
+            text = fh.read()
+        lim = scheduler.gather_limits(d, at(14), pane_texts=lambda: [text])
+        self.assertEqual((lim["source"], lim["five_hour"]), ("statusline", 17.0))
+        self.assertAlmostEqual(lim["five_hour_resets_at"], at(14) + 4 * 3600 + 7 * 60)
+        os.environ.pop("HERDR_ENV", None)
+        self.assertEqual(scheduler.gather_limits(d, at(14))["source"], "unknown")  # no herdr
 
     def test_cli_cap(self):
         real = scheduler.journal

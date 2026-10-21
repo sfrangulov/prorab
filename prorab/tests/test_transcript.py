@@ -30,8 +30,8 @@ def _entry(tokens, model):
 class TestTranscript(unittest.TestCase):
     def test_slug(self):
         self.assertEqual(
-            transcript.project_slug("/Users/x/projects/project-a"),
-            "-Users-x-projects-project-a",
+            transcript.project_slug("/home/user/projects/demo-app"),
+            "-home-user-projects-demo-app",
         )
 
     def test_last_usage_ignores_sidechain(self):

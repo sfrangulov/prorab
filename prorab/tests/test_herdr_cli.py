@@ -16,16 +16,16 @@ FAKES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fakes")
 
 DIALOG = """\
 ────────────────────────────────────────────────────────────────────────────────
- ☐ Порог
+ ☐ Выбор
 
-Какой порог плотности текста на слайде использовать?
+Какой вариант использовать?
 
-❯ 1. Поднять до 100 (Recommended)
-     Порог 100 слов, r3 остаётся
-  2. Без r3
-     Убрать правило r3 совсем
-  3. r3 в пределах 90
-     Оставить r3, порог 90
+❯ 1. Вариант A (Recommended)
+     Описание варианта A
+  2. Вариант B
+     Описание варианта B
+  3. Вариант C
+     Описание варианта C
   4. Type something.
 ────────────────────────────────────────────────────────────────────────────────
   5. Chat about this
@@ -117,7 +117,7 @@ class TestParsing(unittest.TestCase):
 
     def test_choice_dialog_parses_options(self):
         self.assertEqual(herdr_cli.choice_dialog(DIALOG), [
-            "Поднять до 100 (Recommended)", "Без r3", "r3 в пределах 90",
+            "Вариант A (Recommended)", "Вариант B", "Вариант C",
             "Type something.", "Chat about this"])
 
     def test_choice_dialog_none_on_plain_screen(self):

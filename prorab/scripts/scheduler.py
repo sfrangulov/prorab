@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Scheduler: how many brigades may run at once, in what order to issue наряды, which
+5-hour-limit thresholds apply by day and by night.
+
+``plan`` is what the prorab calls before issuing; ``cap`` prints the current thresholds.
+"""
+import argparse
+import datetime
+import json
+import math
+import os
+import statistics
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _defaults  # noqa: E402
+import journal  # noqa: E402
+
+
+# ---- critical path ----------------------------------------------------------------
+
+def critical_order(graph, estimates):
+    """Ids sorted by remaining path (own estimate + longest path of what they block)."""
+    ids = set(graph)
+    for blockers in graph.values():
+        ids.update(blockers)
+    blocks = {i: [] for i in ids}
+    for i, blockers in graph.items():
+        for b in blockers:
+            blocks[b].append(i)
+    memo = {}
+
+    def remaining(i, seen=()):
+        if i in memo:
+            return memo[i]
+        tail = [remaining(j, seen + (i,)) for j in blocks[i] if j not in seen and j != i]
+        memo[i] = estimates.get(i, 0.0) + (max(tail) if tail else 0.0)
+        return memo[i]
+
+    return sorted(ids, key=lambda i: (-remaining(i), i))
+
+
+def estimate(stage, history, d):
+    """Stage estimate: its own, else the median of the kind's history, else the default."""
+    own = stage.get("estimate_min")
+    if own is not None:
+        return float(own)
+    past = history.get(stage.get("kind")) or []
+    if past:
+        return float(statistics.median(past))
+    return float(d["schedule"]["default_estimate_min"])
+
+
+# ---- monitor log and burn rate ---------------------------------------------------------
+
+def log_path():
+    base = os.environ.get("PRORAB_LOG_DIR") or os.path.expanduser("~/projects/prorab/logs")
+    return os.path.join(base, "monitor.log")
+
+
+def readings(path=None, since=None):
+    """Parsed monitor.log entries (one JSON object per line); bad lines are skipped."""
+    out = []
+    try:
+        with open(path or log_path(), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(r, dict) or not isinstance(r.get("ts"), (int, float)):
+                    continue
+                if since is not None and r["ts"] < since:
+                    continue
+                out.append(r)
+    except OSError:
+        return []
+    return out
+
+
+def burn_points(entries):
+    """``[(ts, five_hour)]`` from monitor entries that carry a 5-hour reading."""
+    return [(r["ts"], r["five_hour"]) for r in entries
+            if isinstance(r.get("five_hour"), (int, float))]
+
+
+def burn_rate(points, d=None):
+    """Percentage points per hour since the last reset (drop); None when unknown."""
+    min_span = (d or _defaults.load())["schedule"]["burn_min_span_s"]
+    start = 0
+    for i in range(1, len(points)):
+        if points[i][1] < points[i - 1][1]:
+            start = i
+    pts = points[start:]
+    if len(pts) < 2:
+        return None
+    span = pts[-1][0] - pts[0][0]
+    if span < min_span:
+        return None
+    return (pts[-1][1] - pts[0][1]) / (span / 3600.0)
+
+
+# ---- caps -------------------------------------------------------------------------
+
+def _next_morning(now, morning):
+    hh, mm = (int(x) for x in morning.split(":"))
+    cur = datetime.datetime.fromtimestamp(now)
+    target = cur.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if target.timestamp() <= now:
+        target += datetime.timedelta(days=1)
+    return target.timestamp()
+
+
+def cap_for(now, resets_at, morning, d, night=False, week_known=True):
+    lim = d["limits"]
+    if not night or resets_at is None:
+        day = lim["five_hour"]
+        return {"mode": "day", "no_new_mass": day["no_new_mass"], "stop": day["stop"]}
+    night_cfg = lim["five_hour_night"]
+    if resets_at <= _next_morning(now, morning):
+        cap = {"mode": "night_before_morning", "no_new_mass": None,
+               "stop": night_cfg["stop_before_morning"]}
+    else:
+        win = night_cfg["morning_window"]
+        cap = {"mode": "night_morning_window", "no_new_mass": win["no_new_mass"],
+               "stop": win["stop"]}
+    if not week_known:
+        cap["no_new_mass"] = 0  # the week is unknown at night: no new mass runs
+    return cap
+
+
+# ---- parallelism ----------------------------------------------------------------------
+
+def allowed_parallel(ready, burn_pp_per_h, used_pct, cap_pct, resets_in_s, active, load1,
+                     ncpu, d):
+    """Total brigades allowed at once (the active ones included)."""
+    ceiling = d["budget"]["parallel_ceiling"]
+    if used_pct >= cap_pct:
+        limit_bound = 0
+    elif burn_pp_per_h is None or active == 0:
+        limit_bound = ceiling
+    else:
+        hours = resets_in_s / 3600.0 if resets_in_s is not None else 5.0
+        per_brigade = (burn_pp_per_h / active) * hours
+        limit_bound = ceiling if per_brigade <= 0 else math.floor((cap_pct - used_pct) / per_brigade)
+    load_bound = active if load1 > ncpu else ceiling
+    return max(0, min(active + ready, limit_bound, load_bound, ceiling))
+
+
+def machine_load():
+    """``(load1, ncpu)`` from sysctl; falls back to os.getloadavg / cpu_count."""
+    try:
+        load = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True,
+                              text=True, check=True).stdout
+        load1 = float(load.replace("{", " ").replace("}", " ").split()[0])
+        ncpu = int(subprocess.run(["sysctl", "-n", "hw.ncpu"], capture_output=True,
+                                  text=True, check=True).stdout.strip())
+        return load1, ncpu
+    except (OSError, subprocess.CalledProcessError, ValueError, IndexError):
+        return os.getloadavg()[0], os.cpu_count() or 1
+
+
+# ---- plan ----------------------------------------------------------------------------
+
+def naryad_estimates(j, d, ids):
+    """Estimate of a наряд = the sum over its open stages."""
+    history = {}
+    out = {}
+    for n in ids:
+        total = 0.0
+        for s in j.open_stages(n):
+            info = j.stage_info(s)
+            kind = info.get("kind")
+            if kind not in history:
+                history[kind] = j.durations(kind) if kind else []
+            total += estimate(info, history, d)
+        out[n] = total
+    return out
+
+
+def build_plan(j, d, now, lim, log, load):
+    night = j.kv_get("shift.night") == "1"
+    ov = j.override()
+    resets_at = lim.get("five_hour_resets_at")
+    cap = cap_for(now, resets_at, d["night"]["morning"], d, night=night,
+                  week_known=lim.get("seven_day") is not None)
+    cap_pct = 100.0 if ov else cap["stop"]
+    entries = readings(log, since=now - 6 * 3600)
+    used = lim.get("five_hour")
+    if used is None:
+        pts = burn_points(entries)
+        used = pts[-1][1] if pts else 0.0
+    graph = j.graph()
+    ready = [n for n in j.ready_naryads()]
+    order = [n for n in critical_order(graph, naryad_estimates(j, d, list(graph)))
+             if n in ready]
+    order += [n for n in ready if n not in order]
+    active = len(j.brigades())
+    load1, ncpu = load
+    allowed = allowed_parallel(len(order), burn_rate(burn_points(entries), d), used, cap_pct,
+                               lim.get("five_hour_resets_in_s"), active, load1, ncpu, d)
+    return {"order": order, "allowed": allowed, "active": active,
+            "new": max(0, allowed - active), "cap": cap, "override": ov}
+
+
+def _limits(d, now):
+    import limits  # sensor files only: no herdr needed
+    return limits.get_limits([], d, now)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("plan")
+    p = sub.add_parser("cap")
+    p.add_argument("--now", type=float)
+    p.add_argument("--resets-at", type=float)
+    a = ap.parse_args(argv)
+    d = _defaults.load()
+    now = a.now if a.now is not None else time.time()
+    if a.cmd == "cap":
+        lim = _limits(d, now)
+        resets_at = a.resets_at if a.resets_at is not None else lim.get("five_hour_resets_at")
+        night = journal.kv_get("shift.night") == "1"
+        cap = cap_for(now, resets_at, d["night"]["morning"], d, night=night,
+                      week_known=lim.get("seven_day") is not None)
+        print(json.dumps(cap))
+        return 0
+    journal.ensure_db()
+    plan = build_plan(journal, d, now, _limits(d, now), log_path(), machine_load())
+    print(json.dumps(plan, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

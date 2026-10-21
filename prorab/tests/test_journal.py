@@ -332,6 +332,31 @@ class TestJournal(JournalBase):
         run("override", "clear")
         self.assertEqual(run("override", "get")[1], {"override": None})
 
+    def test_graph_open_stages_and_ready_naryads(self):
+        a = journal.create_naryad("o", "A", "b", {})
+        b = journal.create_naryad("o", "B", "b", {})
+        c = journal.create_naryad("o", "C", "b", {})
+        journal._run(["dep", "add", b, a])  # b is blocked by a
+        journal._run(["dep", "add", c, b])
+        sa1 = journal.create_stage(a, "A1", "b")
+        sa2 = journal.create_stage(a, "A2", "b", blocked_by=[sa1])
+        sb1 = journal.create_stage(b, "B1", "b")
+        g = journal.graph()
+        self.assertEqual(g, {a: [], b: [a], c: [b]})
+        self.assertEqual(sorted(journal.open_stages(a)), sorted([sa1, sa2]))
+        journal.bd(["close", sa1])
+        self.assertEqual(journal.open_stages(a), [sa2])
+        journal._run(["close", c, "--force"])
+        self.assertNotIn(c, journal.graph())
+        self.assertNotIn(c, journal.graph()[b] + journal.graph()[a])
+        # a ready stage makes its наряд issuable; a working brigade hides it
+        self.assertIn(a, journal.ready_naryads())
+        self.assertNotIn(sb1, journal.ready_naryads())
+        journal.register_brigade("br-a")
+        journal.kv_set("brigade.br-a.naryad", a)
+        self.assertNotIn(a, journal.ready_naryads())
+        self.assertEqual(journal.working_naryads(), [a])
+
 
 if __name__ == "__main__":
     unittest.main()

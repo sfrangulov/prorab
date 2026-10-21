@@ -268,6 +268,51 @@ def ready():
     return out
 
 
+# ---- the scheduler's view: наряды as units of issue ---------------------------------
+
+def _open_naryads():
+    return [n for n in bd(["list", "--label", NARYAD_LABEL, "--no-parent", "--limit", "0"])
+            if n.get("status") != "closed"]
+
+
+def graph():
+    """``{open наряд: [open наряды that block it]}`` (stage-level edges are not included)."""
+    items = _open_naryads()
+    ids = {n["id"] for n in items}
+    out = {}
+    for n in items:
+        out[n["id"]] = [d["id"] for d in _show(n["id"]).get("dependencies") or []
+                        if d.get("dependency_type") != "parent-child" and d["id"] in ids]
+    return out
+
+
+def open_stages(naryad):
+    """Ids of the наряд's stages that are not closed."""
+    return [c["id"] for c in bd(["list", "--parent", naryad, "--all", "--limit", "0"])
+            if c.get("status") != "closed"]
+
+
+def working_naryads():
+    """Наряды a registered brigade is working on."""
+    out = []
+    for name in brigades():
+        n = kv_get("brigade.%s.naryad" % name)
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+def ready_naryads():
+    """Наряды with a ready stage (or ready themselves) and no brigade working on them."""
+    busy = set(working_naryads())
+    out = []
+    for it in ready():
+        n = it.get("parent") or it["id"]
+        if n not in busy and n not in out:
+            out.append(n)
+    return out
+
+
 # ---- acts -------------------------------------------------------------------
 
 def add_act(bead, kind, text):
@@ -440,6 +485,9 @@ def main(argv=None):
     osub.add_parser("get"); osub.add_parser("clear")
     osub.add_parser("set").add_argument("goal")
     sub.add_parser("ready")
+    sub.add_parser("graph")
+    sub.add_parser("ready-naryads")
+    sub.add_parser("open-stages").add_argument("naryad")
     p = sub.add_parser("act")
     p.add_argument("bead"); p.add_argument("kind"); p.add_argument("text")
     p = sub.add_parser("acts")
@@ -498,6 +546,12 @@ def main(argv=None):
         return _emit({"override": override()})
     if a.cmd == "ready":
         return _emit(ready())
+    if a.cmd == "graph":
+        return _emit(graph())
+    if a.cmd == "ready-naryads":
+        return _emit(ready_naryads())
+    if a.cmd == "open-stages":
+        return _emit(open_stages(a.naryad))
     if a.cmd == "act":
         add_act(a.bead, a.kind, a.text)
         return _emit({"ok": True})

@@ -152,6 +152,31 @@ class TestSensor(SensorCase):
         sensor.uninstall(self.settings, self.cache)
         self.assertEqual(self.read_settings()["statusLine"], STATUS_LINE)
 
+    def test_cli_install_with_spaced_path_executes(self):
+        d = os.path.join(self.tmp, "my dir")
+        os.makedirs(d)
+        for name in ("sensor.py", "statusline_tap.py"):
+            shutil.copy(os.path.join(SCRIPTS_DIR, name), os.path.join(d, name))
+            os.chmod(os.path.join(d, name), 0o755)
+        self.write_settings(self.base())
+        env = dict(os.environ, HOME=self.home, PRORAB_CACHE=self.cache)
+        r = subprocess.run([sys.executable, os.path.join(d, "sensor.py"), "install",
+                            "--yes"], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cmd = self.read_settings()["statusLine"]["command"]
+        tap = os.path.join(os.path.realpath(d), "statusline_tap.py")
+        self.assertEqual(cmd, shlex.quote(tap))
+        with open(os.path.join(self.cache, "statusline.orig")) as fh:
+            self.assertEqual(fh.read(), STATUS_LINE["command"])
+        with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
+            fh.write("printf OUT")
+        data = json.dumps({"session_id": "c1"}).encode()
+        r = subprocess.run(["sh", "-c", cmd], input=data, env=env, capture_output=True)
+        self.assertEqual(r.stdout, b"OUT")
+        r = subprocess.run([sys.executable, os.path.join(d, "sensor.py"), "install",
+                            "--yes"], env=env, capture_output=True, text=True)
+        self.assertEqual(len(self.backups()), 1)
+
     def test_backup_keeps_private_mode(self):
         self.write_settings(self.base())
         os.chmod(self.settings, 0o600)

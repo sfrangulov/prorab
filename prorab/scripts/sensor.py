@@ -145,13 +145,12 @@ def main(argv):
         print(json.dumps(uninstall(settings, cache)))
         return 0
     _cfg, _sl, old = _plan(settings, tap)
-    tap = shlex.quote(tap)
-    if old == tap:
+    if old == shlex.quote(tap):
         print("already installed; nothing to change")
         return 0
     if "--yes" not in argv[1:]:
         print("Planned change in %s:" % settings)
-        print("  statusLine.command: %s -> %s" % (old if old else "(none)", tap))
+        print("  statusLine.command: %s -> %s" % (old if old else "(none)", shlex.quote(tap)))
         print("  backup: %s" % _backup_path(settings))
         print("Re-run with --yes after the customer agrees.")
         return 2

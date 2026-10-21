@@ -745,3 +745,39 @@ class TestJournalG(JournalBase):
         journal.issue_set("wo-3", "issuing")
         rc, out = self.run_cli("issues", "--state", "issuing")
         self.assertEqual(list(out), ["wo-3"])
+
+
+class TestJournalLabels(JournalBase):
+    def test_add_label_and_labels(self):
+        n = new_work_order()
+        self.assertNotIn("needs:clearance", journal.labels(n))
+        journal.add_label(n, "needs:clearance")
+        journal.add_label(n, "needs:clearance")  # idempotent
+        self.assertEqual(journal.labels(n).count("needs:clearance"), 1)
+        self.assertIn(journal.WORK_ORDER_LABEL, journal.labels(n))
+
+    def test_label_cli(self):
+        import io
+        from contextlib import redirect_stdout
+        n = new_work_order()
+
+        def run(*argv):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = journal.main(list(argv))
+            return rc, json.loads(buf.getvalue())
+        rc, out = run("label", "add", n, "clearance:granted")
+        self.assertEqual(rc, 0)
+        rc, out = run("label", "list", n)
+        self.assertEqual(rc, 0)
+        self.assertIn("clearance:granted", out)
+
+    def test_act_records_carry_time(self):
+        n = new_work_order()
+        journal.add_act(n, "answer", "first")
+        journal.add_act(n, "shift", "second")
+        recs = journal.act_records(n)
+        self.assertEqual([(r["kind"], r["text"]) for r in recs],
+                         [("answer", "first"), ("shift", "second")])
+        self.assertTrue(all(isinstance(r["ts"], float) for r in recs))
+        self.assertEqual([r["text"] for r in journal.act_records(n, "shift")], ["second"])

@@ -8,6 +8,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -361,6 +362,19 @@ def add_act(bead, kind, text):
     bd(["comments", "add", bead, "[act:%s] %s" % (kind, text)])
 
 
+def act_records(bead, kind=None):
+    """Acts of a bead, oldest first: ``[{"kind", "text", "ts"}]`` (`text` without the tag,
+    `ts` unix time or None)."""
+    comments = bd(["comments", bead]) or []
+    comments = sorted(comments, key=lambda c: c.get("created_at", ""))
+    out = []
+    for c in comments:
+        m = re.match(r"\[act:(\w+)\] ?(.*)", c.get("text", ""), re.S)
+        if m and (kind is None or m.group(1) == kind):
+            out.append({"kind": m.group(1), "text": m.group(2), "ts": _iso_ts(c.get("created_at"))})
+    return out
+
+
 def acts(bead, kind=None):
     """Acts of a bead, oldest first. With `kind`: bodies without the tag; without: full texts."""
     comments = bd(["comments", bead]) or []
@@ -377,6 +391,16 @@ def acts(bead, kind=None):
         if t.startswith(tag):
             out.append(t[len(tag):].lstrip(" "))
     return out
+
+
+# ---- labels -----------------------------------------------------------------
+
+def add_label(bead, label):
+    bd(["label", "add", bead, label])
+
+
+def labels(bead):
+    return list(_show(bead).get("labels") or [])
 
 
 # ---- budget -----------------------------------------------------------------
@@ -650,7 +674,7 @@ def shift_spend(d, now=None, kv=None, home=None):
     return out
 
 
-def _rate_text(rate):
+def rate_text(rate):
     per = rate.get("usd_per_pp")
     if per is None:
         return "unknown"
@@ -680,8 +704,8 @@ def spend_block(spend, rates, work_order=None, kv=None):
             line += " (%s)" % ", ".join(parts)
         lines.append(line)
     lines.append("- shift: $%.2f of $%.2f budget" % (spend.get("usd", 0.0), budget(kv)["usd"]))
-    lines.append("- window rate: " + _rate_text(rates["five_hour"]))
-    lines.append("- week rate: " + _rate_text(rates["seven_day"]))
+    lines.append("- window rate: " + rate_text(rates["five_hour"]))
+    lines.append("- week rate: " + rate_text(rates["seven_day"]))
     return "\n".join(lines)
 
 
@@ -888,6 +912,10 @@ def main(argv=None):
     sub.add_parser("graph")
     sub.add_parser("ready-work-orders")
     sub.add_parser("open-stages").add_argument("work_order")
+    p = sub.add_parser("label")
+    lsub = p.add_subparsers(dest="lcmd", required=True)
+    g = lsub.add_parser("add"); g.add_argument("bead"); g.add_argument("label")
+    lsub.add_parser("list").add_argument("bead")
     p = sub.add_parser("act")
     p.add_argument("bead"); p.add_argument("kind"); p.add_argument("text")
     p = sub.add_parser("acts")
@@ -974,6 +1002,10 @@ def main(argv=None):
         return _emit(ready_work_orders())
     if a.cmd == "open-stages":
         return _emit(open_stages(a.work_order))
+    if a.cmd == "label":
+        if a.lcmd == "add":
+            add_label(a.bead, a.label)
+        return _emit(labels(a.bead))
     if a.cmd == "act":
         add_act(a.bead, a.kind, a.text)
         return _emit({"ok": True})

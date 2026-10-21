@@ -359,3 +359,127 @@ class TestJournal(JournalBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJournalG(JournalBase):
+    """Amendment G: cycle counters, one push per gate, passport, issue records, kv snapshot."""
+
+    def run_cli(self, *argv):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = journal.main(list(argv))
+        return rc, json.loads(buf.getvalue())
+
+    def test_iterations_and_cycle_limit(self):
+        for i in range(1, 7):
+            self.assertEqual(journal.bump_iterations("st1", "approval"), i)
+            self.assertFalse(journal.cycle_exceeded("st1", "approval"))
+        journal.bump_iterations("st1", "approval")
+        self.assertTrue(journal.cycle_exceeded("st1", "approval"))
+        self.assertEqual(journal.iterations("st1", "approval"), 7)
+        self.assertEqual(journal.iterations("st1", "review"), 0)
+        for _ in range(10):
+            journal.bump_iterations("st1", "review")
+        self.assertFalse(journal.cycle_exceeded("st1", "review"))
+        journal.bump_iterations("st1", "review")
+        self.assertTrue(journal.cycle_exceeded("st1", "review"))
+        for bad in ("bogus", ""):
+            with self.assertRaises(ValueError):
+                journal.bump_iterations("st1", bad)
+            with self.assertRaises(ValueError):
+                journal.iterations("st1", bad)
+            with self.assertRaises(ValueError):
+                journal.cycle_exceeded("st1", bad)
+
+    def test_cycle_exceeded_uses_given_defaults(self):
+        journal.bump_iterations("st2", "report_fix")
+        journal.bump_iterations("st2", "report_fix")
+        self.assertFalse(journal.cycle_exceeded("st2", "report_fix"))
+        self.assertTrue(journal.cycle_exceeded("st2", "report_fix", {"cycles": {"approval": 6, "review": 10, "report_fix": 1}}))
+
+    def test_mark_notified_once(self):
+        self.assertTrue(journal.mark_notified("gate-1"))
+        self.assertFalse(journal.mark_notified("gate-1"))
+        self.assertTrue(journal.mark_notified("api_key.crew-a"))
+        n = journal.notified()
+        self.assertEqual(sorted(n), ["api_key.crew-a", "gate-1"])
+        self.assertGreater(int(n["gate-1"]), 1_000_000_000)
+
+    def test_passport_one_per_site(self):
+        self.assertIsNone(journal.passport("demo-app"))
+        a = journal.set_passport("demo-app", "run tests: make test")
+        self.assertEqual(journal.passport("demo-app"), {"id": a, "text": "run tests: make test"})
+        self.assertEqual(journal.set_passport("demo-app", "run tests: make check"), a)
+        self.assertEqual(journal.passport("demo-app")["text"], "run tests: make check")
+        b = journal.set_passport("other-app", "x")
+        self.assertNotEqual(a, b)
+        self.assertEqual(journal.passport("demo-app")["id"], a)
+        labels = journal.bd(["show", a])[0]["labels"]
+        self.assertIn("prorab:passport", labels)
+        self.assertIn("site:demo-app", labels)
+
+    def test_issue_records(self):
+        self.assertIsNone(journal.issue("wo-1"))
+        journal.issue_set("wo-1", "issuing", name="crew-a", pane="p-1", session_id="s-1")
+        rec = journal.issue("wo-1")
+        self.assertEqual((rec["state"], rec["name"], rec["pane"], rec["session_id"]),
+                         ("issuing", "crew-a", "p-1", "s-1"))
+        self.assertIn("ts", rec)
+        journal.issue_set("wo-1", "issued", worktree="/home/user/projects/demo-app-wt")
+        rec = journal.issue("wo-1")
+        self.assertEqual((rec["state"], rec["name"], rec["worktree"]),
+                         ("issued", "crew-a", "/home/user/projects/demo-app-wt"))
+        journal.issue_set("wo-2", "not_issued")
+        self.assertEqual(sorted(journal.issues()), ["wo-1", "wo-2"])
+        self.assertEqual(list(journal.issues("not_issued")), ["wo-2"])
+        self.assertEqual(journal.issues("issuing"), {})
+        with self.assertRaises(ValueError):
+            journal.issue_set("wo-1", "bogus")
+        self.assertEqual(journal.issue("wo-1")["state"], "issued")
+
+    def test_snapshot_reads_no_bd(self):
+        journal.set_budget(sessions=5)
+        journal.register_crew("crew-a")
+        journal.spend("wo-1", sessions=2)
+        journal.kv_set("shift.week_start", "10")
+        kv = journal.kv_all()
+        calls = []
+        real = journal._run
+
+        def counting(args, check=True):
+            calls.append(list(args))
+            return real(args, check)
+        journal._run = counting
+        self.addCleanup(setattr, journal, "_run", real)
+        self.assertEqual(journal.budget(kv=kv)["sessions"], 5)
+        self.assertEqual(journal.shift_spent(kv=kv)["sessions"], 2)
+        self.assertEqual(journal.over_budget(12.0, kv=kv), [])
+        self.assertEqual(journal.over_budget(100.0, kv=kv), ["week_pp"])
+        self.assertEqual(journal.crews(kv=kv), ["crew-a"])
+        self.assertIsNone(journal.override(kv=kv))
+        self.assertEqual(calls, [])
+
+    def test_snapshot_override_set(self):
+        journal.set_override("goal-x")
+        kv = journal.kv_all()
+        self.assertEqual(journal.override(kv=kv)["goal"], "goal-x")  # no work orders: not done
+        journal.clear_override()
+        self.assertIsNone(journal.override(kv=journal.kv_all()))
+
+    def test_cli_notify_and_iterations(self):
+        self.assertEqual(self.run_cli("notify", "gate-9"), (0, {"push": True}))
+        self.assertEqual(self.run_cli("notify", "gate-9"), (0, {"push": False}))
+        self.assertEqual(self.run_cli("iterations", "st9", "approval"),
+                         (0, {"n": 0, "limit": 6, "exceeded": False}))
+        self.assertEqual(self.run_cli("iterations", "st9", "report_fix", "--bump")[1],
+                         {"n": 1, "limit": 3, "exceeded": False})
+        path = os.path.join(self.tmp.name, "passport.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("entry: src/main.py")
+        rc, out = self.run_cli("passport", "demo-app", "--set-file", path)
+        self.assertEqual(out["text"], "entry: src/main.py")
+        journal.issue_set("wo-3", "issuing")
+        rc, out = self.run_cli("issues", "--state", "issuing")
+        self.assertEqual(list(out), ["wo-3"])

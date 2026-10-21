@@ -242,9 +242,19 @@ def _goal_done(goal):
     return all(n.get("status") == "closed" or _work_order_settled(n["id"]) for n in work_orders)
 
 
-def override():
-    """The stored override, or None; expires (and is cleared) once its goal is done."""
-    v = kv_get(OVERRIDE_KEY)
+def _kv_value(kv, key):
+    """Value of `key` from a kv_all() snapshot, with the kv_get convention (empty is None)."""
+    v = kv.get(key)
+    return None if v in (None, "") else v
+
+
+def override(kv=None):
+    """The stored override, or None; expires (and is cleared) once its goal is done.
+
+    With a kv_all() snapshot kv is not read through bd; the goal's work orders are
+    still listed, but only while the override is set.
+    """
+    v = kv_get(OVERRIDE_KEY) if kv is None else _kv_value(kv, OVERRIDE_KEY)
     if v is None:
         return None
     try:
@@ -341,9 +351,9 @@ def acts(bead, kind=None):
 
 # ---- budget -----------------------------------------------------------------
 
-def budget():
+def budget(kv=None):
     b = dict(_defaults.load()["budget"])
-    kv = kv_all()
+    kv = kv_all() if kv is None else kv
     for k in list(b):
         v = kv.get("budget.%s" % k)
         if v not in (None, ""):
@@ -364,16 +374,16 @@ def spend(work_order, sessions=0, runs=0, tokens=0):
         kv_set("shift.spent.%s" % name, _kv_int("shift.spent.%s" % name) + n)
 
 
-def shift_spent():
-    kv = kv_all()
+def shift_spent(kv=None):
+    kv = kv_all() if kv is None else kv
     return {k: int(kv.get("shift.spent.%s" % k) or 0) for k in SPENT_KEYS}
 
 
-def over_budget(week_pp_now):
-    b = budget()
-    spent = shift_spent()
+def over_budget(week_pp_now, kv=None):
+    b = budget(kv=kv)
+    spent = shift_spent(kv=kv)
     over = [k for k in ("sessions", "runs") if spent[k] > b[k]]
-    start = kv_get("shift.week_start")
+    start = kv_get("shift.week_start") if kv is None else _kv_value(kv, "shift.week_start")
     if week_pp_now is not None and start is not None:
         if float(week_pp_now) - float(start) > b["week_pp"]:
             over.append("week_pp")
@@ -388,6 +398,111 @@ def begin_shift(week_pct):
     else:
         kv_set("shift.week_start", week_pct)
     kv_set("shift.budget", json.dumps(budget()))
+
+
+# ---- cycle counters, one push per gate, site passport, issue records ---------
+
+def _cycle_limits(d=None):
+    return (d if d is not None else _defaults.load())["cycles"]
+
+
+def _iter_key(stage, kind):
+    if kind not in _cycle_limits():
+        raise ValueError("unknown cycle kind %r (expected one of %s)" % (
+            kind, ", ".join(_cycle_limits())))
+    return "iterations.%s.%s" % (stage, kind)
+
+
+def iterations(stage, kind):
+    return _kv_int(_iter_key(stage, kind))
+
+
+def bump_iterations(stage, kind):
+    key = _iter_key(stage, kind)
+    n = _kv_int(key) + 1
+    kv_set(key, n)
+    return n
+
+
+def cycle_exceeded(stage, kind, d=None):
+    """True when the count passed the limit: the 7th approval request means a gate."""
+    _iter_key(stage, kind)
+    return iterations(stage, kind) > _cycle_limits(d)[kind]
+
+
+def mark_notified(key):
+    """True the first time for a gate id or incident key (and records it), False after."""
+    k = "notified.%s" % key
+    if kv_get(k) is not None:
+        return False
+    kv_set(k, int(time.time()))
+    return True
+
+
+def notified():
+    return {k[len("notified."):]: v for k, v in kv_all().items() if k.startswith("notified.")}
+
+
+PASSPORT_LABEL = "prorab:passport"
+
+
+def passport(site):
+    """The site passport, ``{"id", "text"}``, or None. It lives in the journal only."""
+    items = bd(["list", "--label", PASSPORT_LABEL, "--label", "site:%s" % site,
+                "--all", "--limit", "0"])
+    if not items:
+        return None
+    return {"id": items[0]["id"], "text": items[0].get("description") or ""}
+
+
+def set_passport(site, text):
+    found = passport(site)
+    if found:
+        _run(["update", found["id"], "-d", text])
+        return found["id"]
+    nid = bd(["create", "Passport: %s" % site, "-d", text,
+              "-l", "%s,site:%s" % (PASSPORT_LABEL, site), "--silent"], json_out=False).strip()
+    if not nid:
+        raise JournalError("bd create returned no id")
+    return nid
+
+
+ISSUE_STATES = ("issuing", "issued", "not_issued")
+
+
+def issue(work_order):
+    v = kv_get("issue.%s" % work_order)
+    try:
+        data = json.loads(v) if v else None
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def issue_set(work_order, state, **fields):
+    """Record the issue state of a work order; fields merge into the existing record."""
+    if state not in ISSUE_STATES:
+        raise ValueError("unknown issue state %r (expected one of %s)" % (
+            state, ", ".join(ISSUE_STATES)))
+    rec = issue(work_order) or {}
+    rec.update(fields)
+    rec["state"] = state
+    rec["ts"] = time.time()
+    kv_set("issue.%s" % work_order, json.dumps(rec, ensure_ascii=False))
+
+
+def issues(state=None):
+    out = {}
+    for k, v in kv_all().items():
+        if not k.startswith("issue."):
+            continue
+        try:
+            rec = json.loads(v)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(rec, dict) and (state is None or rec.get("state") == state):
+            out[k[len("issue."):]] = rec
+    return out
 
 
 # ---- active-prorab lock -----------------------------------------------------
@@ -423,8 +538,8 @@ def bump_restarts(work_order):
     return n
 
 
-def crews():
-    v = kv_get("crews.active")
+def crews(kv=None):
+    v = kv_get("crews.active") if kv is None else _kv_value(kv, "crews.active")
     return [x for x in v.split(",") if x] if v else []
 
 
@@ -511,6 +626,13 @@ def main(argv=None):
     p.add_argument("work_order")
     p = sub.add_parser("crews")
     p.add_argument("--add"); p.add_argument("--remove")
+    p = sub.add_parser("iterations")
+    p.add_argument("stage"); p.add_argument("kind"); p.add_argument("--bump", action="store_true")
+    sub.add_parser("notify").add_argument("key")
+    p = sub.add_parser("passport")
+    p.add_argument("site"); p.add_argument("--set-file")
+    p = sub.add_parser("issues")
+    p.add_argument("--state")
     p = sub.add_parser("kv")
     ksub = p.add_subparsers(dest="kvcmd", required=True)
     g = ksub.add_parser("get"); g.add_argument("key")
@@ -586,6 +708,20 @@ def main(argv=None):
         if a.remove:
             unregister_crew(a.remove)
         return _emit(crews())
+    if a.cmd == "iterations":
+        if a.bump:
+            bump_iterations(a.stage, a.kind)
+        return _emit({"n": iterations(a.stage, a.kind), "limit": _cycle_limits()[a.kind],
+                      "exceeded": cycle_exceeded(a.stage, a.kind)})
+    if a.cmd == "notify":
+        return _emit({"push": mark_notified(a.key)})
+    if a.cmd == "passport":
+        if a.set_file:
+            with open(a.set_file, encoding="utf-8") as fh:
+                set_passport(a.site, fh.read())
+        return _emit(passport(a.site))
+    if a.cmd == "issues":
+        return _emit(issues(a.state))
     if a.cmd == "kv":
         if a.kvcmd == "get":
             return _emit({"key": a.key, "value": kv_get(a.key)})

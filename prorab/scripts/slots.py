@@ -59,23 +59,68 @@ def run(kind, cmd, slots_dir=None, n=None, poll_s=1.0):
         if fd is not None:
             break
         time.sleep(poll_s)
+    owner = os.path.join(directory, "%s.%d.owner" % (kind, i))
     try:
+        _write_owner(owner, cmd)
         # the fd is O_CLOEXEC and close_fds is on: a grandchild cannot keep the slot
         return subprocess.run(cmd, close_fds=True).returncode
     finally:
+        try:
+            os.unlink(owner)
+        except OSError:
+            pass
         os.close(fd)
 
 
+def _write_owner(path, cmd):
+    """Who holds the slot: temp file + rename, so a reader never sees half a record."""
+    rec = {"cwd": os.getcwd(), "pid": os.getpid(), "started_at": time.time(), "cmd": cmd[0]}
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+    os.replace(tmp, path)
+
+
+def _owners(directory):
+    """Owner records of slots whose lock is held now: ``{(kind, idx): record}``.
+
+    An owner file whose lock is free is stale (its process died) and is ignored."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(directory, "*.*.owner"))):
+        kind, idx, _ = os.path.basename(path).rsplit(".", 2)
+        lock = _try_lock(os.path.join(directory, "%s.%s.lock" % (kind, idx)))
+        if lock is not None:
+            os.close(lock)
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            out[(kind, idx)] = rec
+    return out
+
+
+def holders(slots_dir=None):
+    """The owner records of the slots held now."""
+    return list(_owners(slots_dir or default_slots_dir()).values())
+
+
 def status(directory=None):
-    """Busy slots per kind: ``{kind: {"slots": n, "busy": [i, ...]}}``."""
+    """Busy slots per kind: ``{kind: {"slots": n, "busy": [i, ...], "owners": [record, ...]}}``."""
     directory = directory or default_slots_dir()
     out = {}
+    owners = _owners(directory)
     for path in sorted(glob.glob(os.path.join(directory, "*.*.lock"))):
         kind, idx, _ = os.path.basename(path).rsplit(".", 2)
-        entry = out.setdefault(kind, {"slots": slot_count(kind, directory), "busy": []})
+        entry = out.setdefault(kind, {"slots": slot_count(kind, directory), "busy": [],
+                                      "owners": []})
         fd = _try_lock(path)
         if fd is None:
             entry["busy"].append(int(idx))
+            if (kind, idx) in owners:
+                entry["owners"].append(owners[(kind, idx)])
         else:
             os.close(fd)
     return out

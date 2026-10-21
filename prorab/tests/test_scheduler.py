@@ -286,6 +286,22 @@ class TestScheduler(unittest.TestCase):
         os.environ.pop("HERDR_ENV", None)
         self.assertEqual(scheduler.gather_limits(d, at(14))["source"], "unknown")  # no herdr
 
+    def test_gather_limits_lazy_panes(self):
+        os.environ["HOME"] = self.tmp.name
+        d = _defaults.load()
+        d["limits"]["sensor_dir"] = os.path.join(self.tmp.name, "usage")
+        os.makedirs(d["limits"]["sensor_dir"])
+        path = os.path.join(d["limits"]["sensor_dir"], "s1.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"rate_limits": {"five_hour": {"used_percentage": 12.0,
+                                                      "resets_at": at(17)},
+                                       "seven_day": {"used_percentage": 30.0,
+                                                     "resets_at": at(17, day=25)}}}, fh)
+        m = os.path.getmtime(path)
+        calls = []
+        lim = scheduler.gather_limits(d, m + 5, pane_texts=lambda: calls.append(1) or [])
+        self.assertEqual((lim["source"], calls), ("sensor", []))
+
     def test_cli_cap(self):
         real = scheduler.journal
         scheduler.journal = self._journal()

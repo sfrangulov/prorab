@@ -228,7 +228,7 @@ def live_pane_texts():
 def gather_limits(d, now, pane_texts=None):
     """Sensor first, then the max over all panes' status lines; resets_at filled from the countdown."""
     import limits
-    lim = limits.get_limits((pane_texts or live_pane_texts)(), d, now)
+    lim = limits.get_limits(pane_texts or live_pane_texts, d, now)  # lazy: no pane read when the sensor is fresh
     if lim.get("five_hour_resets_at") is None and lim.get("five_hour_resets_in_s") is not None:
         lim = dict(lim, five_hour_resets_at=now + lim["five_hour_resets_in_s"])
     return lim

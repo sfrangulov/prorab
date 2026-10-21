@@ -117,6 +117,43 @@ class TestSlots(unittest.TestCase):
         p = subprocess.run([sys.executable, script, "status"], capture_output=True, text=True)
         self.assertEqual(json.loads(p.stdout)["heavy"]["busy"], [])
 
+    def test_owner_written_and_removed(self):
+        m1, t1, o1 = self._hold("one")
+        self._wait_for(m1 + ".started")
+        owner = os.path.join(self.dir, "heavy.0.owner")
+        with open(owner, encoding="utf-8") as fh:
+            rec = json.load(fh)
+        self.assertEqual(rec["cwd"], os.getcwd())
+        self.assertEqual(rec["cmd"], sys.executable)
+        self.assertIsInstance(rec["pid"], int)
+        self.assertIn("started_at", rec)
+        open(m1, "w").close()
+        t1.join(10)
+        self.assertFalse(os.path.exists(owner))
+        self.assertFalse([f for f in os.listdir(self.dir) if f.endswith(".tmp")])
+
+    def test_holders_skip_stale_owner(self):
+        os.makedirs(self.dir)
+        with open(os.path.join(self.dir, "heavy.0.owner"), "w", encoding="utf-8") as fh:
+            json.dump({"cwd": "/home/user/projects/demo-app", "pid": 1}, fh)
+        self.assertEqual(slots.holders(self.dir), [])  # no lock held: stale
+        m1, t1, o1 = self._hold("one")
+        self._wait_for(m1 + ".started")
+        got = slots.holders(self.dir)
+        self.assertEqual([h["cwd"] for h in got], [os.getcwd()])
+        open(m1, "w").close()
+        t1.join(10)
+        self.assertEqual(slots.holders(self.dir), [])
+
+    def test_status_lists_owners(self):
+        m1, t1, o1 = self._hold("one")
+        self._wait_for(m1 + ".started")
+        owners = slots.status(self.dir)["heavy"]["owners"]
+        self.assertEqual([o["cwd"] for o in owners], [os.getcwd()])
+        open(m1, "w").close()
+        t1.join(10)
+        self.assertEqual(slots.status(self.dir)["heavy"]["owners"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

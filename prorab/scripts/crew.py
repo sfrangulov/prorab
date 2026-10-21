@@ -877,12 +877,14 @@ def _covered(path, files):
                for f in files)
 
 
-def _check_heavy(text, heavy_limit, cleared, heavy_counted):
+def _check_heavy(text, heavy_limit, cleared, heavy_counted, unverifiable=None):
     m = _HEAVY.search(text)
     if not m:
         return ["no Heavy runs line"]
     n = int(m.group(1))
     problems = []
+    if unverifiable:  # acceptance is by evidence, never by the crew's word (R52)
+        problems.append("heavy runs not verifiable: %s" % unverifiable)
     if heavy_counted is not None and n != heavy_counted:
         problems.append("Heavy runs: reported %d, the slots log counts %d" % (n, heavy_counted))
     worst = n if heavy_counted is None else max(n, heavy_counted)
@@ -892,10 +894,10 @@ def _check_heavy(text, heavy_limit, cleared, heavy_counted):
 
 
 def check_report(text, criteria, files, worktree, base="main", heavy_limit=None, cleared=False,
-                 heavy_counted=None):
+                 heavy_counted=None, unverifiable=None):
     """Read-only check of a stage report against its work order and the worktree's git."""
     problems, warnings = [], []
-    problems += _check_heavy(text, heavy_limit, cleared, heavy_counted)
+    problems += _check_heavy(text, heavy_limit, cleared, heavy_counted, unverifiable)
     sections = _sections(text)
     for sec in REPORT_SECTIONS:
         if sec not in sections:
@@ -1035,16 +1037,19 @@ def _check_report_cli(name, work_order, stage=None, base="main"):
     shown = journal.bd(["show", work_order])
     description = (shown[0].get("description") or "") if shown else ""
     cleared, counted = False, None
+    missing = "no stage given (--stage)" if not stage else None
     if stage:
         labels = ((journal.bd(["show", stage]) or [{}])[0].get("labels")) or []
         cleared = "clearance:granted" in labels
         started = journal.stage_info(stage)["started_at"]
         if started is not None:
             counted = slots.runs("heavy", worktree, since=float(started))
+        else:
+            missing = "stage %s has no start time" % stage
     return check_report(summary(name), criteria_ids(description),
                         journal.work_order_files(work_order), worktree, base,
                         heavy_limit=journal.estimate(work_order)["heavy_runs_per_stage"],
-                        cleared=cleared, heavy_counted=counted)
+                        cleared=cleared, heavy_counted=counted, unverifiable=missing)
 
 
 def _accept_cli(work_order, stage, act_file):

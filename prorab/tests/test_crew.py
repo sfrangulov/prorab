@@ -1382,6 +1382,34 @@ class TestWorkOrderSpend(CrewBase):
         kw = chk.call_args.kwargs
         self.assertEqual((kw["heavy_limit"], kw["cleared"], kw["heavy_counted"]), (4, True, 9))
 
+    def _cli_check(self, stage, started):
+        wt = os.path.join(self.dir, "wt-cli")
+        os.makedirs(wt, exist_ok=True)
+        self.j.kv["crew.a1.worktree"] = wt
+        if started is not None:
+            self.j.kv["stage.N1.1.started_at"] = started
+        self.j.bd = lambda args, json_out=True: [{"description": "C1. a", "labels": []}]
+        report = make_report(tail="\nResult: blocked\n")
+        with mock.patch.object(crew, "summary", return_value=report):
+            return crew._check_report_cli("a1", "N1", stage=stage)
+
+    def test_cli_check_report_without_stage_is_not_verifiable(self):
+        r = self._cli_check(None, None)
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("heavy runs not verifiable" in p and "stage" in p
+                            for p in r["problems"]), r["problems"])
+
+    def test_cli_check_report_stage_without_start_is_not_verifiable(self):
+        r = self._cli_check("N1.1", None)
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("heavy runs not verifiable" in p and "start time" in p
+                            for p in r["problems"]), r["problems"])
+
+    def test_cli_check_report_verified_count_passes(self):
+        with mock.patch.object(crew.slots, "runs", return_value=3):
+            r = self._cli_check("N1.1", 100)
+        self.assertTrue(r["ok"], r)
+
 
 class TestAskPredecessor(CrewBase):
     def test_ask_predecessor_refuses_cwd_outside_worktree(self):

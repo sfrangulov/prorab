@@ -189,6 +189,10 @@ class TestScheduler(unittest.TestCase):
             kv_get=lambda k: kw.get("kv", {}).get(k),
             override=lambda: kw.get("override"),
             machine=lambda: dict(D["machine"], **kw.get("machine", {})),
+            estimate=lambda n: dict({"usd": 10.0, "heavy_runs_per_stage": 20},
+                                    **kw.get("estimates", {}).get(n, {})),
+            budget=lambda: dict({"usd": 350.0, "week_pp": 10.0}, **kw.get("budget", {})),
+            shift_spend=lambda d, now=None: dict(kw.get("shift", {"usd": 0.0})),
         )
         return j
 
@@ -283,6 +287,102 @@ class TestScheduler(unittest.TestCase):
         plan = scheduler.build_plan(self._journal(), D, now, lim, log, (0.5, 8))
         self.assertFalse(plan["limits_unknown"])
         self.assertEqual(plan["allowed"], 3)
+
+    # ---- fit: the estimate in pp by the rate ------------------------------------
+
+    RATES = {"five_hour": {"usd_per_pp": 5.0, "source": "default"},
+             "seven_day": {"usd_per_pp": None, "source": "unknown"}}
+
+    def _fits(self, estimate=10.0, left=100.0, rates=None, used=70.0, stop=80.0, rise=None,
+              week_budget=10.0, override=False):
+        return scheduler.fits(estimate, left, rates or self.RATES, used, stop, rise,
+                              week_budget, override)
+
+    def test_fits_converts_by_rate(self):
+        r = self._fits(used=70.0)
+        self.assertEqual((r["pp_window"], r["window"], r["ok"]), (2.0, True, True))
+        self.assertIsNone(r["pp_week"])
+        self.assertTrue(self._fits(used=78.0)["window"])  # 78 + 2 == stop
+        r = self._fits(used=79.0)
+        self.assertFalse(r["window"])
+        self.assertFalse(r["ok"])
+        self.assertTrue(self._fits(used=None)["window"])  # unknown usage is not guessed
+
+    def test_fits_budget_left(self):
+        r = self._fits(estimate=50.0, left=40.0)
+        self.assertFalse(r["budget"])
+        self.assertFalse(r["ok"])
+        self.assertTrue(self._fits(estimate=40.0, left=40.0)["budget"])
+
+    def test_fits_week(self):
+        rates = dict(self.RATES, seven_day={"usd_per_pp": 20.0, "source": "estimated"})
+        r = self._fits(rates=rates, rise=8.5)  # 10 / 20 = 0.5 pp of the week
+        self.assertEqual(r["pp_week"], 0.5)
+        self.assertTrue(r["week"])
+        self.assertFalse(self._fits(rates=rates, rise=9.6)["week"])
+        self.assertTrue(self._fits(rates=rates, rise=None)["week"])
+
+    def test_fits_unknown_week_rate_skips_week_check(self):
+        r = self._fits(rise=99.0)  # the rate of the week is unknown: never guessed
+        self.assertIsNone(r["pp_week"])
+        self.assertTrue(r["week"])
+
+    def test_fits_override_lifts_all(self):
+        r = self._fits(estimate=500.0, left=1.0, used=79.0, override=True)
+        self.assertEqual((r["budget"], r["window"], r["week"], r["ok"]), (True,) * 4)
+        self.assertEqual(r["pp_window"], 100.0)  # the numbers are still reported
+
+    def test_build_plan_reports_budget_rates_and_fits(self):
+        now = at(14)
+        lim = {"five_hour": 70.0, "seven_day": 25.0, "five_hour_resets_at": now + 3600,
+               "five_hour_resets_in_s": 3600}
+        j = self._journal(kv={"shift.week_start": "20"},
+                          estimates={"n1": {"usd": 10.0}, "n3": {"usd": 120.0}},
+                          budget={"usd": 200.0, "week_pp": 10.0},
+                          shift={"usd": 100.0})
+        plan = scheduler.build_plan(j, D, now, lim, os.path.join(self.tmp.name, "none"),
+                                    (1.0, 8), rates=self.RATES)
+        self.assertEqual(plan["budget"], {"usd": 200.0, "spent_usd": 100.0, "left_usd": 100.0,
+                                          "week_pp": 10.0, "week_rise_pp": 5.0})
+        self.assertEqual(plan["rates"], self.RATES)
+        self.assertEqual(set(plan["fits"]), set(plan["order"]))
+        self.assertTrue(plan["fits"]["n1"]["ok"])
+        self.assertEqual(plan["fits"]["n1"]["pp_window"], 2.0)
+        self.assertFalse(plan["fits"]["n3"]["budget"])  # $120 > $100 left
+        self.assertFalse(plan["fits"]["n3"]["ok"])  # 70 + 24 > 80 as well
+        self.assertFalse(plan["fits"]["n3"]["window"])
+
+    def test_build_plan_spend_is_injectable_and_rates_come_from_the_log(self):
+        now = at(14)
+        lim = {"five_hour": 10.0, "seven_day": None, "five_hour_resets_at": now + 3600,
+               "five_hour_resets_in_s": 3600}
+        plan = scheduler.build_plan(self._journal(), D, now, lim,
+                                    os.path.join(self.tmp.name, "none"), (1.0, 8),
+                                    spend={"usd": 349.0})
+        self.assertEqual(plan["budget"]["spent_usd"], 349.0)
+        self.assertEqual(plan["budget"]["left_usd"], 1.0)
+        self.assertIsNone(plan["budget"]["week_rise_pp"])  # week unknown
+        self.assertEqual(plan["rates"]["five_hour"]["source"], "default")  # empty log
+        self.assertFalse(plan["fits"]["n1"]["budget"])
+
+    def test_build_plan_override_makes_everything_fit(self):
+        now = at(14)
+        lim = {"five_hour": 79.0, "seven_day": None, "five_hour_resets_at": now + 3600,
+               "five_hour_resets_in_s": 3600}
+        ov = {"goal": "g", "since": 1, "source": "customer's words"}
+        plan = scheduler.build_plan(self._journal(override=ov, shift={"usd": 400.0}), D, now,
+                                    lim, os.path.join(self.tmp.name, "none"), (1.0, 8))
+        self.assertTrue(all(f["ok"] for f in plan["fits"].values()))
+
+    def test_build_plan_no_estimate_not_ok(self):
+        now = at(14)
+        lim = {"five_hour": 10.0, "seven_day": None, "five_hour_resets_at": now + 3600,
+               "five_hour_resets_in_s": 3600}
+        j = self._journal(estimates={"n3": {"usd": None}})
+        plan = scheduler.build_plan(j, D, now, lim, os.path.join(self.tmp.name, "none"),
+                                    (1.0, 8))
+        self.assertEqual(plan["fits"]["n3"], {"ok": False, "reason": "no_estimate"})
+        self.assertTrue(plan["fits"]["n1"]["ok"])
 
     def test_gather_limits_reads_pane_texts(self):
         os.environ["HOME"] = self.tmp.name  # no real sensor files

@@ -2,7 +2,7 @@
 """Scheduler: how many crews may run at once, in what order to issue наряды, which
 5-hour-limit thresholds apply by day and by night.
 
-``plan`` is what the prorab calls before issuing; ``cap`` prints the current thresholds.
+``plan`` is what the prorab calls before issuing (the estimates in pp, checked); ``cap`` prints the current thresholds.
 """
 import argparse
 import datetime
@@ -184,7 +184,26 @@ def work_order_durations(j, d, ids):
     return out
 
 
-def build_plan(j, d, now, lim, log, load):
+def fits(estimate_usd, budget_left_usd, rates, used_pct, cap_stop, week_rise_pp,
+         week_budget_pp, override=False):
+    """Whether a work order's estimate fits the budget left and what is left before the
+    thresholds in force; advisory, the thresholds themselves stay on measured percentages.
+
+    An unknown rate is never guessed: without a week rate the week is guarded only by its
+    measured rise. "Ignore limits and finish" lifts every check (R42)."""
+    import limits  # lazy, as in gather_limits
+    pp_window = limits.to_pp(estimate_usd, rates["five_hour"])
+    pp_week = limits.to_pp(estimate_usd, rates["seven_day"])
+    budget = estimate_usd <= budget_left_usd
+    window = used_pct is None or pp_window is None or used_pct + pp_window <= cap_stop
+    week = pp_week is None or week_rise_pp is None or week_rise_pp + pp_week <= week_budget_pp
+    if override:
+        budget = window = week = True
+    return {"pp_window": pp_window, "pp_week": pp_week, "budget": budget, "window": window,
+            "week": week, "ok": budget and window and week}
+
+
+def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None):
     night = j.kv_get("shift.night") == "1"
     ov = j.override()
     resets_at = lim.get("five_hour_resets_at")
@@ -210,9 +229,28 @@ def build_plan(j, d, now, lim, log, load):
     allowed = allowed_parallel(len(order), burn_rate(burn_points(entries), d), used, cap_pct,
                                lim.get("five_hour_resets_in_s"), active, load1, ncpu,
                                dict(d, machine=j.machine()))
+    if spend is None:
+        spend = j.shift_spend(d, now)
+    if rates is None:
+        import limits
+        rates = limits.rates(readings(log), d, now)
+    b = j.budget()
+    left = b["usd"] - spend["usd"]
+    week_now, week_start = lim.get("seven_day"), j.kv_get("shift.week_start")
+    rise = None if week_now is None or week_start in (None, "") \
+        else float(week_now) - float(week_start)
+    plan_fits = {}
+    for n in order:
+        est = j.estimate(n)["usd"]
+        plan_fits[n] = ({"ok": False, "reason": "no_estimate"} if est is None
+                        else fits(est, left, rates, used, cap["stop"], rise, b["week_pp"],
+                                  bool(ov)))
     return {"order": order, "allowed": allowed, "active": active,
             "new": max(0, allowed - active), "cap": cap, "override": ov,
-            "limits_unknown": unknown}
+            "limits_unknown": unknown,
+            "budget": {"usd": b["usd"], "spent_usd": spend["usd"], "left_usd": left,
+                       "week_pp": b["week_pp"], "week_rise_pp": rise},
+            "rates": rates, "fits": plan_fits}
 
 
 def live_pane_texts():

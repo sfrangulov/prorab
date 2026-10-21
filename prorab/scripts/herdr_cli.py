@@ -95,17 +95,41 @@ def send_keys(name, keys):
 
 
 _OPTION = re.compile(r"^\s*(?:❯\s*)?(\d+)\.\s+(.*)$")
+_HIGHLIGHT = re.compile(r"^\s*❯\s*\d+\.\s")
+_RULE = re.compile(r"^\s*[─━-]{8,}\s*$")
+
+
+def choice_state(visible):
+    """(labels, highlighted_index) of the open choice dialog, or None.
+
+    Only the dialog block counts: the numbered lines contiguous with the line
+    marked with the pointer (options, their indented descriptions and the rule
+    before the last option), up to the footer hint. Numbered lines printed above
+    the dialog do not become options.
+    """
+    if "Enter to select" not in visible or "↑/↓ to navigate" not in visible:
+        return None
+    lines = visible.splitlines()
+    footer = next((i for i, ln in enumerate(lines) if "Enter to select" in ln), len(lines))
+    marked = [i for i, ln in enumerate(lines[:footer]) if _HIGHLIGHT.match(ln)]
+    if not marked:
+        return None
+    start = marked[-1]
+    while start > 0 and (lines[start - 1].startswith("  ") or _RULE.match(lines[start - 1])):
+        start -= 1
+    labels, highlighted = [], 0
+    for ln in lines[start:footer]:
+        m = _OPTION.match(ln)
+        if m and (ln.startswith("  ") or ln.startswith("❯")):
+            if _HIGHLIGHT.match(ln):
+                highlighted = len(labels)
+            labels.append(m.group(2).strip())
+    return (labels, highlighted) if labels else None
 
 
 def choice_dialog(visible):
-    if "Enter to select" not in visible or "↑/↓ to navigate" not in visible:
-        return None
-    labels = []
-    for line in visible.splitlines():
-        m = _OPTION.match(line)
-        if m:
-            labels.append(m.group(2).strip())
-    return labels or None
+    st = choice_state(visible)
+    return st[0] if st else None
 
 
 def bg_shells(visible):

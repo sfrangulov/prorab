@@ -120,6 +120,14 @@ class TestParsing(unittest.TestCase):
             "Вариант A (Recommended)", "Вариант B", "Вариант C",
             "Type something.", "Chat about this"])
 
+    def test_choice_dialog_ignores_numbered_lines_above(self):
+        above = "Итоги:\n  1. первый пункт\n  2. второй пункт\n\n"
+        st = herdr_cli.choice_state(above + DIALOG.replace("❯ 1.", "  1.")
+                                    .replace("  2. Вариант B", "❯ 2. Вариант B"))
+        self.assertEqual(st[0][0], "Вариант A (Recommended)")
+        self.assertEqual(len(st[0]), 5)
+        self.assertEqual(st[1], 1)
+
     def test_choice_dialog_none_on_plain_screen(self):
         self.assertIsNone(herdr_cli.choice_dialog("1. a numbered list\n2. in prose\n"))
 

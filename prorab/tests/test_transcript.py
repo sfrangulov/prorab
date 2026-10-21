@@ -34,6 +34,41 @@ class TestTranscript(unittest.TestCase):
             "-home-user-projects-demo-app",
         )
 
+    def test_transcript_path_before_file_exists(self):
+        with tempfile.TemporaryDirectory() as home:
+            p = transcript.transcript_path("/home/user/projects/demo-app", "sid-1", home)
+            self.assertEqual(p, os.path.join(
+                home, ".claude", "projects", "-home-user-projects-demo-app", "sid-1.jsonl"))
+            self.assertFalse(os.path.exists(p))
+            self.assertIsNone(transcript.find_transcript("/home/user/projects/demo-app", "sid-1", home))
+
+    def test_models_first_seen_main_chain_only(self):
+        self.assertEqual(transcript.models(os.path.join(FIX, "session_mixed_models.jsonl")),
+                         ["claude-opus-5-5", "claude-haiku-4-5"])
+        self.assertEqual(transcript.models(SIDE), ["claude-opus-5-5"])
+
+    def test_window_is_largest_model_seen(self):
+        st = transcript.context_status(
+            os.path.join(FIX, "session_mixed_models.jsonl"), _defaults.load())
+        self.assertEqual(st["tokens"], 150000)
+        self.assertEqual(st["window"], 1000000)
+        self.assertEqual(st["pct"], 15.0)
+        self.assertFalse(st["soft"])
+        self.assertEqual(st["window_model"], "claude-opus-5-5")
+
+    def test_sidechain_model_does_not_widen_window(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "a.jsonl")
+            side = json.loads(_entry(1, "claude-opus-5-5"))
+            side["isSidechain"] = True
+            with open(p, "w") as fh:
+                fh.write(json.dumps(side) + "\n")
+                fh.write(_entry(130000, "claude-unknown-9") + "\n")
+            st = transcript.context_status(p, _defaults.load())
+        self.assertEqual(st["window"], 200000)
+        self.assertTrue(st["soft"])
+        self.assertEqual(st["window_model"], "claude-unknown-9")
+
     def test_last_usage_ignores_sidechain(self):
         self.assertEqual(transcript.last_usage(SIDE), (362873, "claude-opus-5-5"))
         self.assertEqual(transcript.last_usage(MAIN), (362873, "claude-opus-5-5"))

@@ -16,10 +16,16 @@ def project_slug(cwd):
     return re.sub(r"[^A-Za-z0-9]", "-", cwd)
 
 
+def transcript_path(cwd, session_id, home=None):
+    """Expected transcript path; the file may not exist yet (the id is assigned up front)."""
+    home = home or os.path.expanduser("~")
+    return os.path.join(home, ".claude", "projects", project_slug(cwd), session_id + ".jsonl")
+
+
 def find_transcript(cwd, session_id, home=None):
     home = home or os.path.expanduser("~")
     base = os.path.join(home, ".claude", "projects")
-    direct = os.path.join(base, project_slug(cwd), session_id + ".jsonl")
+    direct = transcript_path(cwd, session_id, home)
     if os.path.isfile(direct):
         return direct
     hits = sorted(glob.glob(os.path.join(glob.escape(base), "*", glob.escape(session_id) + ".jsonl")))
@@ -58,17 +64,33 @@ def last_usage(path):
     return result
 
 
+def models(path):
+    """Distinct models of non-sidechain assistant entries, first-seen order."""
+    seen = []
+    for msg in _assistant_entries(path):
+        m = msg.get("model")
+        if m and m not in seen:
+            seen.append(m)
+    return seen
+
+
 def context_status(path, d):
     last = last_usage(path)
     if last is None:
         return None
     tokens, model = last
     c = d["context"]
-    window = c["windows"].get(model, c["unknown_window"])
+    window, window_model = c["unknown_window"], model
+    best = None
+    for m in models(path):
+        w = c["windows"].get(m, c["unknown_window"])
+        if best is None or w > best:
+            best, window, window_model = w, w, m
     return {
         "tokens": tokens,
         "model": model,
         "window": window,
+        "window_model": window_model,
         "pct": round(tokens * 100.0 / window, 1),
         "soft": tokens >= min(window * c["soft_pct"] / 100, c["soft_max_tokens"]),
         "hard": tokens >= window * c["hard_pct"] / 100,

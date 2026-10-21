@@ -138,7 +138,7 @@ def cap_for(now, resets_at, morning, d, night=False, week_known=True):
 def allowed_parallel(ready, burn_pp_per_h, used_pct, cap_pct, resets_in_s, active, load1,
                      ncpu, d):
     """Total crews allowed at once (the active ones included)."""
-    ceiling = d["budget"]["parallel_ceiling"]
+    ceiling = d["machine"]["parallel_ceiling"]
     if used_pct is None:  # unknown usage is not zero: no growth, but one crew may run
         limit_bound = max(1, active)
     elif used_pct >= cap_pct:
@@ -208,7 +208,8 @@ def build_plan(j, d, now, lim, log, load):
     active = len(j.crews())
     load1, ncpu = load
     allowed = allowed_parallel(len(order), burn_rate(burn_points(entries), d), used, cap_pct,
-                               lim.get("five_hour_resets_in_s"), active, load1, ncpu, d)
+                               lim.get("five_hour_resets_in_s"), active, load1, ncpu,
+                               dict(d, machine=j.machine()))
     return {"order": order, "allowed": allowed, "active": active,
             "new": max(0, allowed - active), "cap": cap, "override": ov,
             "limits_unknown": unknown}

@@ -86,6 +86,7 @@ class TestTranscript(unittest.TestCase):
             with open(p, "w") as fh:
                 fh.write(_entry(600000, "claude-opus-5-5") + "\n")
             st = transcript.context_status(p, d)
+            # 600 000 of a 1M window: soft by the 40 % share (400 000), not by the cap
             self.assertTrue(st["soft"])
             self.assertFalse(st["hard"])
             with open(p, "w") as fh:
@@ -94,6 +95,18 @@ class TestTranscript(unittest.TestCase):
             self.assertEqual(st["window"], 200000)
             self.assertTrue(st["soft"])
             self.assertFalse(st["hard"])
+
+    def test_soft_cap_binds_on_large_window(self):
+        d = _defaults.load()
+        d["context"]["windows"] = dict(d["context"]["windows"], **{"claude-big-1": 2000000})
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, "a.jsonl")
+            for tokens, soft in ((450000, False), (500000, True)):  # 40 % would be 800 000
+                with open(p, "w") as fh:
+                    fh.write(_entry(tokens, "claude-big-1") + "\n")
+                st = transcript.context_status(p, d)
+                self.assertEqual(st["window"], 2000000)
+                self.assertEqual(st["soft"], soft, tokens)
 
     def test_last_text_skips_tool_only_entries(self):
         self.assertEqual(transcript.last_text(MAIN), "first part\nsecond part")

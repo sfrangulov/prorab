@@ -97,27 +97,32 @@ class TestJournal(JournalBase):
             journal.add_act(n, "bogus", "x")
 
     def test_budget_override(self):
-        self.assertEqual(journal.budget()["sessions"], 30)
-        journal.set_budget(sessions=5, parallel_ceiling=3)
-        b = journal.budget()
-        self.assertEqual((b["sessions"], b["parallel_ceiling"], b["runs"]), (5, 3, 200))
+        self.assertEqual(journal.budget(), {"usd": 350, "week_pp": 10})
+        journal.set_budget(usd=500, week_pp=20)
+        self.assertEqual(journal.budget(), {"usd": 500, "week_pp": 20})
 
-    def test_spend_and_over_budget(self):
+    def test_machine_override(self):
+        self.assertEqual(journal.machine()["parallel_ceiling"], 6)
+        journal.set_machine(parallel_ceiling=3)
+        m = journal.machine()
+        self.assertEqual((m["parallel_ceiling"], m["heavy_slots"]), (3, 2))
+
+    def test_counts_never_over_budget(self):
         n = journal.create_work_order("o", "T", "b", {})
-        journal.spend(n, sessions=30)
+        journal.spend(n, sessions=31, runs=2, tokens=10)
         self.assertEqual(journal.over_budget(None), [])
-        journal.spend(n, sessions=1, runs=2, tokens=10)
-        self.assertEqual(journal.over_budget(None), ["sessions"])
         self.assertEqual(journal.shift_spent(), {"sessions": 31, "runs": 2, "tokens": 10})
         self.assertEqual(journal.kv_get("spent.%s.sessions" % n), "31")
+        journal.begin_shift(25.0)
+        self.assertEqual(journal.over_budget(35.5), ["week_pp"])
 
     def test_week_budget_uses_shift_start(self):
-        journal.set_budget(sessions=7)
+        journal.set_budget(usd=700)
         journal.begin_shift(25.0)
         self.assertEqual(journal.over_budget(35.0), [])
         self.assertEqual(journal.over_budget(35.5), ["week_pp"])
         self.assertEqual(journal.over_budget(None), [])
-        self.assertEqual(json.loads(journal.kv_get("shift.budget"))["sessions"], 7)
+        self.assertEqual(json.loads(journal.kv_get("shift.budget"))["usd"], 700)
 
     def test_begin_shift_resets_spent(self):
         n = journal.create_work_order("o", "T", "b", {})
@@ -181,11 +186,11 @@ class TestJournal(JournalBase):
         from contextlib import redirect_stdout
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = journal.main(["budget", "--set", "sessions=12", "--set", "runs=50"])
+            rc = journal.main(["budget", "--set", "usd=500", "--set", "week_pp=20"])
         self.assertEqual(rc, 0)
         out = json.loads(buf.getvalue())
-        self.assertEqual((out["sessions"], out["runs"], out["parallel_ceiling"]), (12, 50, 6))
-        self.assertEqual(journal.budget()["sessions"], 12)
+        self.assertEqual(out, {"usd": 500, "week_pp": 20})
+        self.assertEqual(journal.budget()["usd"], 500)
 
     def test_cli_work_order_ready_and_lock(self):
         import io
@@ -440,7 +445,7 @@ class TestJournalG(JournalBase):
         self.assertEqual(journal.issue("wo-1")["state"], "issued")
 
     def test_snapshot_reads_no_bd(self):
-        journal.set_budget(sessions=5)
+        journal.set_budget(usd=5)
         journal.register_crew("crew-a")
         journal.spend("wo-1", sessions=2)
         journal.kv_set("shift.week_start", "10")
@@ -453,7 +458,7 @@ class TestJournalG(JournalBase):
             return real(args, check)
         journal._run = counting
         self.addCleanup(setattr, journal, "_run", real)
-        self.assertEqual(journal.budget(kv=kv)["sessions"], 5)
+        self.assertEqual(journal.budget(kv=kv)["usd"], 5)
         self.assertEqual(journal.shift_spent(kv=kv)["sessions"], 2)
         self.assertEqual(journal.over_budget(12.0, kv=kv), [])
         self.assertEqual(journal.over_budget(100.0, kv=kv), ["week_pp"])

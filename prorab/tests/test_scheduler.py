@@ -188,6 +188,7 @@ class TestScheduler(unittest.TestCase):
             crews=lambda: ["b1"],
             kv_get=lambda k: kw.get("kv", {}).get(k),
             override=lambda: kw.get("override"),
+            machine=lambda: dict(D["machine"], **kw.get("machine", {})),
         )
         return j
 
@@ -208,6 +209,16 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(plan["new"], 2)
         self.assertEqual(plan["cap"]["mode"], "day")
         self.assertIsNone(plan["override"])
+
+    def test_build_plan_uses_kv_ceiling(self):
+        log = os.path.join(self.tmp.name, "monitor.log")
+        now = at(14)
+        lim = {"five_hour": 30.0, "seven_day": 20.0, "five_hour_resets_at": now + 3600,
+               "five_hour_resets_in_s": 3600}
+        plan = scheduler.build_plan(self._journal(machine={"parallel_ceiling": 2}), D, now,
+                                    lim, log, (1.0, 8))
+        self.assertEqual(plan["allowed"], 2)  # active 1 + 2 ready, held by the kv ceiling
+        self.assertEqual(plan["new"], 1)
 
     def test_build_plan_night_cap_blocks_without_override(self):
         now = at(23)

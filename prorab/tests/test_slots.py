@@ -13,6 +13,7 @@ SCRIPTS_DIR = os.path.join(
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
+import _defaults  # noqa: E402
 import slots  # noqa: E402
 
 HOLD = ("import os, sys, time\n"
@@ -83,6 +84,10 @@ class TestSlots(unittest.TestCase):
         with open(os.path.join(self.dir, "heavy.count"), "w") as fh:
             fh.write("junk")
         self.assertEqual(slots.slot_count("heavy", self.dir), 2)
+
+    def test_slot_count_falls_back_to_machine(self):
+        self.assertEqual(slots.slot_count("heavy", self.dir),
+                         _defaults.load()["machine"]["heavy_slots"])
 
     def test_lock_released_when_command_missing(self):
         with self.assertRaises(OSError):

@@ -78,7 +78,7 @@ class FakeJournal:
     def bd(self, args, json_out=True):
         return [{"id": args[1], "status": "in_progress"}]
 
-    def budget(self):
+    def machine(self):
         return {"parallel_ceiling": self.ceiling}
 
     def crews(self):

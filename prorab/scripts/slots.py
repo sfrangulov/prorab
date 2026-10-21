@@ -24,7 +24,7 @@ def default_slots_dir():
 
 
 def slot_count(kind, directory=None):
-    """The integer in ``<kind>.count`` when present, else budget.heavy_slots."""
+    """The integer in ``<kind>.count`` when present, else machine.heavy_slots."""
     path = os.path.join(directory or default_slots_dir(), "%s.count" % kind)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -33,7 +33,7 @@ def slot_count(kind, directory=None):
             return n
     except (OSError, ValueError):
         pass
-    return _defaults.load()["budget"]["heavy_slots"]
+    return _defaults.load()["machine"]["heavy_slots"]
 
 
 def _try_lock(path):

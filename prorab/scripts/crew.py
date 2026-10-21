@@ -236,7 +236,7 @@ def start(site_path, work_order, name, caller_pane):
             and herdr_cli.agent_by_pane(rec["pane"]) is not None:
         return {"status": "already_issued", "name": rec.get("name"), "pane_id": rec["pane"]}
     active = journal.crews()
-    if len(active) >= journal.budget()["parallel_ceiling"]:
+    if len(active) >= journal.machine()["parallel_ceiling"]:
         return {"status": "parallel_limit"}
     mine = journal.work_order_files(work_order)
     clash = []

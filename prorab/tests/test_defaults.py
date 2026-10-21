@@ -16,7 +16,7 @@ import _defaults  # noqa: E402
 class TestDefaults(unittest.TestCase):
     def test_values_match_spec(self):
         d = _defaults.load()
-        self.assertEqual(d["context"]["soft_pct"], 60)
+        self.assertEqual(d["context"]["soft_pct"], 40)
         self.assertEqual(d["context"]["soft_max_tokens"], 500000)
         self.assertEqual(d["context"]["hard_pct"], 80)
         self.assertEqual(d["context"]["windows"], {"claude-opus-5-5": 1000000})
@@ -75,8 +75,25 @@ class TestDefaults(unittest.TestCase):
 
         self.assertEqual(
             d["budget"],
-            {"sessions": 30, "runs": 200, "week_pp": 10,
-             "parallel_ceiling": 6, "heavy_slots": 2},
+            {"usd": 350, "week_pp": 10},
+        )
+        self.assertEqual(
+            d["machine"],
+            {"parallel_ceiling": 6, "heavy_slots": 2, "heavy_runs_per_stage": 20},
+        )
+        self.assertEqual(
+            d["cost"],
+            {"prices": {
+                "opus": {"input": 4.0, "output": 20.0, "cache_read": 0.2},
+                "sonnet": {"input": 2.0, "output": 10.0, "cache_read": 0.2},
+                "haiku": {"input": 0.1, "output": 0.5, "cache_read": 0.01},
+                "fable": {"input": 10.0, "output": 50.0, "cache_read": 0.25}},
+             "cache_write_5m_factor": 1.25, "cache_write_1h_factor": 2.0},
+        )
+        self.assertEqual(
+            d["rate"],
+            {"default_window_usd_per_pp": 5.0, "default_week_usd_per_pp": None,
+             "min_rise_pp": 1, "window_horizon_s": 18000, "every_s": 600},
         )
         self.assertEqual(
             d["limits"]["five_hour_night"],
@@ -90,9 +107,18 @@ class TestDefaults(unittest.TestCase):
             d["monitor"],
             {"interval_s": 90, "heartbeat_s": 1200, "hung_s": 1800, "max_restarts": 2,
              "error_polls": 3, "interval_max_s": 300, "backoff_factor": 2,
-             "hung_scan_max_files": 20000, "limit_panes": 2},
+             "hung_scan_max_files": 20000, "limit_panes": 2,
+             "spend_every_s": 300},
         )
-        self.assertIsNone(d["polish_cmd"])
+        self.assertNotIn("polish_cmd", d)
+
+    def test_price_table_families(self):
+        prices = _defaults.load()["cost"]["prices"]
+        self.assertEqual(list(prices), ["opus", "sonnet", "haiku", "fable"])
+        for family, row in prices.items():
+            self.assertEqual(sorted(row), ["cache_read", "input", "output"], family)
+            for col, v in row.items():
+                self.assertGreater(v, 0, "%s.%s" % (family, col))
 
     def test_send_files_dir_expanded(self):
         path = _defaults.load()["send"]["files_dir"]

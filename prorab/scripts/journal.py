@@ -366,6 +366,22 @@ def set_budget(**kw):
         kv_set("budget.%s" % k, v)
 
 
+def machine(kv=None):
+    """Machine protection (counts, not budget): defaults overlaid with kv ``machine.<key>``."""
+    m = dict(_defaults.load()["machine"])
+    kv = kv_all() if kv is None else kv
+    for k in list(m):
+        v = kv.get("machine.%s" % k)
+        if v not in (None, ""):
+            m[k] = int(v)
+    return m
+
+
+def set_machine(**kw):
+    for k, v in kw.items():
+        kv_set("machine.%s" % k, v)
+
+
 def spend(work_order, sessions=0, runs=0, tokens=0):
     for name, n in (("sessions", sessions), ("runs", runs), ("tokens", tokens)):
         if not n:
@@ -381,8 +397,7 @@ def shift_spent(kv=None):
 
 def over_budget(week_pp_now, kv=None):
     b = budget(kv=kv)
-    spent = shift_spent(kv=kv)
-    over = [k for k in ("sessions", "runs") if spent[k] > b[k]]
+    over = []  # counts never count as budget; the dollar items come with 8c.4
     start = kv_get("shift.week_start") if kv is None else _kv_value(kv, "shift.week_start")
     if week_pp_now is not None and start is not None:
         if float(week_pp_now) - float(start) > b["week_pp"]:
@@ -609,6 +624,8 @@ def main(argv=None):
     p.add_argument("bead"); p.add_argument("--kind")
     p = sub.add_parser("budget")
     p.add_argument("--set", action="append", default=[])
+    p = sub.add_parser("machine")
+    p.add_argument("--set", action="append", default=[])
     p = sub.add_parser("spend")
     p.add_argument("work_order")
     for k in SPENT_KEYS:
@@ -684,6 +701,11 @@ def main(argv=None):
         if kw:
             set_budget(**kw)
         return _emit(budget())
+    if a.cmd == "machine":
+        kw = {k: int(v) for k, v in _pairs(a.set).items()}
+        if kw:
+            set_machine(**kw)
+        return _emit(machine())
     if a.cmd == "spend":
         spend(a.work_order, a.sessions, a.runs, a.tokens)
         return _emit(shift_spent())

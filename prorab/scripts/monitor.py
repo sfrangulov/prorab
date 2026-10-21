@@ -151,6 +151,10 @@ def real_deps():
         "statusline_ctx": limits.statusline_context,
         "limits": scheduler.gather_limits,
         "over_budget": journal.over_budget,
+        "budget": journal.budget,
+        # both read files in this process (transcripts, the log); neither starts a process
+        "shift_spend": journal.shift_spend,
+        "rates": lambda d, now: limits.rates(readings(), d, now),
         "override": journal.override,
         "own_context": _own_context,
         "crews": journal.crews,
@@ -179,6 +183,26 @@ def _limit_state(lim, cap, d):
     wk = lim.get("seven_day")
     week_over = wk is not None and wk >= d["limits"]["seven_day"]["notify"]
     return [band, bool(week_over), bool(lim.get("reached"))]
+
+
+def _budget_item(item, spend, budget, week, kv):
+    """`<item>=<spent>/<limit>` in dollars (or pp); the bare name when a figure is missing."""
+    try:
+        if item == "usd":
+            return "usd=%.2f/%.2f" % (spend["usd"], budget["usd"])
+        if item == "week_pp":
+            rise = float(week) - float(kv["shift.week_start"])
+            return "week_pp=%g/%g" % (rise, budget["week_pp"])
+        kind, _, key = item.partition(":")
+        if kind == "estimate":
+            w = spend["work_orders"][key]
+            return "%s=%.2f/%.2f" % (item, w["usd_total"], w["estimate_usd"])
+        if kind == "research":
+            r = spend["research"][key]
+            return "%s=%.2f/%.2f" % (item, r["usd"], r["estimate_usd"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    return item
 
 
 def _kv_value(kv, key):
@@ -273,6 +297,24 @@ def _poll(crews, d, mem, now, dp):
         return holders
 
     override = guard("override", dp["override"], kv=kv_arg) is not None
+
+    # spend and rate: recomputed now and then, by reading files in this process; the cached
+    # figures are what every poll in between uses
+    extras = {}
+    def due(key, every):
+        return key not in mem or not 0 <= now - mem[key]["at"] < every
+
+    if due("spend", mon["spend_every_s"]):
+        fresh = guard("shift_spend", dp["shift_spend"], d, now, kv=kv_arg)
+        if fresh is not None:
+            mem["spend"] = {"at": now, "value": fresh}
+            extras["spend_usd"] = fresh["usd"]
+    if due("rate", d["rate"]["every_s"]):
+        fresh = guard("rates", dp["rates"], d, now)
+        if fresh is not None:
+            mem["rate"] = {"at": now}
+            extras["rate"] = fresh
+    spend = (mem.get("spend") or {}).get("value")
 
     for name in (crews if listed is not None else ()):
         a = _find_agent(name, listed, kv)
@@ -390,8 +432,12 @@ def _poll(crews, d, mem, now, dp):
         resets_at = now + lim["five_hour_resets_in_s"]
     five, week, source = lim.get("five_hour"), lim.get("seven_day"), lim.get("source")
     if have_lim:
-        mem["last_reading"] = {"ts": now, "five_hour": five, "seven_day": week,
-                               "source": source, "resets_at": resets_at}
+        mem["last_reading"] = dict({"ts": now, "five_hour": five, "seven_day": week,
+                                    "source": source, "resets_at": resets_at,
+                                    "seven_day_resets_at": lim.get("seven_day_resets_at")},
+                                   **extras)
+    elif extras:
+        mem["last_reading"] = dict({"ts": now}, **extras)
     else:
         mem.pop("last_reading", None)
 
@@ -433,11 +479,13 @@ def _poll(crews, d, mem, now, dp):
 
     # budget: the set of exceeded budget items changed
     over = (None if (override or not have_lim)
-            else guard("over_budget", dp["over_budget"], week, kv=kv_arg))
+            else guard("over_budget", dp["over_budget"], week, spend, kv=kv_arg))
     if over is not None:
         over = list(over)
         if over and over != mem.get("budget"):
-            ev["budget"].append("budget %s" % ",".join(over))
+            limits_in_force = guard("budget", dp["budget"], kv=kv_arg) or {}
+            ev["budget"].append("budget %s" % ",".join(
+                _budget_item(i, spend, limits_in_force, week, kv) for i in over))
         mem["budget"] = over
 
     # the foreman's own context

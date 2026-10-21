@@ -14,6 +14,7 @@ if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
 import _defaults  # noqa: E402
+import journal  # noqa: E402
 import monitor  # noqa: E402
 import transcript  # noqa: E402
 from prorab.tests.test_herdr_cli import FakeBase, ok  # noqa: E402
@@ -52,7 +53,11 @@ class Stub:
         self.screens = {}   # pane id -> screen text
         self.holders = []
         self.age = {}       # worktree -> newest file age; missing = very old
-        self.calls = {"agents": 0, "kv_all": 0, "visible": [], "limit_panes": None}
+        self.spend = {"usd": 0.0, "work_orders": {}, "research": {}, "foreman_usd": 0.0}
+        self.rate = {"five_hour": {"usd_per_pp": 5.0, "source": "default"},
+                     "seven_day": {"usd_per_pp": None, "source": "unknown"}}
+        self.calls = {"agents": 0, "kv_all": 0, "visible": [], "limit_panes": None,
+                      "spend": [], "rates": []}
 
     def _agents(self):
         self.calls["agents"] += 1
@@ -71,6 +76,19 @@ class Stub:
         self.calls["limit_panes"] = pane_texts
         return self.limits
 
+    def _shift_spend(self, d, now=None, kv=None):
+        self.calls["spend"].append((now, kv))
+        return json.loads(json.dumps(self.spend))
+
+    def _rates(self, d, now):
+        self.calls["rates"].append(now)
+        return self.rate
+
+    def _over_budget(self, week, spend=None, kv=None):
+        if self.over:  # a canned answer
+            return list(self.over)
+        return journal.over_budget(week, spend, kv=self.kv if kv is None else kv)
+
     def deps(self):
         return {
             "state": lambda n, a, read_screen=True, screen=None, kv=None: (
@@ -84,7 +102,10 @@ class Stub:
             "statusline_ctx": lambda text: self.statusline.get(text),
             "limits": self._limits,
             "kv_get": lambda k: self.kv.get(k),
-            "over_budget": lambda wk, kv=None: list(self.over),
+            "over_budget": self._over_budget,
+            "shift_spend": self._shift_spend,
+            "rates": self._rates,
+            "budget": lambda kv=None: journal.budget(kv=self.kv if kv is None else kv),
             "override": lambda kv=None: self.override,
             "own_context": lambda d, listed=None: self.own,
             "crews": lambda kv=None: [],
@@ -208,6 +229,75 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(), [])
         self.s.over = ["runs"]
         self.assertEqual(self.poll(), ["budget runs"])
+
+    def test_budget_event_in_dollars(self):
+        self.s.spend["usd"] = 361.2
+        self.assertEqual(self.poll(), ["budget usd=361.20/350.00"])
+        self.assertEqual(self.poll(self.now + 90), [])
+        self.s.spend["work_orders"] = {"N7": {"usd_shift": 40.0, "usd_total": 40.0,
+                                              "estimate_usd": 30.0, "over": True}}
+        self.assertEqual(self.poll(self.now + 400),
+                         ["budget usd=361.20/350.00,estimate:N7=40.00/30.00"])
+
+    def test_week_pp_in_the_budget_event(self):
+        self.s.kv["shift.week_start"] = "20"
+        self.s.limits = lim(10.0, 30.5)
+        self.assertEqual(self.poll(), ["budget week_pp=10.5/10"])
+
+    def test_estimate_over_names_work_order(self):
+        self.s.spend["work_orders"] = {"N1": {"usd_shift": 31.5, "usd_total": 31.5,
+                                              "estimate_usd": 30.0, "over": True},
+                                       "N2": {"usd_shift": 1.0, "usd_total": 1.0,
+                                              "estimate_usd": 30.0, "over": False}}
+        self.s.spend["research"] = {"scan": {"usd": 12.4, "estimate_usd": 10.0, "over": True}}
+        self.assertEqual(self.poll(), ["budget estimate:N1=31.50/30.00,research:scan=12.40/10.00"])
+
+    def test_override_silences_budget_but_logs_spend(self):
+        self.s.override = "goal-1"
+        self.s.spend["usd"] = 361.2
+        self.assertEqual(self.poll(), [])
+        self.assertEqual(self.mem["last_reading"]["spend_usd"], 361.2)
+        self.assertEqual(self.mem["spend"]["value"]["usd"], 361.2)
+        self.s.override = None
+        self.assertEqual(self.poll(self.now + 90), ["budget usd=361.20/350.00"])
+
+    def test_spend_every_s(self):
+        for t in (0, 90, 180, 270, 299, 300, 390):
+            self.poll(self.now + t)
+        self.assertEqual([c[0] - self.now for c in self.s.calls["spend"]], [0, 300])
+        self.assertIsNotNone(self.s.calls["spend"][0][1])  # the poll's kv snapshot
+
+    def test_spend_survives_the_json_roundtrip_of_the_state(self):
+        self.s.spend["usd"] = 5.0
+        self.poll()
+        mem = json.loads(json.dumps(self.mem))
+        monitor.poll(["b1"], D, mem, self.now + 90, deps=self.s.deps())
+        self.assertEqual(len(self.s.calls["spend"]), 1)
+
+    def test_rate_logged_every_estimate(self):
+        self.s.limits = dict(lim(10.0, 10.0), seven_day_resets_at=12345)
+        logged = {}
+        for t in (0, 90, 540, 599, 600, 690):
+            self.poll(self.now + t)
+            logged[t] = dict(self.mem["last_reading"])
+        self.assertEqual([c - self.now for c in self.s.calls["rates"]], [0, 600])
+        for t in (0, 600):
+            self.assertEqual(logged[t]["rate"], self.s.rate)
+        for t in (90, 540, 599, 690):
+            self.assertNotIn("rate", logged[t])
+        for r in logged.values():
+            self.assertEqual(r["seven_day_resets_at"], 12345)
+
+    def test_failing_spend_is_isolated(self):
+        deps = self.s.deps()
+
+        def boom(d, now=None, kv=None):
+            raise Boom("no files")
+        deps["shift_spend"] = boom
+        self.s.limits = lim(90.0, 10.0)
+        out = monitor.poll(["b1"], D, self.mem, self.now, deps=deps)
+        self.assertEqual(out, ["limit 90 10 sensor day"])
+        self.assertIn("shift_spend: Boom: no files", self.mem["poll_errors"][0])
 
     def test_blind_week_after_1800s_once(self):
         self.no_crews = True
@@ -681,6 +771,8 @@ class TestProcessBudget(FakeBase):
         before = self._procs()
         monitor.poll(list(self.names), self.d, self.mem, time.time())
         self.assertEqual(self._procs() - before, 2)  # agent list + kv list, nothing else
+        self.assertIn("spend", self.mem)  # computed by reading files in the first poll
+        self.assertIn("rate", self.mem)
         # all three change status and there is no sensor: the limit pass reuses the screens
         os.remove(os.path.join(self.sensor, "s1.json"))
         self._agents("idle")

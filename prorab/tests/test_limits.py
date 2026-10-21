@@ -346,5 +346,114 @@ class TestLimits(unittest.TestCase):
         self.assertEqual(os.listdir(self.sensor), ["new.json"])
 
 
+def _sensor_reading(ts, five=None, resets=None, week=None, week_resets=None, source="sensor"):
+    return {"ts": ts, "source": source, "five_hour": five, "seven_day": week,
+            "resets_at": resets, "seven_day_resets_at": week_resets}
+
+
+class TestRate(unittest.TestCase):
+    R = 1761060000
+
+    def setUp(self):
+        self.d = _defaults.load()
+        self.t = 1761000000
+
+    def five(self, minutes, pct, resets=None):
+        return _sensor_reading(self.t + minutes * 60, pct, self.R if resets is None else resets)
+
+    def week(self, minutes, pct, resets):
+        return _sensor_reading(self.t + minutes * 60, week=pct, week_resets=resets)
+
+    def test_rate_same_window_only(self):
+        rs = [self.five(0, 10), self.five(30, 12, self.R + 18000), self.five(60, 14, self.R + 18000)]
+        iv = limits.rate_intervals(rs, "five_hour", self.d)
+        self.assertEqual(iv, [(self.t + 1800, self.t + 3600, 2.0)])
+
+    def test_rate_interval_needs_span_and_rise(self):
+        d = self.d
+        self.assertEqual(limits.rate_intervals([self.five(0, 10), self.five(9, 12)], "five_hour", d), [])
+        self.assertEqual(limits.rate_intervals([self.five(0, 10), self.five(12, 10.5)], "five_hour", d), [])
+        iv = limits.rate_intervals([self.five(0, 10), self.five(12, 12)], "five_hour", d)
+        self.assertEqual(iv, [(self.t, self.t + 720, 2.0)])
+
+    def test_rate_skipped_reading_keeps_anchor(self):
+        rs = [self.five(0, 10), self.five(5, 10.2), self.five(12, 12)]
+        self.assertEqual(limits.rate_intervals(rs, "five_hour", self.d), [(self.t, self.t + 720, 2.0)])
+
+    def test_rate_lower_percentage_is_new_anchor(self):
+        rs = [self.five(0, 50), self.five(20, 5), self.five(40, 8)]
+        self.assertEqual(limits.rate_intervals(rs, "five_hour", self.d),
+                         [(self.t + 1200, self.t + 2400, 3.0)])
+
+    def test_rate_reset_tolerance(self):
+        rs = [self.five(0, 10), self.five(12, 12, self.R + 300)]
+        self.assertEqual(len(limits.rate_intervals(rs, "five_hour", self.d)), 1)
+
+    def test_rate_ignores_statusline_readings(self):
+        rs = [_sensor_reading(self.t, 10, self.R, source="statusline"),
+              _sensor_reading(self.t + 1200, 20, self.R, source="statusline")]
+        rates = limits.estimate_rate(rs, lambda a, b: 1.0, self.d, self.t + 1300)
+        self.assertEqual((rates["usd_per_pp"], rates["source"]), (5.0, "default"))
+        wk = limits.estimate_rate(rs, lambda a, b: 1.0, self.d, self.t + 1300, "seven_day")
+        self.assertEqual((wk["usd_per_pp"], wk["source"]), (None, "unknown"))
+
+    def test_estimate_rate_sum_over_sum(self):
+        rs = [self.five(0, 10), self.five(20, 12), self.five(40, 16)]
+        spend = {self.t: 10.0, self.t + 1200: 30.0}
+        r = limits.estimate_rate(rs, lambda a, b: spend[a], self.d, self.t + 3000)
+        self.assertAlmostEqual(r["usd_per_pp"], 40.0 / 6.0)
+        self.assertEqual((r["intervals"], r["source"], r["usd"], r["pp"], r["window"], r["at"]),
+                         (2, "estimated", 40.0, 6.0, "five_hour", self.t + 3000))
+
+    def test_rate_window_horizon(self):
+        rs = [self.five(0, 10), self.five(20, 12)]
+        r = limits.estimate_rate(rs, lambda a, b: 4.0, self.d, self.t + 1200 + 6 * 3600)
+        self.assertEqual((r["intervals"], r["source"]), (0, "default"))
+        r = limits.estimate_rate(rs, lambda a, b: 4.0, self.d, self.t + 1200 + 3600)
+        self.assertEqual(r["intervals"], 1)
+
+    def test_rate_week_current_window_only(self):
+        w1, w2 = 1761500000, 1761500000 + 7 * 86400
+        rs = [self.week(0, 10, w1), self.week(20, 12, w1)]
+        r = limits.estimate_rate(rs, lambda a, b: 4.0, self.d, self.t + 3000, "seven_day")
+        self.assertEqual((r["intervals"], r["usd_per_pp"], r["source"]), (1, 2.0, "estimated"))
+        rs += [self.week(60, 1, w2)]
+        r = limits.estimate_rate(rs, lambda a, b: 4.0, self.d, self.t + 4000, "seven_day")
+        self.assertEqual((r["intervals"], r["usd_per_pp"], r["source"]), (0, None, "unknown"))
+
+    def test_rate_week_needs_week_reset_time(self):
+        rs = [_sensor_reading(self.t, week=10), _sensor_reading(self.t + 1200, week=12)]
+        self.assertEqual(limits.rate_intervals(rs, "seven_day", self.d), [])
+
+    def test_rate_defaults(self):
+        r = limits.rates([], self.d, self.t)
+        self.assertEqual((r["five_hour"]["usd_per_pp"], r["five_hour"]["source"]), (5.0, "default"))
+        self.assertEqual((r["seven_day"]["usd_per_pp"], r["seven_day"]["source"]), (None, "unknown"))
+
+    def test_to_pp(self):
+        self.assertEqual(limits.to_pp(10.0, {"usd_per_pp": 5.0}), 2.0)
+        self.assertIsNone(limits.to_pp(10.0, {"usd_per_pp": None}))
+
+    def test_rates_reads_machine_spend(self):
+        import datetime
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = os.path.join(tmp.name, ".claude", "projects", "-home-user-demo-app")
+        os.makedirs(proj)
+
+        def msg(i, ts):
+            iso = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
+            return json.dumps({"type": "assistant", "timestamp": iso, "message": {
+                "id": "m%d" % i, "model": "claude-opus-5-5",
+                "usage": {"input_tokens": 1000000, "output_tokens": 0}}})
+        with open(os.path.join(proj, "s.jsonl"), "w") as fh:
+            fh.write(msg(1, self.t + 100) + "\n" + msg(2, self.t + 600) + "\n"
+                     + msg(3, self.t - 100) + "\n" + msg(4, self.t + 1300) + "\n")
+        rs = [self.five(0, 10), self.five(20, 12)]
+        r = limits.rates(rs, self.d, self.t + 1500, home=tmp.name)["five_hour"]
+        self.assertAlmostEqual(r["usd"], 8.0)  # two $4 messages inside [t, t+1200)
+        self.assertAlmostEqual(r["usd_per_pp"], 4.0)
+
+
 if __name__ == "__main__":
     unittest.main()

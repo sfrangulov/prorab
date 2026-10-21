@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Claude Max limits: sensor file, status line text, or limit messages."""
 import argparse
+import bisect
 import datetime
 import json
 import os
@@ -267,6 +268,90 @@ def get_limits(pane_texts, d, now=None):
     return _make()
 
 
+_RESET_KEY = {"five_hour": "resets_at", "seven_day": "seven_day_resets_at"}
+
+
+def _sensor_points(readings, window):
+    """``(ts, percent, resets_at)`` of the sensor readings that carry both for `window`."""
+    key = _RESET_KEY[window]
+    out = []
+    for r in readings:
+        if r.get("source") != "sensor":
+            continue
+        pct, at = _num(r.get(window)), _num(r.get(key))
+        if pct is not None and at is not None:
+            out.append((r["ts"], pct, at))
+    out.sort(key=lambda p: p[0])
+    return out
+
+
+def rate_intervals(readings, window, d):
+    """``(t0, t1, rise_pp)`` intervals of one window from sensor readings, never across a reset."""
+    min_span = d["schedule"]["burn_min_span_s"]
+    min_rise = d["rate"]["min_rise_pp"]
+    out = []
+    anchor = None
+    for ts, pct, at in _sensor_points(readings, window):
+        if anchor is None or abs(at - anchor[2]) > _WINDOW_TOLERANCE_S or pct < anchor[1]:
+            anchor = (ts, pct, at)
+        elif ts - anchor[0] >= min_span and pct - anchor[1] >= min_rise:
+            out.append((anchor[0], ts, pct - anchor[1]))
+            anchor = (ts, pct, at)
+    return out
+
+
+def _counted(readings, window, d, now):
+    if window == "seven_day":
+        pts = _sensor_points(readings, window)
+        if not pts:
+            return []
+        latest = max(p[2] for p in pts)
+        current = {p[0] for p in pts if latest - p[2] <= _WINDOW_TOLERANCE_S}
+        readings = [r for r in readings if r.get("ts") in current]
+        return rate_intervals(readings, window, d)
+    horizon = d["rate"]["window_horizon_s"]
+    return [iv for iv in rate_intervals(readings, window, d) if now - horizon <= iv[1] <= now]
+
+
+def estimate_rate(readings, spend_between, d, now, window="five_hour"):
+    """Dollars per percentage point of `window`: the sum of dollars over the sum of pp of the
+    counted intervals; the default (five_hour) or None (seven_day) without an interval."""
+    ivs = _counted(readings, window, d, now)
+    usd = sum(spend_between(t0, t1) for t0, t1, _ in ivs)
+    pp = sum(rise for _, _, rise in ivs)
+    if ivs and pp > 0:
+        return {"window": window, "usd_per_pp": usd / pp, "source": "estimated",
+                "intervals": len(ivs), "usd": usd, "pp": pp, "at": now}
+    default = d["rate"]["default_window_usd_per_pp" if window == "five_hour"
+                        else "default_week_usd_per_pp"]
+    return {"window": window, "usd_per_pp": default,
+            "source": "unknown" if default is None else "default",
+            "intervals": 0, "usd": 0.0, "pp": 0.0, "at": now}
+
+
+def rates(readings, d, now, home=None):
+    """The rate of both windows; one pass over the machine's transcripts."""
+    import transcript  # lazy: only the rate needs it
+    starts = [iv[0] for w in _RESET_KEY for iv in _counted(readings, w, d, now)]
+    times, prefix = [], [0.0]
+    if starts:
+        since = min(starts)
+        for ts, usd in transcript.spend_series(
+                transcript.machine_files(since=since, home=home), d, since=since):
+            times.append(ts)
+            prefix.append(prefix[-1] + usd)
+
+    def spend_between(t0, t1):
+        return prefix[bisect.bisect_left(times, t1)] - prefix[bisect.bisect_left(times, t0)]
+    return {w: estimate_rate(readings, spend_between, d, now, w) for w in _RESET_KEY}
+
+
+def to_pp(usd, rate):
+    """Dollars as pp of the window the rate belongs to; None when the rate is unknown."""
+    per = rate.get("usd_per_pp")
+    return None if not per else usd / per
+
+
 def _live_pane_texts():
     import herdr_cli  # lazy: only the live CLI path needs herdr
     return [herdr_cli.pane_visible(a["pane_id"]) for a in herdr_cli.agents()]
@@ -274,8 +359,14 @@ def _live_pane_texts():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("cmd", nargs="?", choices=["rate"])
+    ap.add_argument("--log")
     ap.add_argument("--pane-text-file", action="append", default=[])
     args = ap.parse_args(argv)
+    if args.cmd == "rate":
+        import scheduler  # lazy: scheduler imports journal
+        print(json.dumps(rates(scheduler.readings(args.log), _defaults.load(), time.time())))
+        return 0
     if args.pane_text_file:
         texts = []
         for p in args.pane_text_file:

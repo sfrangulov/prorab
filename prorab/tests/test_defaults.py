@@ -43,8 +43,17 @@ class TestDefaults(unittest.TestCase):
 
         self.assertEqual(
             d["budget"],
-            {"sessions": 30, "runs": 200, "week_pp": 10, "parallel": 2, "per_object": 1},
+            {"sessions": 30, "runs": 200, "week_pp": 10,
+             "parallel_ceiling": 6, "heavy_slots": 2},
         )
+        self.assertEqual(
+            d["limits"]["five_hour_night"],
+            {"stop_before_morning": 95,
+             "morning_window": {"no_new_mass": 70, "stop": 80}},
+        )
+        self.assertEqual(d["night"], {"morning": "08:00"})
+        self.assertEqual(
+            d["schedule"], {"default_estimate_min": 30, "burn_min_span_s": 600})
         self.assertEqual(
             d["monitor"],
             {"interval_s": 90, "heartbeat_s": 1200, "hung_s": 1800, "max_restarts": 2},

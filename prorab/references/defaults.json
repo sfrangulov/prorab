@@ -17,6 +17,13 @@
       "notify": 50,
       "dopusk_only": 70
     },
+    "five_hour_night": {
+      "stop_before_morning": 95,
+      "morning_window": {
+        "no_new_mass": 70,
+        "stop": 80
+      }
+    },
     "sensor_path": "~/.cache/prorab/usage.json",
     "sensor_max_age_s": 300,
     "message_patterns": [
@@ -30,8 +37,15 @@
     "sessions": 30,
     "runs": 200,
     "week_pp": 10,
-    "parallel": 2,
-    "per_object": 1
+    "parallel_ceiling": 6,
+    "heavy_slots": 2
+  },
+  "night": {
+    "morning": "08:00"
+  },
+  "schedule": {
+    "default_estimate_min": 30,
+    "burn_min_span_s": 600
   },
   "monitor": {
     "interval_s": 90,

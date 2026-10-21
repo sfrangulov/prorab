@@ -98,9 +98,9 @@ class TestJournal(JournalBase):
 
     def test_budget_override(self):
         self.assertEqual(journal.budget()["sessions"], 30)
-        journal.set_budget(sessions=5, parallel=3)
+        journal.set_budget(sessions=5, parallel_ceiling=3)
         b = journal.budget()
-        self.assertEqual((b["sessions"], b["parallel"], b["runs"]), (5, 3, 200))
+        self.assertEqual((b["sessions"], b["parallel_ceiling"], b["runs"]), (5, 3, 200))
 
     def test_spend_and_over_budget(self):
         n = journal.create_naryad("o", "T", "b", {})
@@ -184,7 +184,7 @@ class TestJournal(JournalBase):
             rc = journal.main(["budget", "--set", "sessions=12", "--set", "runs=50"])
         self.assertEqual(rc, 0)
         out = json.loads(buf.getvalue())
-        self.assertEqual((out["sessions"], out["runs"], out["parallel"]), (12, 50, 2))
+        self.assertEqual((out["sessions"], out["runs"], out["parallel_ceiling"]), (12, 50, 6))
         self.assertEqual(journal.budget()["sessions"], 12)
 
     def test_cli_naryad_ready_and_lock(self):

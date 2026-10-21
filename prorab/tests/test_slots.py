@@ -159,6 +159,47 @@ class TestSlots(unittest.TestCase):
         t1.join(10)
         self.assertEqual(slots.status(self.dir)["heavy"]["owners"], [])
 
+    def _write_runs(self, kind, recs):
+        os.makedirs(self.dir, exist_ok=True)
+        with open(os.path.join(self.dir, "%s.runs.jsonl" % kind), "w", encoding="utf-8") as fh:
+            for r in recs:
+                fh.write(json.dumps(r) + "\n")
+
+    def test_run_log_counts_by_worktree(self):
+        wt = os.path.join(self.tmp.name, "wt")
+        os.makedirs(os.path.join(wt, "sub"))
+        os.makedirs(os.path.join(self.tmp.name, "wt-other"))
+
+        def rec(cwd, started):
+            return {"cwd": cwd, "started_at": started, "ended_at": started + 1, "exit": 0,
+                    "cmd": "pytest"}
+        self._write_runs("heavy", [rec(wt, 100), rec(wt, 110), rec(os.path.join(wt, "sub"), 120),
+                                   rec(os.path.join(self.tmp.name, "wt-other"), 130),
+                                   rec(wt, 50)])
+        self.assertEqual(slots.runs("heavy", wt, 100, self.dir), 3)
+        self.assertEqual(slots.runs("heavy", wt, 0, self.dir), 4)
+        self.assertEqual(slots.runs("light", wt, 0, self.dir), 0)
+
+    def test_run_appends_one_line_per_command(self):
+        rc = slots.run("heavy", [sys.executable, "-c", "raise SystemExit(3)"],
+                       slots_dir=self.dir, n=1, poll_s=0.02)
+        self.assertEqual(rc, 3)
+        slots.run("heavy", [sys.executable, "-c", "pass"], slots_dir=self.dir, n=1, poll_s=0.02)
+        with open(os.path.join(self.dir, "heavy.runs.jsonl"), encoding="utf-8") as fh:
+            lines = [json.loads(ln) for ln in fh]
+        self.assertEqual([r["exit"] for r in lines], [3, 0])
+        self.assertEqual(lines[0]["cwd"], os.getcwd())
+        self.assertEqual(lines[0]["cmd"], sys.executable)
+        self.assertLessEqual(lines[0]["started_at"], lines[0]["ended_at"])
+        self.assertEqual(slots.runs("heavy", os.getcwd(), 0, self.dir), 2)
+
+    def test_runs_ignores_bad_lines(self):
+        os.makedirs(self.dir)
+        with open(os.path.join(self.dir, "heavy.runs.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write("not json\n")
+            fh.write(json.dumps({"cwd": "/x", "started_at": 5}) + "\n")
+        self.assertEqual(slots.runs("heavy", "/x", 0, self.dir), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

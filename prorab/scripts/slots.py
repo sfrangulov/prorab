@@ -62,8 +62,11 @@ def run(kind, cmd, slots_dir=None, n=None, poll_s=1.0):
     owner = os.path.join(directory, "%s.%d.owner" % (kind, i))
     try:
         _write_owner(owner, cmd)
+        started = time.time()
         # the fd is O_CLOEXEC and close_fds is on: a grandchild cannot keep the slot
-        return subprocess.run(cmd, close_fds=True).returncode
+        rc = subprocess.run(cmd, close_fds=True).returncode
+        _log_run(directory, kind, cmd, started, rc)
+        return rc
     finally:
         try:
             os.unlink(owner)
@@ -79,6 +82,43 @@ def _write_owner(path, cmd):
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(rec, fh)
     os.replace(tmp, path)
+
+
+def _runs_path(directory, kind):
+    return os.path.join(directory, "%s.runs.jsonl" % kind)
+
+
+def _log_run(directory, kind, cmd, started, rc):
+    """The fact source for heavy runs per stage: one JSON line, one append-mode write."""
+    rec = {"cwd": os.getcwd(), "started_at": started, "ended_at": time.time(), "exit": rc,
+           "cmd": cmd[0]}
+    try:
+        with open(_runs_path(directory, kind), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass  # the log is evidence, not a precondition of the command
+
+
+def runs(kind, cwd, since, slots_dir=None):
+    """Runs of `kind` that started at or after `since` in `cwd` or a path below it."""
+    root = os.path.realpath(cwd)
+    prefix = root.rstrip(os.sep) + os.sep
+    n = 0
+    try:
+        fh = open(_runs_path(slots_dir or default_slots_dir(), kind), encoding="utf-8")
+    except OSError:
+        return 0
+    with fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+                path = os.path.realpath(rec["cwd"])
+                started = float(rec["started_at"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if started >= since and (path == root or path.startswith(prefix)):
+                n += 1
+    return n
 
 
 def _owners(directory):

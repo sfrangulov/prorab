@@ -17,6 +17,7 @@ if SCRIPTS_DIR not in sys.path:
 
 import _defaults  # noqa: E402
 import crew  # noqa: E402
+import journal as real_journal  # noqa: E402
 import herdr_cli  # noqa: E402
 from prorab.tests.test_herdr_cli import DIALOG, FakeBase, err, fixture, ok  # noqa: E402
 
@@ -45,6 +46,10 @@ class FakeJournal:
         self.iters = {}
         self.gates = []
         self.stages = {}
+        self.estimates = {}
+        self.set_spent_log = []
+        self.accepted = []
+        self.shift = {"usd": 0.0, "work_orders": {}, "research": {}, "foreman_usd": 0.0}
 
     def bump_restarts(self, work_order):
         self.restarts[work_order] = self.restarts.get(work_order, 0) + 1
@@ -114,6 +119,25 @@ class FakeJournal:
     def spend(self, work_order, sessions=0, runs=0, tokens=0):
         self.spent.append((work_order, sessions, runs, tokens))
 
+    def estimate(self, work_order):
+        return dict({"usd": None, "heavy_runs_per_stage": 20}, **self.estimates.get(work_order, {}))
+
+    def set_spent(self, work_order, usd):
+        self.set_spent_log.append((work_order, usd))
+
+    def shift_spend(self, d, now=None):
+        return dict(self.shift)
+
+    def spend_block(self, spend, rates, work_order=None):
+        return real_journal.spend_block(spend, rates, work_order, kv={})
+
+    def accept_stage(self, stage, act):
+        self.accepted.append((stage, act))
+        return 12.5
+
+    def stage_info(self, stage):
+        return {"started_at": self.kv.get("stage.%s.started_at" % stage)}
+
 
 def agent_entry(name="a1", pane="w:p9", cwd="/work", status="idle", session="sess-1"):
     return {"name": name, "pane_id": pane, "cwd": cwd, "agent_status": status,
@@ -135,6 +159,10 @@ class CrewBase(FakeBase):
         p3 = mock.patch.dict(os.environ, GIT_ENV)
         p3.start()
         self.addCleanup(p3.stop)
+        p4 = mock.patch.dict(os.environ, {"PRORAB_CACHE": os.path.join(self.dir, "cache"),
+                                          "PRORAB_LOG_DIR": os.path.join(self.dir, "logs")})
+        p4.start()
+        self.addCleanup(p4.stop)
 
     def make_repo(self):
         repo = os.path.join(self.dir, "repo")
@@ -173,6 +201,21 @@ class CrewBase(FakeBase):
                       "cache_read_input_tokens": 999, "output_tokens": tokens[2]}}}
         with open(os.path.join(d, session + ".jsonl"), "w", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def write_usage(self, cwd, session, messages, subagent=None):
+        """A synthetic transcript with priced messages: [(id, model, input, output)]."""
+        d = os.path.join(self.home, ".claude", "projects", crew.transcript.project_slug(cwd))
+        if subagent:
+            d = os.path.join(d, session, "subagents")
+        os.makedirs(d, exist_ok=True)
+        name = subagent or session
+        with open(os.path.join(d, name + ".jsonl"), "w", encoding="utf-8") as fh:
+            for i, (mid, model, tin, tout) in enumerate(messages):
+                fh.write(json.dumps({
+                    "type": "assistant", "cwd": cwd, "sessionId": session,
+                    "timestamp": "2026-10-21T10:%02d:00Z" % i,
+                    "message": {"id": mid, "model": model, "content": [],
+                                "usage": {"input_tokens": tin, "output_tokens": tout}}}) + "\n")
 
 
 class TestStart(CrewBase):
@@ -280,6 +323,17 @@ class TestStart(CrewBase):
         self.assertEqual(rec["state"], "issuing")
         self.assertEqual((rec["name"], rec["pane"]), ("a1", "w:p9"))
         self.assertRegex(rec["session_id"], r"^[0-9a-f-]{36}$")
+
+    def test_start_records_worktree_in_issue(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1")
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        r = crew.start(repo, "N1", "a1", "w:p1")
+        rec = self.j.issue("N1")
+        self.assertEqual(rec["worktree"], r["worktree"])
+        self.assertEqual(os.path.realpath(rec["worktree"]), os.path.realpath(wt))
+        self.assertEqual((rec["state"], rec["name"], rec["pane"]), ("issuing", "a1", "w:p9"))
 
     def test_start_passes_session_id_add_dir_and_worktree(self):
         repo = self.make_repo()
@@ -570,7 +624,9 @@ class TestHandover(CrewBase):
         self.assertEqual(len(self.j.act_log), 1)
         self.assertEqual(self.j.act_log[0][:2], ("N1", "handover"))
         self.assertTrue(self.j.act_log[0][2].startswith("Акт: сделано A"))
-        self.assertEqual(self.j.spent, [("N1", 1, 0, 60)])
+        self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
+        self.assertEqual(self.j.set_spent_log, [("N1", 0.0)])
+        self.assertIn("Spend:", self.j.act_log[0][2])
 
     def test_restart_never_falls_back_to_site_dir(self):
         self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
@@ -582,7 +638,7 @@ class TestHandover(CrewBase):
         self.assertEqual(r["status"], "restart_failed")
         for c in self.calls():
             self.assertFalse(c.startswith("agent start"))
-        self.assertEqual(self.j.spent, [("N1", 1, 0, 60)])
+        self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
 
     def restart_routes(self, wt=None):
         wt = wt or self.wt
@@ -612,12 +668,32 @@ class TestHandover(CrewBase):
         for c in self.calls():
             self.assertFalse(c.startswith(("agent prompt", "pane run", "agent start")))
 
-    def test_tokens_spent_before_exit_even_if_restart_fails(self):
+    def test_spend_recorded_before_exit_even_if_restart_fails(self):
         self.restart_routes()
         self.route("agent start a1", err("agent_start_failed"), exit_code=1)
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.assertEqual(self.go()["status"], "restart_failed")
-        self.assertEqual(self.j.spent, [("N1", 1, 0, 60)])
+        self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
+        self.assertEqual(self.j.set_spent_log, [("N1", 0.0)])
+
+    def test_handover_act_has_spend(self):
+        self.write_usage(self.wt, "s-old", [("m1", "claude-opus-5", 1000000, 100000)])
+        self.write_usage(self.wt, "s-old", [("m2", "claude-haiku-5", 1000000, 0)],
+                         subagent="agent-1")
+        self.j.estimates["N1"] = {"usd": 10.0}
+        self.restart_routes()
+        self.route("agent start a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        r = self.go()
+        self.assertEqual(r["status"], "restarted")
+        self.assertAlmostEqual(r["usd"], 6.1)  # opus 4 + 2, haiku 0.1
+        act = self.j.act_log[0][2]
+        self.assertIn("Spend:", act)
+        self.assertIn("work order N1: $6.10 of $10.00 estimated", act)
+        self.assertIn("1.22 pp of the window", act)  # default rate 5 $/pp
+        self.assertEqual(self.j.set_spent_log[0][0], "N1")
+        self.assertAlmostEqual(self.j.set_spent_log[0][1], 6.1)
+        self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
 
     def test_restart_consent_prompt_sends_nothing(self):
         self.restart_routes()
@@ -1064,7 +1140,8 @@ def make_report(**kw):
     }
     parts.update(kw.get("sections", {}))
     text = "# Stage report\n\n" + "\n".join(v for v in parts.values() if v)
-    return text + kw.get("tail", "")
+    heavy = kw.get("heavy", "Heavy runs: 3\n")
+    return text + ("\n" + heavy if heavy else "") + kw.get("tail", "")
 
 
 class TestCheckReport(CrewBase):
@@ -1115,6 +1192,24 @@ class TestCheckReport(CrewBase):
                  "no Commit SHA")
         self.has(self.problems(text=make_report()), "no Result")
         self.has(self.problems(text=make_report(tail="\nResult: shipped\n")), "unknown result")
+
+    def test_check_report_heavy_runs(self):
+        tail = "\nResult: delivered\nCommit: %s\n" % self.sha
+
+        def run(heavy, **kw):
+            text = make_report(heavy=heavy, tail=tail)
+            return crew.check_report(text, ["C1", "C2"], ["src/"], self.wt, **kw)
+        self.has(run("", heavy_limit=20)["problems"], "no Heavy runs line")
+        self.has(run("Heavy runs: 21\n", heavy_limit=20)["problems"], "above the limit of 20")
+        self.assertTrue(run("Heavy runs: 21\n", heavy_limit=20, cleared=True)["ok"])
+        self.assertTrue(run("Heavy runs: 20\n", heavy_limit=20)["ok"])
+        self.assertTrue(run("**Heavy runs:** 0\n", heavy_limit=20)["ok"])
+        self.has(run("Heavy runs: 3\n", heavy_limit=20, heavy_counted=5)["problems"],
+                 "reported 3, the slots log counts 5")
+        # the larger of the reported and the counted value is tested against the limit
+        got = run("Heavy runs: 21\n", heavy_limit=20, heavy_counted=25)["problems"]
+        self.has(got, "25 above the limit")
+        self.assertTrue(run("Heavy runs: 5\n", heavy_limit=20, heavy_counted=5)["ok"])
 
     def test_check_report_sha_not_on_branch(self):
         git(self.repo, "checkout", "-q", "-b", "other")
@@ -1217,7 +1312,88 @@ class TestCheckReport(CrewBase):
         self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 3)
 
 
+class TestWorkOrderSpend(CrewBase):
+    def setUp(self):
+        super().setUp()
+        self.wt = "/home/user/projects/demo-app/.claude/worktrees/prorab-N1"
+        self.j.issue_set("N1", "issued", worktree=self.wt)
+        self.write_usage(self.wt, "crew-s", [("m1", "claude-opus-5", 1000000, 100000)])
+        self.write_usage(self.wt, "crew-s", [("m2", "claude-haiku-5", 1000000, 0)],
+                         subagent="agent-1")
+
+    def test_work_order_spend_reads_worktree_transcripts(self):
+        self.j.estimates["N1"] = {"usd": 0.01, "heavy_runs_per_stage": 7}
+        r = crew.work_order_spend("N1")
+        self.assertAlmostEqual(r["usd"], 6.1)
+        self.assertEqual((r["estimate_usd"], r["heavy_runs_per_stage"]), (0.01, 7))
+        self.assertTrue(r["over"])
+        self.assertAlmostEqual(r["pp_window"], 6.1 / 5)
+        self.assertIsNone(r["pp_week"])
+        self.assertEqual(r["rates"]["five_hour"]["source"], "default")
+        self.assertEqual(r["rates"]["seven_day"]["usd_per_pp"], None)
+
+    def test_not_over_within_the_estimate(self):
+        self.j.estimates["N1"] = {"usd": 50.0}
+        self.assertFalse(crew.work_order_spend("N1")["over"])
+
+    def test_unknown_worktree_is_refused(self):
+        with self.assertRaises(ValueError):
+            crew.work_order_spend("N2")
+
+    def test_accept_appends_spend_block_and_sets_spent(self):
+        self.j.estimates["N1"] = {"usd": 5.0}
+        self.j.shift = {"usd": 361.2, "work_orders": {}, "research": {}, "foreman_usd": 0.0}
+        r = crew.accept("N1", "N1.1", "Stage accepted.\n")
+        self.assertEqual(set(r), {"minutes", "usd", "estimate_usd", "over"})
+        self.assertEqual((r["minutes"], r["estimate_usd"], r["over"]), (12.5, 5.0, True))
+        self.assertAlmostEqual(r["usd"], 6.1)
+        self.assertEqual(self.j.set_spent_log, [("N1", r["usd"])])
+        (stage, act), = self.j.accepted
+        self.assertEqual(stage, "N1.1")
+        self.assertTrue(act.startswith("Stage accepted.\n\nSpend:\n"))
+        self.assertIn("- work order N1: $6.10 of $5.00 estimated", act)
+        self.assertIn("- shift: $361.20 of $350.00 budget", act)
+        self.assertIn("- window rate: 5.00 $/pp (default)", act)
+
+    def test_cli_accept_reads_the_act_file(self):
+        self.j.estimates["N1"] = {"usd": 50.0}
+        path = os.path.join(self.dir, "act.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("Accepted.")
+        with mock.patch("sys.stdout") as out:
+            self.assertEqual(crew.main(["accept", "N1", "N1.1", "--act-file", path]), 0)
+        self.assertEqual(self.j.accepted[0][0], "N1.1")
+        self.assertIn('"over": false', "".join(c.args[0] for c in out.write.call_args_list))
+
+    def test_cli_check_report_passes_estimate_clearance_and_counted(self):
+        wt = os.path.join(self.dir, "wt-cli")
+        os.makedirs(wt)
+        self.j.kv["crew.a1.worktree"] = wt
+        self.j.kv["stage.N1.1.started_at"] = 100
+        self.j.estimates["N1"] = {"heavy_runs_per_stage": 4}
+        self.j.bd = lambda args, json_out=True: [{"description": "C1. a", "labels":
+                                                  ["clearance:granted"]}]
+        self.route("agent list", ok({"agents": [agent_entry(cwd=wt)]}))
+        with mock.patch.object(crew.slots, "runs", return_value=9) as runs, \
+                mock.patch.object(crew, "summary", return_value="r"), \
+                mock.patch.object(crew, "check_report", return_value={"ok": True}) as chk:
+            crew._check_report_cli("a1", "N1", stage="N1.1")
+        runs.assert_called_once_with("heavy", wt, since=100.0)
+        kw = chk.call_args.kwargs
+        self.assertEqual((kw["heavy_limit"], kw["cleared"], kw["heavy_counted"]), (4, True, 9))
+
+
 class TestAskPredecessor(CrewBase):
+    def test_ask_predecessor_refuses_cwd_outside_worktree(self):
+        self.j.issue_set("N1", "issued", worktree=os.path.join(self.dir, "wt"))
+        with self.assertRaises(ValueError):
+            crew.ask_predecessor("N1", "sess-9", os.path.join(self.dir, "elsewhere"), "q")
+        with self.assertRaises(ValueError):
+            crew.ask_predecessor("N1", "sess-9", os.path.join(self.dir, "wt-sibling"), "q")
+        with self.assertRaises(ValueError):
+            crew.ask_predecessor("N2", "sess-9", os.path.join(self.dir, "wt"), "q")
+        self.assertEqual(self.j.spent, [])
+
     def test_ask_predecessor_spends_one_run(self):
         bin_dir = os.path.join(self.dir, "bin")
         os.makedirs(bin_dir)
@@ -1228,8 +1404,9 @@ class TestAskPredecessor(CrewBase):
                      'echo "the answer"\n' % (argv_log, argv_log))
         os.chmod(script, 0o755)
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
-        cwd = os.path.join(self.dir, "wt")
+        cwd = os.path.join(self.dir, "wt", "sub")
         os.makedirs(cwd)
+        self.j.issue_set("N1", "issued", worktree=os.path.join(self.dir, "wt"))
         out = crew.ask_predecessor("N1", "sess-9", cwd, "Why this file?")
         self.assertEqual(out.strip(), "the answer")
         with open(argv_log) as fh:
@@ -1252,6 +1429,16 @@ class TestStop(CrewBase):
         self.assertEqual(self.j.spent, [("N1", 0, 0, 6)])
         self.assertIn("agent prompt a1 /exit --wait --until working --until done --until blocked --timeout 60000", self.calls())
         self.assertNotIn("crew.a1.work_order", self.j.kv)
+
+    def test_stop_records_the_final_spend(self):
+        wt = "/home/user/projects/demo-app/.claude/worktrees/prorab-N1"
+        self.write_usage(wt, "s1", [("m1", "claude-opus-5", 1000000, 0)])
+        self.j.kv["crew.a1.worktree"] = wt
+        self.route("agent list", ok({"agents": []}))
+        crew.stop("a1", "N1")
+        self.assertEqual(len(self.j.set_spent_log), 1)
+        self.assertEqual(self.j.set_spent_log[0][0], "N1")
+        self.assertAlmostEqual(self.j.set_spent_log[0][1], 4.0)
 
     def test_stop_clears_session_kv(self):
         self.j.kv.update({"crew.a1.session": "s", "crew.a1.transcript": "t",

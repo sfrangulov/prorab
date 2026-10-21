@@ -2,7 +2,7 @@
 """Crew lifecycle: a Claude crew in a herdr pane inside a per-work-order git worktree.
 
 start, deliver, state, summary, handover, restart, limit wait, report check, evidence,
-merge check, answer, pause, stop, cleanup.
+merge check, answer, pause, spend, acceptance, stop, cleanup.
 The foreman never merges, never pushes and never answers a trust/consent prompt.
 """
 import argparse
@@ -23,6 +23,8 @@ import _defaults  # noqa: E402
 import herdr_cli  # noqa: E402
 import journal  # noqa: E402
 import limits  # noqa: E402
+import scheduler  # noqa: E402
+import slots  # noqa: E402
 import transcript  # noqa: E402
 
 REFERENCES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -273,6 +275,9 @@ def start(site_path, work_order, name, caller_pane):
         if _git(["branch", "-m", want], worktree).returncode == 0:
             branch = want
 
+    if worktree:  # so the spend stays attributable after the crew is gone
+        journal.issue_set(work_order, (journal.issue(work_order) or {}).get("state", "issuing"),
+                          worktree=worktree)
     journal.register_crew(name)
     fields = [("work_order", work_order), ("site", site_path), ("pane", pane)]
     if worktree:
@@ -365,6 +370,54 @@ def _tokens_of(a, name=None):
         return 0
     t = transcript.usage_totals(path)
     return t["input"] + t["cache_creation"] + t["output"]
+
+
+# ---- spend in API dollars -----------------------------------------------------
+
+def _issue_worktree(work_order):
+    wt = (journal.issue(work_order) or {}).get("worktree")
+    if not wt:
+        raise ValueError("worktree of work order %s is unknown" % work_order)
+    return wt
+
+
+def _spend_of(work_order, worktree, d=None, home=None):
+    d = d or _defaults.load()
+    usd = transcript.cost(transcript.worktree_files(worktree, home), d)["usd"]
+    est = journal.estimate(work_order)
+    rates = limits.rates(scheduler.readings(), d, time.time(), home=home)
+    return {"usd": usd, "estimate_usd": est["usd"],
+            "over": est["usd"] is not None and usd > est["usd"],
+            "heavy_runs_per_stage": est["heavy_runs_per_stage"],
+            "pp_window": limits.to_pp(usd, rates["five_hour"]),
+            "pp_week": limits.to_pp(usd, rates["seven_day"]), "rates": rates}
+
+
+def work_order_spend(work_order, d=None, home=None):
+    """Dollars of a work order (every run in its worktree: crew sessions, subagents, asked
+    predecessors) against its estimate, in pp of the window and of the week by the rate."""
+    return _spend_of(work_order, _issue_worktree(work_order), d, home)
+
+
+def _spend_block(work_order, spend, d=None):
+    """The `Spend:` block of an act: this work order's dollars and the shift's."""
+    shift = journal.shift_spend(d or _defaults.load(), time.time())
+    mine = {"usd_total": spend["usd"], "estimate_usd": spend["estimate_usd"],
+            "over": spend["over"]}
+    shift = dict(shift, work_orders=dict(shift.get("work_orders", {}), **{work_order: mine}))
+    return journal.spend_block(shift, spend["rates"], work_order)
+
+
+def accept(work_order, stage, act_text):
+    """Accept a stage: the work order's spend goes into the act and the journal. `over`
+    means the foreman stops the work order after its current step and raises a gate, unless
+    the customer's command "ignore limits and finish" holds."""
+    spend = work_order_spend(work_order)
+    journal.set_spent(work_order, spend["usd"])
+    act = "%s\n\n%s" % (act_text.rstrip(), _spend_block(work_order, spend))
+    minutes = journal.accept_stage(stage, act)
+    return {"minutes": minutes, "usd": spend["usd"], "estimate_usd": spend["estimate_usd"],
+            "over": spend["over"]}
 
 
 def _exit(name):
@@ -487,13 +540,15 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
         return {"status": "handover_loop"}
     act = "\n".join(ln for ln in lines if ln.strip() != HANDOVER_MARKER).strip()
     act = "%s\n\n%s" % (act, _facts(worktree, work_order, base))
-    tokens = _tokens_of(a, name)
+    spend = _spend_of(work_order, worktree)
+    act = "%s\n\n%s" % (act, _spend_block(work_order, spend))
     try:
         journal.add_act(work_order, "handover", act)
     except Exception as e:  # without a saved act the crew must not be exited
         return {"status": "act_not_saved", "reason": str(e)}
     journal.kv_set("handover.%s.last" % work_order, time.time())
-    journal.spend(work_order, sessions=1, tokens=tokens)
+    journal.set_spent(work_order, spend["usd"])  # the predecessor's dollars are in the worktree
+    journal.spend(work_order, sessions=1)
 
     _exit(name)
     gone = _wait(lambda: herdr_cli.agent(name) is None
@@ -514,7 +569,7 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
         return {"status": "prompt_not_accepted", "reason": str(e), "pane_id": pane}
     if sent != "accepted":
         return {"status": "prompt_not_accepted", "sent": sent, "pane_id": pane}
-    return {"status": "restarted", "sent": sent, "tokens": tokens, "pane_id": pane,
+    return {"status": "restarted", "sent": sent, "usd": spend["usd"], "pane_id": pane,
             "session_id": session_id}
 
 
@@ -731,9 +786,13 @@ def wait_limit(name):
 def stop(name, work_order):
     a = herdr_cli.agent(name)
     tokens = _tokens_of(a, name)
+    worktree = journal.kv_get(_kv(name, "worktree")) or \
+        (journal.issue(work_order) or {}).get("worktree")
     if a is not None:
         _exit(name)
     journal.unregister_crew(name)
+    if worktree:
+        journal.set_spent(work_order, _spend_of(work_order, worktree)["usd"])
     journal.spend(work_order, tokens=tokens)
     for field in ("work_order", "site", "pane", "worktree", "branch", "session",
                   "transcript", "limit_until"):
@@ -778,6 +837,7 @@ _COMMIT = re.compile(r"^[\s>*_-]*Commit[\s*_]*:[\s*_`]*([0-9a-f]{7,40})\b", re.I
 _ITEM = re.compile(r"^\s*(?:[-*+]|\d+\.)(?:\s+(.*))?$")
 _TICKS = re.compile(r"`([^`]+)`")
 _SKIP = re.compile(r"\bSKIP:\s*(\d+)", re.I)
+_HEAVY = re.compile(r"^[\s>*_-]*Heavy runs[\s*_]*:[\s*_`]*(\d+)\b", re.I | re.M)
 
 
 def criteria_ids(work_order_text):
@@ -817,9 +877,25 @@ def _covered(path, files):
                for f in files)
 
 
-def check_report(text, criteria, files, worktree, base="main"):
+def _check_heavy(text, heavy_limit, cleared, heavy_counted):
+    m = _HEAVY.search(text)
+    if not m:
+        return ["no Heavy runs line"]
+    n = int(m.group(1))
+    problems = []
+    if heavy_counted is not None and n != heavy_counted:
+        problems.append("Heavy runs: reported %d, the slots log counts %d" % (n, heavy_counted))
+    worst = n if heavy_counted is None else max(n, heavy_counted)
+    if heavy_limit is not None and worst > heavy_limit and not cleared:
+        problems.append("Heavy runs: %d above the limit of %d per stage" % (worst, heavy_limit))
+    return problems
+
+
+def check_report(text, criteria, files, worktree, base="main", heavy_limit=None, cleared=False,
+                 heavy_counted=None):
     """Read-only check of a stage report against its work order and the worktree's git."""
     problems, warnings = [], []
+    problems += _check_heavy(text, heavy_limit, cleared, heavy_counted)
     sections = _sections(text)
     for sec in REPORT_SECTIONS:
         if sec not in sections:
@@ -936,7 +1012,10 @@ def report_fix(name, work_order, stage, problems):
 
 def ask_predecessor(work_order, session_id, cwd, question):
     """Manual tool: ask a fork of a finished session a question; the session itself is not
-    changed. Costs one run of the work order."""
+    changed. Costs one run of the work order; `cwd` must lie in its worktree, so the run's
+    transcript counts in the work order's dollars."""
+    if not _under(cwd, _issue_worktree(work_order)):
+        raise ValueError("cwd %s is outside the worktree of work order %s" % (cwd, work_order))
     journal.spend(work_order, runs=1)
     try:
         p = subprocess.run(["claude", "--resume", session_id, "--fork-session", "-p", question],
@@ -949,14 +1028,28 @@ def ask_predecessor(work_order, session_id, cwd, question):
     return p.stdout
 
 
-def _check_report_cli(name, work_order, base="main"):
+def _check_report_cli(name, work_order, stage=None, base="main"):
     worktree = journal.kv_get(_kv(name, "worktree"))
     if not worktree:
         raise ValueError("worktree of the crew %s is unknown" % name)
     shown = journal.bd(["show", work_order])
     description = (shown[0].get("description") or "") if shown else ""
+    cleared, counted = False, None
+    if stage:
+        labels = ((journal.bd(["show", stage]) or [{}])[0].get("labels")) or []
+        cleared = "clearance:granted" in labels
+        started = journal.stage_info(stage)["started_at"]
+        if started is not None:
+            counted = slots.runs("heavy", worktree, since=float(started))
     return check_report(summary(name), criteria_ids(description),
-                        journal.work_order_files(work_order), worktree, base)
+                        journal.work_order_files(work_order), worktree, base,
+                        heavy_limit=journal.estimate(work_order)["heavy_runs_per_stage"],
+                        cleared=cleared, heavy_counted=counted)
+
+
+def _accept_cli(work_order, stage, act_file):
+    with open(act_file, encoding="utf-8") as fh:
+        return accept(work_order, stage, fh.read())
 
 
 def _report_fix_cli(name, work_order, stage, problems_file):
@@ -993,7 +1086,9 @@ def main(argv=None):
     cmd("resume", "name")
     cmd("wait_limit", "name")
     cmd("restart", "name", "work_order", "work_order_text", "reason", caller_pane={})
-    cmd("check_report", "name", "work_order", base={"default": "main"})
+    cmd("check_report", "name", "work_order", stage={}, base={"default": "main"})
+    cmd("spend", "work_order")
+    cmd("accept", "work_order", "stage", act_file={"required": True})
     cmd("report_fix", "name", "work_order", "stage", problems_file={"required": True})
     cmd("ask_predecessor", "work_order", "session_id", "cwd", "question")
     cmd("stop", "name", "work_order")
@@ -1005,7 +1100,8 @@ def main(argv=None):
     try:
         if c == "name_for":
             args["n"] = int(args["n"])
-        func = {"check_report": _check_report_cli, "report_fix": _report_fix_cli}.get(c)
+        func = {"check_report": _check_report_cli, "report_fix": _report_fix_cli,
+                "accept": _accept_cli, "spend": work_order_spend}.get(c)
         result = (func or globals()[c])(**args)
     except (herdr_cli.HerdrError, journal.JournalError, ValueError, RuntimeError) as e:
         print(json.dumps({"error": str(e), "code": getattr(e, "code", None)},

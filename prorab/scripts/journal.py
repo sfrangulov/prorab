@@ -204,19 +204,42 @@ def clear_override():
     kv_clear(OVERRIDE_KEY)
 
 
+def _open_gate(item):
+    return any(d.get("issue_type") == "gate" and d.get("status") != "closed"
+               for d in item.get("dependencies") or [])
+
+
+def _naryad_settled(naryad_id):
+    """An open наряд is settled when it, or all of its open work, waits for the customer."""
+    if _open_gate(_show(naryad_id)):
+        return True
+    stages = [c for c in bd(["list", "--parent", naryad_id, "--all", "--limit", "0"])
+              if c.get("status") != "closed"]
+    if not stages:
+        return False
+    shown = {c["id"]: _show(c["id"]) for c in stages}
+    waiting = {i for i, it in shown.items() if _open_gate(it)}
+    changed = True
+    while changed:  # a stage blocked only by waiting stages waits too
+        changed = False
+        for i, it in shown.items():
+            if i in waiting:
+                continue
+            blockers = [d["id"] for d in it.get("dependencies") or []
+                        if d.get("dependency_type") != "parent-child" and d["id"] in shown]
+            if blockers and all(b in waiting for b in blockers):
+                waiting.add(i)
+                changed = True
+    return len(waiting) == len(shown)
+
+
 def _goal_done(goal):
     """True when the goal has наряды and each is closed or waits for the customer."""
     naryads = bd(["list", "--label", NARYAD_LABEL, "--label", "goal:%s" % goal,
                   "--no-parent", "--all", "--limit", "0"])
     if not naryads:
         return False
-    for n in naryads:
-        if n.get("status") == "closed":
-            continue
-        deps = _show(n["id"]).get("dependencies") or []
-        if not any(d.get("issue_type") == "gate" and d.get("status") != "closed" for d in deps):
-            return False
-    return True
+    return all(n.get("status") == "closed" or _naryad_settled(n["id"]) for n in naryads)
 
 
 def override():
@@ -227,9 +250,11 @@ def override():
     try:
         data = json.loads(v)
     except ValueError:
+        data = None
+    if not isinstance(data, dict) or not data.get("goal"):
         clear_override()
         return None
-    if _goal_done(data.get("goal")):
+    if _goal_done(data["goal"]):
         clear_override()
         return None
     return data

@@ -263,6 +263,10 @@ class TestJournal(JournalBase):
         other = journal.create_naryad("o", "T3", "b", {}, goal="g2")
         s = journal.create_stage(n1, "S", "b")
         self.assertIsNotNone(journal.override())
+        # stages inherit the goal label but are not наряды (--no-parent)
+        listed = journal.bd(["list", "--label", "goal:g1", "--no-parent", "--all", "--limit", "0"])
+        self.assertEqual(sorted(i["id"] for i in listed), sorted([n1, n2]))
+        self.assertIsNotNone(journal.override())  # n1 has an open stage, n2 is open
         journal.bd(["close", s])
         journal.bd(["close", n1])
         self.assertIsNotNone(journal.override())  # n2 still open
@@ -273,6 +277,32 @@ class TestJournal(JournalBase):
         self.assertIsNotNone(journal.override())
         journal.bd(["close", other])
         self.assertIsNone(journal.override())
+
+    def test_override_expires_when_stage_waits(self):
+        journal.set_override("g1")
+        n = journal.create_naryad("o", "T", "b", {}, goal="g1")
+        s1 = journal.create_stage(n, "S1", "b")
+        s2 = journal.create_stage(n, "S2", "b", blocked_by=[s1])
+        s3 = journal.create_stage(n, "S3", "b")
+        journal.bd(["close", s3])
+        self.assertIsNotNone(journal.override())
+        gate = journal.wait_customer(s1, "нужен выбор")  # on a STAGE, not the наряд
+        self.assertIsNone(journal.override())  # s2 is blocked by the waiting s1
+        self.assertIsNone(journal.kv_get("override.ignore_limits"))
+        # an open stage that does not wait keeps the override alive
+        journal.set_override("g1")
+        s4 = journal.create_stage(n, "S4", "b")
+        self.assertIsNotNone(journal.override())
+        journal.bd(["close", s4])
+        self.assertIsNone(journal.override())
+        self.assertIsNotNone(gate)
+        self.assertTrue(s2)
+
+    def test_override_bad_value_cleared(self):
+        for bad in ("not json", "[1, 2]", "{\"since\": 1}", "\"str\""):
+            journal.kv_set("override.ignore_limits", bad)
+            self.assertIsNone(journal.override(), bad)
+            self.assertIsNone(journal.kv_get("override.ignore_limits"), bad)
 
     def test_cli_stage_override(self):
         import io

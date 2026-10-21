@@ -992,6 +992,26 @@ class TestRestart(CrewBase):
         self.assertEqual(self.j.restarts, {})
         self.assertEqual(self.j.kv["crew.a1.session"], "old-session")
 
+    def test_delivery_failure_after_agent_start_is_counted_and_recorded(self):
+        self.route("agent prompt a1", err("agent_not_found"), exit_code=1)
+        # resume path: the old session stays recorded, the restart counts
+        r = self.go("hung")
+        self.assertEqual(r["status"], "prompt_not_accepted")
+        self.assertEqual(self.j.restarts, {"N1": 1})
+        self.assertEqual(self.j.kv["crew.a1.session"], "old-session")
+        # new-session path: the new session is recorded and counted
+        self.write_transcript("/work", "old-session", "x", tokens=(130000, 0, 0))
+        self.j.kv["crew.a1.transcript"] = crew.transcript.transcript_path(
+            "/work", "old-session", self.home)
+        r = self.go("gone")
+        self.assertEqual(r["status"], "prompt_not_accepted")
+        self.assertEqual(self.j.restarts, {"N1": 2})
+        self.assertNotEqual(self.j.kv["crew.a1.session"], "old-session")
+        self.assertEqual(self.j.kv["crew.a1.session"], r["session_id"])
+        # limit_died is never counted, even after a delivery failure
+        self.assertEqual(self.go("limit_died")["status"], "prompt_not_accepted")
+        self.assertEqual(self.j.restarts, {"N1": 2})
+
     def test_restart_unknown_reason(self):
         with self.assertRaises(ValueError):
             self.go("tired")
@@ -1093,7 +1113,7 @@ class TestCheckReport(CrewBase):
 
     def test_check_report_empty_list_item_is_a_rejection(self):
         tail = "\nResult: delivered\nCommit: %s\n" % self.sha
-        for body in ("- \n- `src/a.py`\n", "- \n", "- ``\n"):
+        for body in ("- \n- `src/a.py`\n", "- \n", "- ``\n", "-\n- `src/a.py`\n", "-\n"):
             p = self.problems(text=make_report(
                 sections={"Changed files": "## Changed files\n" + body}, tail=tail))
             self.has(p, "empty list item under Changed files")

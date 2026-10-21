@@ -530,17 +530,16 @@ def restart(name, work_order, work_order_text, reason, caller_pane=None,
     if not worktree:
         return {"status": "restart_failed", "reason": "worktree of the crew is unknown"}
     try:
-        result = _restart(name, work_order, work_order_text, worktree, caller_pane,
-                          timeout_s, poll_s)
-    except herdr_cli.HerdrError as e:
+        return _restart(name, work_order, work_order_text, worktree, caller_pane,
+                        timeout_s, poll_s, counted)
+    except herdr_cli.HerdrError as e:  # before the agent was started again: nothing changed
         return {"status": "restart_failed", "reason": str(e)}
-    # counted only once the agent was started again; a failed restart leaves the counter
-    if counted and result["status"] in ("resumed", "restarted", "prompt_not_accepted"):
-        journal.bump_restarts(work_order)
-    return result
 
 
-def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s, poll_s):
+def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s, poll_s,
+             counted):
+    """The restart point is a successful `agent start`: from then on the session kv names the
+    session and the restart is counted, whatever happens to the delivery."""
     pane = journal.kv_get(_kv(name, "pane"))
     alive = False
     if pane:
@@ -584,7 +583,12 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
         if marker not in shown:
             if failed:
                 return failed
-            sent = resume(name)
+            if counted:
+                journal.bump_restarts(work_order)
+            try:
+                sent = resume(name)
+            except herdr_cli.HerdrError as e:
+                return {"status": "prompt_not_accepted", "reason": str(e), "pane_id": pane}
             if sent != "accepted":
                 return {"status": "prompt_not_accepted", "sent": sent, "pane_id": pane}
             return {"status": "resumed", "pane_id": pane, "session_id": old}
@@ -593,9 +597,16 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
     if failed:
         return failed
     _set_session(name, worktree, session_id)
-    sent = deliver(name, _handover_text(work_order, work_order_text), work_order)
+    if counted:
+        journal.bump_restarts(work_order)
+    try:
+        sent = deliver(name, _handover_text(work_order, work_order_text), work_order)
+    except herdr_cli.HerdrError as e:
+        return {"status": "prompt_not_accepted", "reason": str(e), "pane_id": pane,
+                "session_id": session_id}
     if sent != "accepted":
-        return {"status": "prompt_not_accepted", "sent": sent, "pane_id": pane}
+        return {"status": "prompt_not_accepted", "sent": sent, "pane_id": pane,
+                "session_id": session_id}
     return {"status": "restarted", "pane_id": pane, "session_id": session_id}
 
 
@@ -757,7 +768,7 @@ _HEADING = re.compile(r"^ {0,3}#{1,4}\s+(.+?)\s*#*\s*$")
 _ROW = re.compile(r"^\s*\|\s*(C\d+)\s*\|\s*([^|]*?)\s*(?:\|\s*([^|]*?)\s*)?\|?\s*$")
 _RESULT = re.compile(r"^[\s>*_-]*Result[\s*_]*:[\s*_]*(.+?)[\s*_`.]*$", re.I | re.M)
 _COMMIT = re.compile(r"^[\s>*_-]*Commit[\s*_]*:[\s*_`]*([0-9a-f]{7,40})\b", re.I | re.M)
-_ITEM = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+(.*)$")
+_ITEM = re.compile(r"^\s*(?:[-*+]|\d+\.)(?:\s+(.*))?$")
 _TICKS = re.compile(r"`([^`]+)`")
 _SKIP = re.compile(r"\bSKIP:\s*(\d+)", re.I)
 
@@ -786,7 +797,7 @@ def _sections(text):
 
 
 def _items(lines):
-    return [m.group(1).strip() for m in (_ITEM.match(ln) for ln in lines) if m]
+    return [(m.group(1) or "").strip() for m in (_ITEM.match(ln) for ln in lines) if m]
 
 
 def _listed_path(item):

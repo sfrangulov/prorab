@@ -575,9 +575,9 @@ class TestSendState(CrewBase):
         crew.pause("a1")
         crew.request_handover("a1")
         calls = self.calls()
-        self.assertIn("жди сообщения прораба", calls[0])
+        self.assertIn("wait for the foreman's message", calls[0])
         self.assertIn("HANDOVER READY", calls[1])
-        self.assertIn("следующие шаги", calls[1])
+        self.assertIn("next steps", calls[1])
 
 
 class TestHandover(CrewBase):

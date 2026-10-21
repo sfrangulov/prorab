@@ -1,22 +1,22 @@
-# Тексты актов и сообщений бригаде
+# Act texts and messages to crews
 
-Скрипты берут первый блок кода под заголовком раздела. Заголовки не переименовывать.
+Scripts take the first code block under a section heading. Do not rename the headings.
 
 ## Handover request
 
 ```
-Заверши текущий шаг. Новых долгих прогонов не начинай. Напиши акт пересменки с полями: цель наряда; сделано (коммиты); в процессе (фоновые задачи, где их вывод, как проверить); следующие шаги; договорённости (смета, допуски, ограничения); важные пути; открытые вопросы. Когда акт написан, ответь строкой HANDOVER READY.
+Finish the current step. Do not start new long runs. Write a handover act with the fields: the work order's goal; done (commits); in progress (background tasks, where their output is, how to check it); next steps; agreements (estimate, clearances, constraints); important paths; open questions. When the act is written, answer with the line HANDOVER READY.
 ```
 
 ## Pause
 
 ```
-Заверши текущий шаг, ничего нового не начинай, жди сообщения прораба.
+Finish the current step, start nothing new, wait for the foreman's message.
 ```
 
 ## Customer decision to drop the branch
 
-Прораб пишет этот акт `ответ` только после явных слов заказчика об отказе от ветки наряда. Только строка с этим маркером в начале разрешает `cleanup` удалить ветку с неслитыми коммитами.
+The foreman writes this `answer` act only after the customer's explicit words dropping the work order's branch. Only a line that starts with this marker lets `cleanup` delete a branch with unmerged commits.
 
 ```
 [customer decision] drop

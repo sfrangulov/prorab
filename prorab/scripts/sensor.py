@@ -54,12 +54,17 @@ def _plan(settings, tap):
 
 def install(settings, cache, tap):
     cfg, sl, old = _plan(settings, tap)
-    tap = shlex.quote(tap)
+    exec_form = shlex.quote(tap)
+    tap = ". " + exec_form  # sourced into the shell Claude Code already starts
     if old == tap:
         return {"changed": False, "old": None, "new": tap, "backup": None}
     backup = _backup_path(settings)
     shutil.copy2(settings, backup)
     os.chmod(backup, os.stat(settings).st_mode & 0o777)
+    if old == exec_form:  # an older install: convert, keep the saved original
+        sl["command"] = tap
+        _dump(settings, cfg)
+        return {"changed": True, "old": old, "new": tap, "backup": backup}
     os.makedirs(cache, exist_ok=True)
     state = {"had_statusline": "statusLine" in cfg, "statusLine": sl}
     _write_atomic(os.path.join(cache, STATE), json.dumps(state, ensure_ascii=False))
@@ -145,12 +150,12 @@ def main(argv):
         print(json.dumps(uninstall(settings, cache)))
         return 0
     _cfg, _sl, old = _plan(settings, tap)
-    if old == shlex.quote(tap):
+    if old == ". " + shlex.quote(tap):
         print("already installed; nothing to change")
         return 0
     if "--yes" not in argv[1:]:
         print("Planned change in %s:" % settings)
-        print("  statusLine.command: %s -> %s" % (old if old else "(none)", shlex.quote(tap)))
+        print("  statusLine.command: %s -> %s" % (old if old else "(none)", ". " + shlex.quote(tap)))
         print("  backup: %s" % _backup_path(settings))
         print("Re-run with --yes after the customer agrees.")
         return 2

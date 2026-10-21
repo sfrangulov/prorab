@@ -17,6 +17,7 @@ if SCRIPTS_DIR not in sys.path:
 import sensor  # noqa: E402
 
 TAP = os.path.join(SCRIPTS_DIR, "statusline_tap.sh")
+SRC = ". " + shlex.quote(TAP)
 SENSOR_PY = os.path.join(SCRIPTS_DIR, "sensor.py")
 
 STATUS_LINE = {"type": "command", "command": "/home/user/.claude/statusline.sh",
@@ -24,6 +25,8 @@ STATUS_LINE = {"type": "command", "command": "/home/user/.claude/statusline.sh",
 
 
 class SensorCase(unittest.TestCase):
+    SHELL = "sh"
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
@@ -51,7 +54,7 @@ class SensorCase(unittest.TestCase):
         if orig is not None:
             with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
                 fh.write(orig + "\n")
-        return subprocess.run(["sh", "-c", TAP], input=stdin, env=env,
+        return subprocess.run([self.SHELL, "-c", SRC], input=stdin, env=env,
                               capture_output=True)
 
 
@@ -65,7 +68,7 @@ class TestSensor(SensorCase):
             before = fh.read()
         sensor.install(self.settings, self.cache, TAP)
         got = self.read_settings()
-        self.assertEqual(got["statusLine"]["command"], TAP)
+        self.assertEqual(got["statusLine"]["command"], SRC)
         for k in ("type", "padding", "refreshInterval"):
             self.assertEqual(got["statusLine"][k], STATUS_LINE[k])
         self.assertEqual(got["theme"], "dark")
@@ -102,7 +105,7 @@ class TestSensor(SensorCase):
     def test_uninstall_removes_statusline_if_none_before(self):
         self.write_settings({"theme": "dark"})
         sensor.install(self.settings, self.cache, TAP)
-        self.assertEqual(self.read_settings()["statusLine"]["command"], TAP)
+        self.assertEqual(self.read_settings()["statusLine"]["command"], SRC)
         sensor.uninstall(self.settings, self.cache)
         self.assertEqual(self.read_settings(), {"theme": "dark"})
         self.assertEqual(os.listdir(self.cache) if os.path.isdir(self.cache) else [], [])
@@ -136,7 +139,7 @@ class TestSensor(SensorCase):
         self.write_settings(self.base())
         sensor.install(self.settings, self.cache, tap)
         cmd = self.read_settings()["statusLine"]["command"]
-        self.assertEqual(cmd, shlex.quote(tap))
+        self.assertEqual(cmd, ". " + shlex.quote(tap))
         env = dict(os.environ, HOME=self.home, PRORAB_CACHE=self.cache)
         data = json.dumps({"session_id": "q1"}).encode()
         with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
@@ -165,7 +168,7 @@ class TestSensor(SensorCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         cmd = self.read_settings()["statusLine"]["command"]
         tap = os.path.join(os.path.realpath(d), "statusline_tap.sh")
-        self.assertEqual(cmd, shlex.quote(tap))
+        self.assertEqual(cmd, ". " + shlex.quote(tap))
         with open(os.path.join(self.cache, "statusline.orig")) as fh:
             self.assertEqual(fh.read(), STATUS_LINE["command"])
         with open(os.path.join(self.cache, "statusline.orig"), "w") as fh:
@@ -186,6 +189,27 @@ class TestSensor(SensorCase):
         b = os.path.join(os.path.dirname(self.settings), self.backups()[0])
         self.assertEqual(os.stat(b).st_mode & 0o777, 0o600)
         self.assertEqual(os.stat(self.settings).st_mode & 0o777, 0o600)
+
+    def test_install_converts_exec_form(self):
+        self.write_settings(self.base())
+        sensor.install(self.settings, self.cache, TAP)
+        cfg = self.read_settings()
+        cfg["statusLine"]["command"] = shlex.quote(TAP)  # an older, exec'd install
+        self.write_settings(cfg)
+        res = sensor.install(self.settings, self.cache, TAP)
+        self.assertTrue(res["changed"])
+        self.assertEqual(self.read_settings()["statusLine"]["command"], SRC)
+        with open(os.path.join(self.cache, "statusline.orig")) as fh:
+            self.assertEqual(fh.read(), STATUS_LINE["command"])
+        sensor.uninstall(self.settings, self.cache)
+        self.assertEqual(self.read_settings()["statusLine"], STATUS_LINE)
+
+    def test_sourced_tap_survives_exiting_original(self):
+        data = json.dumps({"session_id": "s1"}).encode()
+        r = self.run_tap(data, orig="printf A; exit 7")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"A", b""))
+        r = self.run_tap(data, orig="printf A; printf B")
+        self.assertEqual(r.stdout, b"AB")
 
     def test_status(self):
         self.write_settings(self.base())
@@ -251,7 +275,7 @@ class TestSensor(SensorCase):
         r = self.run_tap(data, orig="echo err >&2; exit 5")
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))
         env = dict(os.environ, HOME=self.home, PRORAB_CACHE="/dev/null/x")
-        r = subprocess.run(["sh", "-c", TAP], input=data, env=env, capture_output=True)
+        r = subprocess.run([self.SHELL, "-c", SRC], input=data, env=env, capture_output=True)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"", b""))
 
     def test_tap_without_orig_prints_nothing(self):
@@ -273,7 +297,7 @@ class TestSensor(SensorCase):
         r = subprocess.run([sys.executable, SENSOR_PY, "install", "--yes"], env=env,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(self.read_settings()["statusLine"]["command"], TAP)
+        self.assertEqual(self.read_settings()["statusLine"]["command"], SRC)
         r = subprocess.run([sys.executable, SENSOR_PY, "status"], env=env,
                            capture_output=True, text=True)
         self.assertTrue(json.loads(r.stdout)["installed"])
@@ -281,6 +305,12 @@ class TestSensor(SensorCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(self.read_settings()["statusLine"], STATUS_LINE)
+
+
+@unittest.skipUnless(shutil.which("zsh"), "zsh is not installed")
+class TestSensorZsh(TestSensor):
+    """The same checks with zsh as the shell Claude Code starts."""
+    SHELL = "zsh"
 
 
 if __name__ == "__main__":

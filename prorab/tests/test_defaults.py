@@ -42,8 +42,36 @@ class TestDefaults(unittest.TestCase):
                 "limit will reset",
                 "approaching usage limit",
                 "you've used",
+                "you've hit your limit",
+                "/rate-limit-options",
+                "stop and wait for limit to reset",
+                "api error: rate limit reached",
             ],
         )
+        self.assertEqual(
+            d["limits"]["limit_screen"],
+            ["usage limit reached", "you've hit your limit",
+             "you've hit your session limit", "/rate-limit-options"],
+        )
+        self.assertEqual(
+            d["limits"]["limit_choice"], {"wait": "stop and wait", "upgrade": "upgrade"})
+        self.assertEqual(
+            d["limits"]["fatal_patterns"],
+            ["model_not_found", "insufficient_quota", "quota_exceeded"],
+        )
+        self.assertEqual(
+            d["send"],
+            {"timeout_ms": 60000,
+             "files_dir": os.path.expanduser("~/.cache/prorab/work-orders"),
+             "composer_match_chars": 20},
+        )
+        self.assertEqual(
+            d["screen"],
+            {"tail_lines": 15, "resume_failed": "no conversation found with session id"},
+        )
+        self.assertEqual(d["cycles"], {"approval": 6, "review": 10, "report_fix": 3})
+        self.assertEqual(d["handover"], {"min_interval_s": 600})
+        self.assertEqual(d["crew"], {"ask_timeout_s": 600})
 
         self.assertEqual(
             d["budget"],
@@ -61,9 +89,15 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(
             d["monitor"],
             {"interval_s": 90, "heartbeat_s": 1200, "hung_s": 1800, "max_restarts": 2,
-             "error_polls": 3},
+             "error_polls": 3, "interval_max_s": 300, "backoff_factor": 2,
+             "hung_scan_max_files": 20000, "limit_panes": 2},
         )
         self.assertIsNone(d["polish_cmd"])
+
+    def test_send_files_dir_expanded(self):
+        path = _defaults.load()["send"]["files_dir"]
+        self.assertTrue(path.startswith("/"), path)
+        self.assertTrue(path.endswith("work-orders"), path)
 
     def test_tilde_expanded(self):
         path = _defaults.load()["limits"]["sensor_dir"]

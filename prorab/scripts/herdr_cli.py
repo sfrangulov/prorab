@@ -22,13 +22,16 @@ class HerdrError(Exception):
 
 
 def _exec(args, timeout_s):
+    if timeout_s is None:
+        timeout_s = _defaults.load()["timeouts"]["herdr_s"]
     try:
         p = subprocess.run(["herdr"] + list(args), capture_output=True, text=True,
                            timeout=timeout_s)
     except FileNotFoundError:
         raise HerdrError("herdr_not_found", "herdr binary not on PATH")
     except subprocess.TimeoutExpired:
-        raise HerdrError("cli_timeout", "herdr %s timed out" % " ".join(args))
+        raise HerdrError("cli_timeout", "herdr %s timed out after %s s"
+                         % (" ".join(args), timeout_s))
     return p
 
 
@@ -45,14 +48,14 @@ def _error_from(p):
     return HerdrError("cli_error", msg)
 
 
-def _text(args, timeout_s=60):
+def _text(args, timeout_s=None):
     p = _exec(args, timeout_s)
     if p.returncode != 0:
         raise _error_from(p)
     return p.stdout
 
 
-def run(args, timeout_s=60):
+def run(args, timeout_s=None):
     p = _exec(args, timeout_s)
     if p.returncode != 0:
         raise _error_from(p)

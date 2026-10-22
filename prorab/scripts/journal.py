@@ -35,11 +35,14 @@ def _run(args, check=True):
     d = beads_dir()
     env = dict(os.environ, BEADS_DIR=d)
     cwd = os.path.dirname(d.rstrip(os.sep)) or "."
+    limit = _defaults.load()["timeouts"]["bd_s"]
     try:
         p = subprocess.run(["bd"] + list(args), capture_output=True, text=True, env=env,
-                           cwd=cwd if os.path.isdir(cwd) else None)
+                           cwd=cwd if os.path.isdir(cwd) else None, timeout=limit)
     except FileNotFoundError:
         raise JournalError("bd binary not on PATH")
+    except subprocess.TimeoutExpired:
+        raise JournalError("bd %s timed out after %s s" % (" ".join(args), limit))
     if check and p.returncode != 0:
         raise JournalError("bd %s failed (%d): %s" % (
             " ".join(args), p.returncode, (p.stderr or p.stdout).strip()))

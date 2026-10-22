@@ -68,16 +68,29 @@ def _template(heading):
 
 def _git(args, cwd=None, check=False):
     cmd = ["git"] + (["-C", cwd] if cwd else []) + list(args)
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    limit = _defaults.load()["timeouts"]["git_s"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("git %s timed out after %s s" % (" ".join(args), limit))
     if check and p.returncode != 0:
         raise RuntimeError("git %s failed: %s" % (" ".join(args), p.stderr.strip()))
     return p
 
 
+def _git_soft(args, cwd=None):
+    """`_git` for callers that read the return code: a timeout becomes a failed process
+    (return code 124, the message in stderr), so each caller keeps its failing-git path."""
+    try:
+        return _git(args, cwd)
+    except RuntimeError as e:
+        return subprocess.CompletedProcess(["git"] + list(args), 124, "", str(e))
+
+
 def _worktrees(site_path):
     """[{path, branch}] from `git worktree list --porcelain`."""
     out, cur = [], None
-    for line in _git(["worktree", "list", "--porcelain"], site_path).stdout.splitlines():
+    for line in _git_soft(["worktree", "list", "--porcelain"], site_path).stdout.splitlines():
         if line.startswith("worktree "):
             cur = {"path": line[len("worktree "):], "branch": None}
             out.append(cur)
@@ -110,11 +123,11 @@ def _kv_of(kv, key):
 def _resolve_base(worktree, base):
     """`base` when it names a commit; else the site's default branch (main, master, or the
     branch checked out in the main worktree)."""
-    if base and _git(["rev-parse", "--verify", "--quiet", "%s^{commit}" % base],
+    if base and _git_soft(["rev-parse", "--verify", "--quiet", "%s^{commit}" % base],
                      worktree).returncode == 0:
         return base
     for b in ("main", "master"):
-        if _git(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b],
+        if _git_soft(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b],
                 worktree).returncode == 0:
             return b
     wts = _worktrees(worktree)
@@ -272,7 +285,7 @@ def start(site_path, work_order, name, caller_pane):
     branch = wt["branch"] if wt else None
     want = "prorab/%s" % work_order
     if wt and branch != want:
-        if _git(["branch", "-m", want], worktree).returncode == 0:
+        if _git_soft(["branch", "-m", want], worktree).returncode == 0:
             branch = want
 
     if worktree:  # so the spend stays attributable after the crew is gone
@@ -501,7 +514,7 @@ def _facts(worktree, work_order, base):
     base = _resolve_base(worktree, base)
 
     def out(args, empty):
-        p = _git(args, worktree)
+        p = _git_soft(args, worktree)
         if p.returncode != 0:
             return "(git failed: %s)" % (p.stderr.strip() or "exit %d" % p.returncode)
         return p.stdout.strip() or empty
@@ -676,10 +689,10 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
 
 def evidence(worktree, base="main"):
     base = _resolve_base(worktree, base)
-    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], worktree).stdout.strip()
-    commits = _git(["log", "--oneline", "%s..HEAD" % base], worktree).stdout.splitlines()
-    diffstat = _git(["diff", "--stat", "%s...HEAD" % base], worktree).stdout.strip()
-    dirty = bool(_git(["status", "--porcelain"], worktree).stdout.strip())
+    branch = _git_soft(["rev-parse", "--abbrev-ref", "HEAD"], worktree).stdout.strip()
+    commits = _git_soft(["log", "--oneline", "%s..HEAD" % base], worktree).stdout.splitlines()
+    diffstat = _git_soft(["diff", "--stat", "%s...HEAD" % base], worktree).stdout.strip()
+    dirty = bool(_git_soft(["status", "--porcelain"], worktree).stdout.strip())
     return {"branch": branch, "commits": commits, "diffstat": diffstat, "dirty": dirty}
 
 
@@ -687,10 +700,10 @@ def merge_check(worktree, accepted):
     """Read-only: accepted branches not yet in HEAD and the ones that would conflict."""
     missing, conflicts, errors = [], [], []
     for b in accepted:
-        if _git(["merge-base", "--is-ancestor", b, "HEAD"], worktree).returncode == 0:
+        if _git_soft(["merge-base", "--is-ancestor", b, "HEAD"], worktree).returncode == 0:
             continue
         missing.append(b)
-        rc = _git(["merge-tree", "--write-tree", "HEAD", b], worktree).returncode
+        rc = _git_soft(["merge-tree", "--write-tree", "HEAD", b], worktree).returncode
         if rc == 1:
             conflicts.append(b)
         elif rc != 0:
@@ -810,9 +823,9 @@ def stop(name, work_order):
 
 def _default_branch(site_path):
     for b in ("main", "master"):
-        if _git(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b], site_path).returncode == 0:
+        if _git_soft(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b], site_path).returncode == 0:
             return b
-    return _git(["rev-parse", "--abbrev-ref", "HEAD"], site_path).stdout.strip()
+    return _git_soft(["rev-parse", "--abbrev-ref", "HEAD"], site_path).stdout.strip()
 
 
 def cleanup(site_path, work_order):
@@ -823,16 +836,16 @@ def cleanup(site_path, work_order):
     dropped = any(a.startswith(DROP_MARKER) for a in journal.acts(work_order, "answer"))
     merged = False
     if branch:
-        out = _git(["branch", "--merged", _default_branch(site_path)], site_path).stdout
+        out = _git_soft(["branch", "--merged", _default_branch(site_path)], site_path).stdout
         merged = branch in [ln.strip().lstrip("*+ ").strip() for ln in out.splitlines()]
     if not (merged or dropped):
         return {"status": "kept", "reason": "unmerged"}
     rm = ["worktree", "remove"] + (["--force"] if dropped and not merged else []) + [wt["path"]]
-    p = _git(rm, site_path)
+    p = _git_soft(rm, site_path)
     if p.returncode != 0:
         return {"status": "kept", "reason": "dirty", "detail": p.stderr.strip()}
     if branch:
-        _git(["branch", "-D" if dropped and not merged else "-d", branch], site_path)
+        _git_soft(["branch", "-D" if dropped and not merged else "-d", branch], site_path)
     return {"status": "removed", "worktree": wt["path"], "branch": branch}
 
 
@@ -969,25 +982,25 @@ def _check_delivery(sha, changed_items, files, worktree, base):
     def failed(p):
         return ["delivered: git failed: %s" % (p.stderr.strip() or "exit %d" % p.returncode)]
     problems = []
-    p = _git(["merge-base", "--is-ancestor", sha, "HEAD"], worktree)
+    p = _git_soft(["merge-base", "--is-ancestor", sha, "HEAD"], worktree)
     if p.returncode == 1:
         problems.append("delivered: commit %s is not an ancestor of HEAD" % sha)
     elif p.returncode != 0:
         return failed(p)
-    p = _git(["rev-list", "%s..HEAD" % base], worktree)
+    p = _git_soft(["rev-list", "%s..HEAD" % base], worktree)
     if p.returncode != 0:
         return problems + failed(p)
     branch_commits = p.stdout.split()
     if not branch_commits:
         problems.append("delivered: no commit in %s..HEAD" % base)
     else:
-        full = _git(["rev-parse", "--verify", "--quiet", "%s^{commit}" % sha], worktree)
+        full = _git_soft(["rev-parse", "--verify", "--quiet", "%s^{commit}" % sha], worktree)
         if full.returncode != 0:
             return problems + failed(full)
         if full.stdout.strip() not in branch_commits:
             problems.append("delivered: commit %s is not in %s..HEAD (not on the crew's branch)"
                             % (sha, base))
-    p = _git(["diff", "--name-only", "%s...HEAD" % base], worktree)
+    p = _git_soft(["diff", "--name-only", "%s...HEAD" % base], worktree)
     if p.returncode != 0:
         return problems + failed(p)
     changed = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]

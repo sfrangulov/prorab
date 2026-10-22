@@ -110,6 +110,7 @@ class TestDefaults(unittest.TestCase):
              "hung_scan_max_files": 20000, "limit_panes": 2,
              "spend_every_s": 300},
         )
+        self.assertEqual(d["timeouts"], {"bd_s": 30, "git_s": 60, "herdr_s": 60})
         self.assertNotIn("polish_cmd", d)
 
     def test_price_table_families(self):

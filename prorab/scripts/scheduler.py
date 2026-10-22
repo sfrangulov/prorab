@@ -157,12 +157,12 @@ def machine_load():
     """``(load1, ncpu)`` from sysctl; falls back to os.getloadavg / cpu_count."""
     try:
         load = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True,
-                              text=True, check=True).stdout
+                              text=True, check=True, timeout=10).stdout
         load1 = float(load.replace("{", " ").replace("}", " ").split()[0])
         ncpu = int(subprocess.run(["sysctl", "-n", "hw.ncpu"], capture_output=True,
-                                  text=True, check=True).stdout.strip())
+                                  text=True, check=True, timeout=10).stdout.strip())
         return load1, ncpu
-    except (OSError, subprocess.CalledProcessError, ValueError, IndexError):
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return os.getloadavg()[0], os.cpu_count() or 1
 
 

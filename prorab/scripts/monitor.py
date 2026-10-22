@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _defaults  # noqa: E402
 import herdr_cli  # noqa: E402
+import limits  # noqa: E402
 import scheduler  # noqa: E402
 
 SETTLED = ("idle", "done", "blocked")
@@ -88,7 +89,6 @@ def _own_context(d, listed=None):
             ctx = transcript.context_status(path, d)
             if ctx:
                 return ctx
-    import limits
     pct = limits.statusline_context(herdr_cli.pane_visible(pane))
     if pct is None:
         return None
@@ -137,7 +137,6 @@ def _newest_age(worktree, now, max_files):
 def real_deps():
     import crew
     import journal
-    import limits
     import slots
     return {
         "state": lambda name, a, **kw: (crew.state(name, a, **kw) if a is not None
@@ -155,6 +154,7 @@ def real_deps():
         # both read files in this process (transcripts, the log); neither starts a process
         "shift_spend": journal.shift_spend,
         "rates": lambda d, now: limits.rates(readings(), d, now),
+        "week_burn": lambda d, now: limits.week_burn(readings(), d, now),
         "override": journal.override,
         "own_context": _own_context,
         "crews": journal.crews,
@@ -171,8 +171,8 @@ def _level(ctx):
     return 2 if ctx.get("hard") else 1 if ctx.get("soft") else 0
 
 
-def _limit_state(lim, cap, d):
-    """(band, week_over, reached): band 0 none, 1 no_new_mass, 2 stop."""
+def _limit_state(lim, cap):
+    """(band, reached): band 0 none, 1 no_new_mass, 2 stop. The week has its own notice."""
     five = lim.get("five_hour")
     band = 0
     if five is not None:
@@ -180,9 +180,27 @@ def _limit_state(lim, cap, d):
             band = 2
         elif cap["no_new_mass"] is not None and five >= cap["no_new_mass"]:
             band = 1
-    wk = lim.get("seven_day")
-    week_over = wk is not None and wk >= d["limits"]["seven_day"]["notify"]
-    return [band, bool(week_over), bool(lim.get("reached"))]
+    return [band, bool(lim.get("reached"))]
+
+
+def _week_notice(mem, proj):
+    """True when the week's level rose above the highest one reported for the current week.
+    The week is keyed by the projection's reset time: more than the tolerance away from the
+    stored one it is a new week; an unknown one keeps the stored week."""
+    notice = mem.get("week_notice")
+    if not isinstance(notice, dict):
+        notice = {"resets_at": None, "level": 0}
+    at = proj["resets_at"]
+    if at is not None:
+        if notice["resets_at"] is None:
+            notice["resets_at"] = at
+        elif abs(at - notice["resets_at"]) > limits._WINDOW_TOLERANCE_S:
+            notice = {"resets_at": at, "level": 0}
+    fire = proj["level"] > notice["level"]
+    if fire:
+        notice["level"] = proj["level"]
+    mem["week_notice"] = notice
+    return fire
 
 
 def _budget_item(item, spend, budget, week, kv):
@@ -314,6 +332,11 @@ def _poll(crews, d, mem, now, dp):
         if fresh is not None:
             mem["rate"] = {"at": now}
             extras["rate"] = fresh
+    if due("week_burn", d["rate"]["every_s"]):
+        fresh = guard("week_burn", dp["week_burn"], d, now)
+        if fresh is not None:
+            mem["week_burn"] = {"at": now, "value": fresh}
+            extras["week_burn"] = fresh
     spend = (mem.get("spend") or {}).get("value")
 
     for name in (crews if listed is not None else ()):
@@ -445,10 +468,16 @@ def _poll(crews, d, mem, now, dp):
     cap = scheduler.cap_for(now, resets_at, d["night"]["morning"], d,
                             night=kv_get("shift.night") == "1", week_known=week is not None)
     if have_lim and not override:
-        cur = _limit_state(lim, cap, d)
-        prev = mem.get("limit") or [0, False, False]
-        if any(c > p for c, p in zip(cur, prev)):
-            ev["limit"].append("limit %s %s %s %s" % (_fmt(five), _fmt(week), source, cap["mode"]))
+        cur = _limit_state(lim, cap)
+        prev = mem.get("limit")
+        if not isinstance(prev, list) or len(prev) != len(cur):
+            prev = [0, False]  # the state of an older form reads as empty
+        proj = guard("week", limits.week_projection, lim,
+                     (mem.get("week_burn") or {}).get("value"), d, now)
+        notice = proj is not None and _week_notice(mem, proj)
+        if notice or any(c > p for c, p in zip(cur, prev)):
+            line = "limit %s %s %s %s" % (_fmt(five), _fmt(week), source, cap["mode"])
+            ev["limit"].append(line + (" week:%s" % proj["allows"] if notice else ""))
         mem["limit"] = cur
 
     # blind: the source is unknown twice in a row, but not right after a 5h reset: then the

@@ -184,26 +184,42 @@ def work_order_durations(j, d, ids):
     return out
 
 
+CLEARANCE = "clearance:granted"
+
+
 def fits(estimate_usd, budget_left_usd, rates, used_pct, cap_stop, week_rise_pp,
-         week_budget_pp, override=False):
+         week_budget_pp, override=False, week_hold=False):
     """Whether a work order's estimate fits the budget left and what is left before the
     thresholds in force; advisory, the thresholds themselves stay on measured percentages.
 
     An unknown rate is never guessed: without a week rate the week is guarded only by its
-    measured rise. "Ignore limits and finish" lifts every check (R42)."""
+    measured rise. `pace` is the week by pace to its reset: False while a work order without a
+    clearance is held back. "Ignore limits and finish" lifts every check (R42)."""
     import limits  # lazy, as in gather_limits
     pp_window = limits.to_pp(estimate_usd, rates["five_hour"])
     pp_week = limits.to_pp(estimate_usd, rates["seven_day"])
     budget = estimate_usd <= budget_left_usd
     window = used_pct is None or pp_window is None or used_pct + pp_window <= cap_stop
     week = pp_week is None or week_rise_pp is None or week_rise_pp + pp_week <= week_budget_pp
+    pace = not week_hold
     if override:
-        budget = window = week = True
+        budget = window = week = pace = True
     return {"pp_window": pp_window, "pp_week": pp_week, "budget": budget, "window": window,
-            "week": week, "ok": budget and window and week}
+            "week": week, "pace": pace, "ok": budget and window and week and pace}
 
 
-def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None):
+def cleared(j, work_order):
+    """Whether the work order or its current stage carries ``clearance:granted``: the
+    customer's advance permission, which passes both week levels."""
+    if not work_order:
+        return False
+    if CLEARANCE in j.labels(work_order):
+        return True
+    stages = j.open_stages(work_order)
+    return bool(stages) and CLEARANCE in j.labels(stages[0])
+
+
+def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None, week_burn=None):
     night = j.kv_get("shift.night") == "1"
     ov = j.override()
     resets_at = lim.get("five_hour_resets_at")
@@ -244,18 +260,26 @@ def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None):
     week_now, week_start = lim.get("seven_day"), j.kv_get("shift.week_start")
     rise = None if week_now is None or week_start in (None, "") \
         else float(week_now) - float(week_start)
+    import limits
+    if week_burn is None:
+        week_burn = limits.week_burn(readings(log), d, now)
+    week = limits.week_projection(lim, week_burn, d, now)
+    gate = not ov and week["allows"] in ("no_new_mass", "clearance_only")
+    pause = []
+    if not ov and week["allows"] == "clearance_only":
+        pause = [c for c in j.crews() if not cleared(j, j.kv_get("crew.%s.work_order" % c))]
     plan_fits = {}
     for n in order:
         est = j.estimate(n)["usd"]
         plan_fits[n] = ({"ok": False, "reason": "no_estimate"} if est is None
                         else fits(est, left, rates, used, cap["stop"], rise, b["week_pp"],
-                                  bool(ov)))
+                                  bool(ov), gate and not cleared(j, n)))
     return {"order": order, "allowed": allowed, "active": active,
             "new": max(0, allowed - active), "cap": cap, "override": ov,
             "hold": hold, "limits_unknown": unknown,
             "budget": {"usd": b["usd"], "spent_usd": spend["usd"], "left_usd": left,
                        "week_pp": b["week_pp"], "week_rise_pp": rise},
-            "rates": rates, "fits": plan_fits}
+            "rates": rates, "week": dict(week, pause=pause), "fits": plan_fits}
 
 
 def live_pane_texts():

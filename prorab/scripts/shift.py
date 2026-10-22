@@ -401,13 +401,73 @@ def _budget(sp, d, kv, lim, rates, start, work_orders):
     return lines
 
 
+_WEEK_ALLOWS = {
+    "normal": "normal",
+    "room": "room for more (the foreman may propose a night or weekend shift)",
+    "no_new_mass": "no new mass runs",
+    "clearance_only": "clearance only",
+    "notify": "notify the customer (fallback threshold)",
+}
+
+
+def _calendar_text(cal):
+    days = cal["days"]
+    if not days:
+        return "no working days"
+    names = limits._DAYS
+    idx = sorted(names.index(x) for x in days)
+    span = ("%s\u2013%s" % (names[idx[0]], names[idx[-1]])
+            if idx == list(range(idx[0], idx[-1] + 1)) and len(idx) > 1
+            else ",".join(names[i] for i in idx))
+    return "%s %s\u2013%s" % (span, cal["start"], cal["end"])
+
+
+def _week_lines(d, now, lim):
+    """The week by pace to its reset (R88): where it stands, the burn, the reserve, the
+    projection at the reset and what that allows; the fallback is named as such."""
+    wk = d["week"]
+    burn = limits.week_burn(scheduler.readings(), d, now)
+    proj = limits.week_projection(lim, burn, d, now)
+    if proj["used"] is None:
+        return ["- week: unknown (no projection; the unknown-week rules apply)"]
+    at = proj["resets_at"]
+    head = "- week: %s %% used, " % _g(proj["used"])
+    head += ("reset time unknown" if at is None
+             else "resets %s (in %.1f h)" % (_clock(at), proj["hours_to_reset"]))
+    lines = [head]
+    pace = burn["pp_per_h"]
+    if pace is None:
+        lines.append("- week burn: none \u2014 fallback thresholds (%s)"
+                     % (proj["reason"] or burn["reason"]))
+    else:
+        lines.append("- week burn: %.2f pp/h (measured over %.1f h, %d intervals)"
+                     % (pace, burn["hours"], burn["intervals"]))
+    if at is None:
+        lines.append("- customer's reserve: unknown (reset time unknown)")
+    else:
+        lines.append("- customer's reserve: %s working hours left \u00d7 %s pp/h (default; "
+                     "calendar %s) = %s pp"
+                     % (_g(proj["working_hours"]), _g(wk["reserve_pp_per_hour"]),
+                        _calendar_text(wk["calendar"]), _g(proj["reserve_pp"])))
+    if proj["basis"] == "projection":
+        lines.append("- week projection at the reset: %s + %.2f \u00d7 %.1f + %s = %.1f %%"
+                     % (_g(proj["used"]), pace, proj["hours_to_reset"], _g(proj["reserve_pp"]),
+                        proj["projected"]))
+    else:
+        lines.append("- week projection: none \u2014 fallback thresholds %s %% notify, %s %% "
+                     "clearance only" % (_g(wk["fallback_notify_pct"]),
+                                         _g(wk["fallback_clearance_pct"])))
+    lines.append("- the week allows: %s" % _WEEK_ALLOWS[proj["allows"]])
+    return lines
+
+
 def _limits_lines(d, now, lim):
-    five, week = lim.get("five_hour"), lim.get("seven_day")
+    five = lim.get("five_hour")
     resets = lim.get("five_hour_resets_at")
     lines = ["- 5h window: %s%s" % ("unknown" if five is None else "%s %%" % _g(five),
-                                   "" if resets is None else " (resets %s)" % _clock(resets)),
-             "- week: %s" % ("unknown" if week is None else "%s %%" % _g(week)),
-             "- source: %s" % lim.get("source", "unknown")]
+                                   "" if resets is None else " (resets %s)" % _clock(resets))]
+    lines += _week_lines(d, now, lim)
+    lines.append("- source: %s" % lim.get("source", "unknown"))
     night = journal.kv_get("shift.night") == "1"
     lines.append("- 5h thresholds in force: %s" % _cap_text(_cap(d, now, lim, night)))
     return lines

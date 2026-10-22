@@ -298,6 +298,66 @@ class TestReport(ShiftBase):
         self.assertIn("5h window: 30", text)
         self.assertIn("week: 26", text)
 
+
+    def _no_working_days(self):
+        real = _defaults.load
+
+        def load(*a, **k):
+            d = real(*a, **k)
+            d["week"]["calendar"]["days"] = []
+            return d
+        _defaults.load = load
+        self.addCleanup(setattr, _defaults, "load", real)
+
+    def _week_sensor(self, reset, used=50):
+        sensor_dir = self.d["limits"]["sensor_dir"]
+        os.makedirs(sensor_dir, exist_ok=True)
+        with open(os.path.join(sensor_dir, "s.json"), "w", encoding="utf-8") as fh:
+            json.dump({"rate_limits": {"five_hour": {"used_percentage": 30,
+                                                     "resets_at": int(time.time()) + 3600},
+                                       "seven_day": {"used_percentage": used,
+                                                     "resets_at": reset}}}, fh)
+
+    def test_report_week_projection_lines(self):
+        self._no_working_days()
+        self.start_shift()
+        reset = int(time.time()) + 48 * 3600
+        self._week_sensor(reset)
+        base = time.time() - 1
+        with open(os.path.join(self.logs, "monitor.log"), "w", encoding="utf-8") as fh:
+            for hours, pct in ((-10, 47.0), (-6.5, 48.0), (-3, 49.0), (0, 50.0)):
+                fh.write(json.dumps({"ts": base + hours * 3600, "source": "sensor",
+                                     "five_hour": 30.0, "seven_day": pct,
+                                     "resets_at": base + 3600, "seven_day_resets_at": reset,
+                                     "events": []}) + "\n")
+        text = self.report_text()
+        self.assertIn("- week: 50 % used, resets ", text)
+        self.assertIn("(in 48.0 h)", text)
+        self.assertIn("0.30 pp/h (measured over 10.0 h, 3 intervals)", text)
+        self.assertIn("customer's reserve: 0 working hours left \u00d7 1 pp/h (default; "
+                      "calendar no working days) = 0 pp", text)
+        self.assertIn("- week projection at the reset: 50 + 0.30 \u00d7 48.0 + 0 = 64.4 %", text)
+        self.assertIn("the week allows: room for more", text)
+
+    def test_report_week_fallback_named(self):
+        self._no_working_days()
+        self.start_shift()
+        self._week_sensor(int(time.time()) + 48 * 3600, used=40)
+        text = self.report_text()
+        self.assertIn("week burn: none \u2014 fallback thresholds (no measured burn)", text)
+        self.assertIn("week projection: none \u2014 fallback thresholds 50 % notify, "
+                      "70 % clearance only", text)
+        self.assertIn("the week allows: normal", text)
+        self._week_sensor(int(time.time()) + 48 * 3600, used=50)
+        self.assertIn("the week allows: notify the customer (fallback threshold)",
+                      self.report_text("2026-10-23"))
+
+    def test_report_week_unknown(self):
+        self.start_shift()
+        text = self.report_text()
+        self.assertIn("week: unknown (no projection", text)
+        self.assertNotIn("week burn", text)
+
     def test_report_override_section(self):
         self.start_shift()
         since = T0 + 100

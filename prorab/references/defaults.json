@@ -13,10 +13,6 @@
       "no_new_mass": 60,
       "stop": 80
     },
-    "seven_day": {
-      "notify": 50,
-      "clearance_only": 70
-    },
     "five_hour_night": {
       "stop_before_morning": 95,
       "morning_window": {
@@ -53,6 +49,20 @@
       "insufficient_quota",
       "quota_exceeded"
     ]
+  },
+  "week": {
+    "alert_pct": 95,
+    "clearance_pct": 100,
+    "margin_pp": 20,
+    "fallback_notify_pct": 50,
+    "fallback_clearance_pct": 70,
+    "burn_horizon_s": 86400,
+    "reserve_pp_per_hour": 1.0,
+    "calendar": {
+      "days": ["mon", "tue", "wed", "thu", "fri"],
+      "start": "09:00",
+      "end": "19:00"
+    }
   },
   "timeouts": {
     "bd_s": 30,

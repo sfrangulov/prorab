@@ -176,6 +176,7 @@ class TestScheduler(unittest.TestCase):
     # ---- plan (journal stubbed) -------------------------------------------------
 
     def _journal(self, **kw):
+        kw.setdefault("label_calls", [])
         j = types.SimpleNamespace(
             graph=lambda: {"n1": [], "n2": ["n1"], "n3": []},
             open_stages=lambda n: {"n1": ["s1"], "n2": ["s2", "s3"], "n3": ["s4"]}[n],
@@ -185,7 +186,8 @@ class TestScheduler(unittest.TestCase):
                                   "s4": {"duration_min": 5, "kind": "code"}}[s],
             durations=lambda kind: [],
             ready_work_orders=lambda: ["n1", "n3"],
-            crews=lambda: ["b1"],
+            crews=lambda: kw.get("crews", ["b1"]),
+            labels=lambda b: kw["label_calls"].append(b) or kw.get("labels", {}).get(b, []),
             kv_get=lambda k: kw.get("kv", {}).get(k),
             override=lambda: kw.get("override"),
             machine=lambda: dict(D["machine"], **kw.get("machine", {})),
@@ -193,6 +195,7 @@ class TestScheduler(unittest.TestCase):
                                     **kw.get("estimates", {}).get(n, {})),
             budget=lambda: dict({"usd": 350.0, "week_pp": 10.0}, **kw.get("budget", {})),
             shift_spend=lambda d, now=None: dict(kw.get("shift", {"usd": 0.0})),
+            label_calls=kw["label_calls"],
         )
         return j
 
@@ -344,15 +347,81 @@ class TestScheduler(unittest.TestCase):
         self.assertFalse(plan["limits_unknown"])
         self.assertEqual(plan["allowed"], 3)
 
+    # ---- the week by pace to its reset ------------------------------------------
+
+    def test_fits_pace(self):
+        self.assertTrue(self._fits()["pace"])
+        r = self._fits(hold=True)
+        self.assertEqual((r["pace"], r["ok"]), (False, False))
+        r = self._fits(hold=True, override=True)
+        self.assertEqual((r["pace"], r["ok"]), (True, True))
+
+    def _week_plan(self, pace, used=50.0, journal=None, ov=None, burn=True):
+        d = json.loads(json.dumps(D))
+        d["week"]["calendar"]["days"] = []  # no reserve: projected = used + pace x hours
+        now = at(14)
+        lim = {"five_hour": 10.0, "seven_day": used, "five_hour_resets_at": now + 3600,
+               "five_hour_resets_in_s": 3600, "seven_day_resets_at": now + 48 * 3600}
+        j = journal or self._journal(override=ov)
+        wb = {"pp_per_h": pace, "resets_at": now + 48 * 3600} if burn else None
+        if wb is None:
+            wb = {"pp_per_h": None, "resets_at": None}
+        plan = scheduler.build_plan(j, d, now, lim, os.path.join(self.tmp.name, "none"),
+                                    (1.0, 8), week_burn=wb)
+        return plan, j
+
+    def test_build_plan_reports_week_projection(self):
+        plan, _ = self._week_plan(0.3)
+        self.assertAlmostEqual(plan["week"]["projected"], 64.4)
+        self.assertEqual((plan["week"]["allows"], plan["week"]["basis"]), ("room", "projection"))
+        normal, _ = self._week_plan(0.7)  # 83.6
+        self.assertEqual(normal["week"]["allows"], "normal")
+        self.assertEqual((plan["allowed"], plan["new"]), (normal["allowed"], normal["new"]))
+
+    def test_build_plan_week_alert_holds_uncleared(self):
+        j = self._journal(labels={"s4": ["clearance:granted"]})
+        plan, _ = self._week_plan(1.0, journal=j)  # projected 98
+        self.assertEqual(plan["week"]["allows"], "no_new_mass")
+        self.assertEqual((plan["fits"]["n1"]["pace"], plan["fits"]["n1"]["ok"]), (False, False))
+        self.assertTrue(plan["fits"]["n3"]["pace"])  # its current stage is cleared
+        self.assertEqual(plan["week"]["pause"], [])
+
+    def test_build_plan_clearance_only_pauses_uncleared_crews(self):
+        j = self._journal(crews=["b1", "b2"],
+                          kv={"crew.b1.work_order": "n1", "crew.b2.work_order": "n3"},
+                          labels={"n3": ["clearance:granted"]})
+        plan, _ = self._week_plan(1.1, journal=j)  # projected 102.8
+        self.assertEqual(plan["week"]["allows"], "clearance_only")
+        self.assertEqual(plan["week"]["pause"], ["b1"])
+
+    def test_build_plan_week_fallback(self):
+        plan, _ = self._week_plan(None, used=72.0)
+        self.assertEqual((plan["week"]["basis"], plan["week"]["allows"]), ("fallback", "clearance_only"))
+        self.assertFalse(plan["fits"]["n1"]["pace"])
+
+    def test_build_plan_override_lifts_week(self):
+        ov = {"goal": "g", "since": 1, "source": "customer's words"}
+        j = self._journal(override=ov, crews=["b1"], kv={"crew.b1.work_order": "n1"})
+        plan, _ = self._week_plan(1.1, journal=j)
+        self.assertEqual(plan["week"]["allows"], "clearance_only")
+        self.assertTrue(all(f["pace"] for f in plan["fits"].values()))
+        self.assertEqual(plan["week"]["pause"], [])
+
+    def test_build_plan_normal_week_reads_no_labels(self):
+        for pace in (0.3, 0.7):  # room, normal
+            j = self._journal()
+            self._week_plan(pace, journal=j)
+            self.assertEqual(j.label_calls, [])
+
     # ---- fit: the estimate in pp by the rate ------------------------------------
 
     RATES = {"five_hour": {"usd_per_pp": 5.0, "source": "default"},
              "seven_day": {"usd_per_pp": None, "source": "unknown"}}
 
     def _fits(self, estimate=10.0, left=100.0, rates=None, used=70.0, stop=80.0, rise=None,
-              week_budget=10.0, override=False):
+              week_budget=10.0, override=False, hold=False):
         return scheduler.fits(estimate, left, rates or self.RATES, used, stop, rise,
-                              week_budget, override)
+                              week_budget, override, hold)
 
     def test_fits_converts_by_rate(self):
         r = self._fits(used=70.0)

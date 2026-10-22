@@ -300,17 +300,121 @@ def rate_intervals(readings, window, d):
     return out
 
 
+def _current_week(readings):
+    """``(resets_at, readings)`` of the current week: of the sensor readings that carry both
+    the week percentage and its reset, the ones within the tolerance of the latest reset.
+    Readings are kept as they are (never matched by ``ts``: two may share one)."""
+    rows = [(r, _num(r.get("seven_day_resets_at"))) for r in readings
+            if r.get("source") == "sensor" and _num(r.get("seven_day")) is not None
+            and _num(r.get("seven_day_resets_at")) is not None]
+    if not rows:
+        return None, []
+    latest = max(at for _, at in rows)
+    return latest, [r for r, at in rows if latest - at <= _WINDOW_TOLERANCE_S]
+
+
 def _counted(readings, window, d, now):
     if window == "seven_day":
-        pts = _sensor_points(readings, window)
-        if not pts:
-            return []
-        latest = max(p[2] for p in pts)
-        current = {p[0] for p in pts if latest - p[2] <= _WINDOW_TOLERANCE_S}
-        readings = [r for r in readings if r.get("ts") in current]
-        return rate_intervals(readings, window, d)
+        return rate_intervals(_current_week(readings)[1], window, d)
     horizon = d["rate"]["window_horizon_s"]
     return [iv for iv in rate_intervals(readings, window, d) if now - horizon <= iv[1] <= now]
+
+
+WEEK_LEVELS = {"unknown": 0, "room": 0, "normal": 0, "notify": 1, "no_new_mass": 2,
+               "clearance_only": 3}
+_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def week_burn(readings, d, now):
+    """The week's burn in pp per hour from monitor-log `readings`: the rises of the current
+    week's intervals that ended within ``week.burn_horizon_s`` before `now`, over the hours
+    from the start of the earliest of them to the latest sensor reading of the week. Without
+    an interval the burn is None (never 0)."""
+    horizon = d["week"]["burn_horizon_s"]
+    out = {"pp_per_h": None, "source": "none", "reason": None, "intervals": 0, "pp": 0.0,
+           "hours": 0.0, "resets_at": None, "at": now}
+    resets_at, week = _current_week(readings)
+    week = [r for r in week if r["ts"] <= now]
+    if resets_at is None or resets_at <= now or not week:
+        out["reason"] = "no sensor reading of the current week"
+        return out
+    out["resets_at"] = resets_at
+    counted = [iv for iv in rate_intervals(week, "seven_day", d)
+               if now - horizon <= iv[1] <= now]
+    if not counted:
+        out["reason"] = "no interval within the horizon"
+        return out
+    pp = sum(rise for _, _, rise in counted)
+    hours = (max(r["ts"] for r in week) - min(iv[0] for iv in counted)) / 3600.0
+    return dict(out, pp_per_h=pp / hours, source="measured", intervals=len(counted),
+                pp=pp, hours=hours)
+
+
+def _clock(text):
+    return datetime.time.fromisoformat(text)
+
+
+def working_hours(start, end, calendar, tz=None):
+    """Hours of the working calendar in ``[start, end)`` (unix seconds): per local date whose
+    weekday is in ``calendar["days"]``, the overlap with that date's start-end, each bound
+    built from the date's own wall time (a daylight-saving change never shifts a day).
+    `tz` None is the machine's zone."""
+    first, last = _clock(calendar["start"]), _clock(calendar["end"])
+    if not first < last:
+        raise ValueError("the working day must start before it ends: %s-%s"
+                         % (calendar["start"], calendar["end"]))
+    if end <= start or not calendar["days"]:
+        return 0.0
+    day = datetime.datetime.fromtimestamp(start, tz).date()
+    stop = datetime.datetime.fromtimestamp(end, tz).date()
+    total = 0.0
+    while day <= stop:
+        if _DAYS[day.weekday()] in calendar["days"]:
+            lo = datetime.datetime.combine(day, first, tzinfo=tz).timestamp()
+            hi = datetime.datetime.combine(day, last, tzinfo=tz).timestamp()
+            total += max(0.0, min(end, hi) - max(start, lo))
+        day += datetime.timedelta(days=1)
+    return total / 3600.0
+
+
+def week_projection(lim, burn, d, now, tz=None):
+    """The week by pace to its reset: where the week lands at the reset (used + burn x hours
+    left + the customer's reserve) and what that allows; the fixed fallback thresholds when
+    the burn or the reset time is unknown. Missing keys of `lim` and `burn` read as None."""
+    wk = d["week"]
+    burn = burn or {}
+    used = lim.get("seven_day")
+    out = {"used": used, "burn": burn or None, "resets_at": None, "hours_to_reset": None,
+           "working_hours": None, "reserve_pp_per_hour": wk["reserve_pp_per_hour"],
+           "reserve_pp": None, "projected": None, "basis": "unknown", "reason": None,
+           "allows": "unknown"}
+    if used is None:
+        out["level"] = WEEK_LEVELS["unknown"]
+        return out
+    for at in (lim.get("seven_day_resets_at"), burn.get("resets_at")):
+        if at is not None and at > now:
+            out["resets_at"] = at
+            break
+    at = out["resets_at"]
+    if at is not None:
+        out["hours_to_reset"] = (at - now) / 3600.0
+        out["working_hours"] = working_hours(now, at, wk["calendar"], tz)
+        out["reserve_pp"] = out["working_hours"] * wk["reserve_pp_per_hour"]
+    pace = burn.get("pp_per_h")
+    if at is not None and pace is not None:
+        out["basis"] = "projection"
+        out["projected"] = used + pace * out["hours_to_reset"] + out["reserve_pp"]
+        p = out["projected"]
+        out["allows"] = ("clearance_only" if p >= wk["clearance_pct"]
+                         else "no_new_mass" if p >= wk["alert_pct"]
+                         else "room" if p <= 100 - wk["margin_pp"] else "normal")
+    else:
+        out["basis"] = "fallback"
+        out["reason"] = "reset time unknown" if at is None else "no measured burn"
+        out["allows"] = ("clearance_only" if used >= wk["fallback_clearance_pct"]
+                         else "notify" if used >= wk["fallback_notify_pct"] else "normal")
+    out["level"] = WEEK_LEVELS[out["allows"]]
+    return out
 
 
 def estimate_rate(readings, spend_between, d, now, window="five_hour"):
@@ -360,13 +464,22 @@ def _live_pane_texts():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("cmd", nargs="?", choices=["rate"])
+    ap.add_argument("cmd", nargs="?", choices=["rate", "week"])
     ap.add_argument("--log")
+    ap.add_argument("--now", type=float)
     ap.add_argument("--pane-text-file", action="append", default=[])
     args = ap.parse_args(argv)
     if args.cmd == "rate":
         import scheduler  # lazy: scheduler imports journal
         print(json.dumps(rates(scheduler.readings(args.log), _defaults.load(), time.time())))
+        return 0
+    if args.cmd == "week":
+        import scheduler  # lazy: scheduler imports journal
+        d = _defaults.load()
+        now = time.time() if args.now is None else args.now
+        lim = get_limits(_live_pane_texts, d, now)  # the panes are read only when the sensor gives nothing
+        burn = week_burn(scheduler.readings(args.log), d, now)
+        print(json.dumps(week_projection(lim, burn, d, now)))
         return 0
     if args.pane_text_file:
         texts = []

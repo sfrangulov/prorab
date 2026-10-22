@@ -20,16 +20,23 @@ import transcript  # noqa: E402
 from prorab.tests.test_herdr_cli import FakeBase, ok  # noqa: E402
 
 D = _defaults.load()
+D["week"]["calendar"]["days"] = []  # no working days: the reserve is 0, projected = used + burn x hours
 
 
 def at(hh, mm=0, day=21):
     return time.mktime((2026, 10, day, hh, mm, 0, 0, 0, 0))
 
 
-def lim(five=None, week=None, source="sensor", reached=False, resets_at=None):
+def lim(five=None, week=None, source="sensor", reached=False, resets_at=None, week_resets=None):
     return {"five_hour": five, "seven_day": week, "source": source, "reached": reached,
             "five_hour_resets_at": resets_at, "five_hour_resets_in_s": None,
-            "seven_day_resets_at": None}
+            "seven_day_resets_at": week_resets}
+
+
+def burn(pp_per_h=None, resets_at=None):
+    return {"pp_per_h": pp_per_h, "source": "none" if pp_per_h is None else "measured",
+            "reason": None, "intervals": 0, "pp": 0.0, "hours": 0.0,
+            "resets_at": resets_at, "at": 0}
 
 
 def st(status="working", bg=0, ctx=None, size=100, pane="p", cwd="/w", consent=None,
@@ -56,8 +63,9 @@ class Stub:
         self.spend = {"usd": 0.0, "work_orders": {}, "research": {}, "foreman_usd": 0.0}
         self.rate = {"five_hour": {"usd_per_pp": 5.0, "source": "default"},
                      "seven_day": {"usd_per_pp": None, "source": "unknown"}}
+        self.week_burn = burn()
         self.calls = {"agents": 0, "kv_all": 0, "visible": [], "limit_panes": None,
-                      "spend": [], "rates": []}
+                      "spend": [], "rates": [], "week_burn": []}
 
     def _agents(self):
         self.calls["agents"] += 1
@@ -84,6 +92,10 @@ class Stub:
         self.calls["rates"].append(now)
         return self.rate
 
+    def _week_burn(self, d, now):
+        self.calls["week_burn"].append(now)
+        return json.loads(json.dumps(self.week_burn))
+
     def _over_budget(self, week, spend=None, kv=None):
         if self.over:  # a canned answer
             return list(self.over)
@@ -105,6 +117,7 @@ class Stub:
             "over_budget": self._over_budget,
             "shift_spend": self._shift_spend,
             "rates": self._rates,
+            "week_burn": self._week_burn,
             "budget": lambda kv=None: journal.budget(kv=self.kv if kv is None else kv),
             "override": lambda kv=None: self.override,
             "own_context": lambda d, listed=None: self.own,
@@ -202,7 +215,7 @@ class TestMonitorPoll(PollBase):
         self.s.limits = lim(80.0, 10.0)
         self.assertEqual(self.poll(), ["limit 80 10 sensor day"])  # band changed
         self.s.limits = lim(20.0, 50.0)
-        self.assertEqual(self.poll(), ["limit 20 50 sensor day"])  # week notify
+        self.assertEqual(self.poll(), ["limit 20 50 sensor day week:notify"])  # no reset: fallback
         self.s.limits = lim(None, None, source="messages", reached=True)
         self.assertEqual(self.poll(), ["limit - - messages day"])
 
@@ -228,7 +241,7 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(), [])
         self.assertEqual(self.mem["last_reading"]["five_hour"], 90.0)
         self.s.override = None
-        self.assertEqual(self.poll(), ["limit 90 60 sensor day", "budget sessions"])
+        self.assertEqual(self.poll(), ["limit 90 60 sensor day week:notify", "budget sessions"])
 
     def test_budget_on_change_only(self):
         self.s.over = ["sessions"]
@@ -298,6 +311,109 @@ class TestMonitorPoll(PollBase):
             self.assertNotIn("rate", logged[t])
         for r in logged.values():
             self.assertEqual(r["seven_day_resets_at"], 12345)
+
+    # ---- the week by pace to its reset --------------------------------------------
+
+    def week_world(self, pace=0.0):
+        """A week that resets 3 days after the poll, with a measured burn of `pace` pp/h."""
+        self.reset = self.now + 3 * 86400
+        self.s.week_burn = burn(pace, self.reset)
+
+    def wk(self, five, week, resets=None, **kw):
+        return lim(five, week, week_resets=self.reset if resets is None else resets, **kw)
+
+    def test_week_notice_once_per_level_per_week(self):
+        self.week_world()
+        self.s.limits = self.wk(20.0, 94.9)
+        self.assertEqual(self.poll(), [])
+        self.s.limits = self.wk(20.0, 95.1)
+        self.assertEqual(self.poll(), ["limit 20 95.1 sensor day week:no_new_mass"])
+        self.s.limits = self.wk(20.0, 94.9)
+        self.assertEqual(self.poll(), [])
+        self.s.limits = self.wk(20.0, 95.2)
+        self.assertEqual(self.poll(), [])  # the level was reported for this week
+        self.s.limits = self.wk(20.0, 100.1)
+        self.assertEqual(self.poll(), ["limit 20 100.1 sensor day week:clearance_only"])
+        self.s.limits = self.wk(60.0, 100.1)  # a 5h band rise: no week field, no repeat
+        self.assertEqual(self.poll(), ["limit 60 100.1 sensor day"])
+        self.s.limits = self.wk(20.0, 95.1, resets=self.reset + 7 * 86400)  # the next week
+        self.assertEqual(self.poll(), ["limit 20 95.1 sensor day week:no_new_mass"])
+
+    def test_week_fallback_events(self):
+        self.s.limits = lim(20.0, 49.9)
+        self.assertEqual(self.poll(), [])
+        self.s.limits = lim(20.0, 50.0)
+        self.assertEqual(self.poll(), ["limit 20 50 sensor day week:notify"])
+        self.s.limits = lim(20.0, 70.0)
+        self.assertEqual(self.poll(), ["limit 20 70 sensor day week:clearance_only"])
+
+    def test_first_poll_computes_the_burn_before_deciding(self):
+        self.week_world()
+        self.s.limits = self.wk(20.0, 50.0)
+        self.assertEqual(self.mem, {})
+        self.assertEqual(self.poll(), [])  # projected 50, not the 50 % fallback threshold
+        self.assertEqual(len(self.s.calls["week_burn"]), 1)
+        self.assertEqual(self.mem["week_notice"]["level"], 0)
+        self.assertEqual(self.mem["week_burn"]["value"]["pp_per_h"], 0.0)
+
+    def test_week_room_raises_no_event(self):
+        self.week_world()
+        self.s.limits = self.wk(20.0, 70.0)
+        self.assertEqual(self.poll(), [])
+
+    def test_week_stale_sensor_keeps_the_week(self):
+        self.week_world()
+        self.s.limits = self.wk(20.0, 95.1)
+        self.assertEqual(self.poll(), ["limit 20 95.1 sensor day week:no_new_mass"])
+        stored = dict(self.mem["week_notice"])
+        self.s.limits = lim(20.0, 95.1, source="statusline")  # no week reset from the status line
+        self.assertEqual(self.poll(self.now + 90), [])
+        self.assertEqual(self.mem["week_notice"], stored)
+
+    def test_old_limit_state_reads_as_empty(self):
+        self.mem["limit"] = [1, True, False]
+        self.s.limits = lim(10.0, 10.0)
+        self.assertEqual(self.poll(), [])
+        self.assertEqual(self.mem["limit"], [0, False])
+
+    def test_unknown_week_raises_no_week_event(self):
+        self.no_crews = True
+        self.s.limits = lim(70.0, None)
+        self.assertEqual(self.poll(self.now), ["limit 70 - sensor day"])
+        self.assertEqual(self.poll(self.now + 1801), ["blind_week"])
+
+    def test_override_silences_week_then_reports(self):
+        self.week_world()
+        self.s.limits = self.wk(20.0, 100.1)
+        self.s.override = "goal-1"
+        self.assertEqual(self.poll(), [])
+        self.assertEqual(self.mem["last_reading"]["seven_day"], 100.1)  # still logged
+        self.s.override = None
+        self.assertEqual(self.poll(self.now + 90), ["limit 20 100.1 sensor day week:clearance_only"])
+        self.assertEqual(self.poll(self.now + 180), [])
+
+    def test_week_burn_with_the_rate(self):
+        self.s.limits = lim(10.0, 10.0)
+        logged = {}
+        for t in (0, 90, 540, 599, 600, 690):
+            self.poll(self.now + t)
+            logged[t] = dict(self.mem["last_reading"])
+        self.assertEqual([c - self.now for c in self.s.calls["week_burn"]], [0, 600])
+        for t in (0, 600):
+            self.assertIn("week_burn", logged[t])
+        for t in (90, 540, 599, 690):
+            self.assertNotIn("week_burn", logged[t])
+
+    def test_failing_week_burn_is_isolated(self):
+        deps = self.s.deps()
+
+        def boom(d, now):
+            raise Boom("no log")
+        deps["week_burn"] = boom
+        self.s.limits = lim(90.0, 10.0)
+        out = monitor.poll(["b1"], D, self.mem, self.now, deps=deps)
+        self.assertEqual(out, ["limit 90 10 sensor day"])
+        self.assertIn("week_burn: Boom: no log", self.mem["poll_errors"][0])
 
     def test_failing_spend_is_isolated(self):
         deps = self.s.deps()
@@ -784,6 +900,7 @@ class TestProcessBudget(FakeBase):
         self.assertEqual(self._procs() - before, 2)  # agent list + kv list, nothing else
         self.assertIn("spend", self.mem)  # computed by reading files in the first poll
         self.assertIn("rate", self.mem)
+        self.assertIn("week_burn", self.mem)
         # all three change status and there is no sensor: the limit pass reuses the screens
         os.remove(os.path.join(self.sensor, "s1.json"))
         self._agents("idle")

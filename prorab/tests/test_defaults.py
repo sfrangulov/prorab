@@ -23,7 +23,13 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(d["context"]["unknown_window"], 200000)
 
         self.assertEqual(d["limits"]["five_hour"], {"no_new_mass": 60, "stop": 80})
-        self.assertEqual(d["limits"]["seven_day"], {"notify": 50, "clearance_only": 70})
+        self.assertNotIn("seven_day", d["limits"])
+        self.assertEqual(d["week"], {
+            "alert_pct": 95, "clearance_pct": 100, "margin_pp": 20,
+            "fallback_notify_pct": 50, "fallback_clearance_pct": 70,
+            "burn_horizon_s": 86400, "reserve_pp_per_hour": 1.0,
+            "calendar": {"days": ["mon", "tue", "wed", "thu", "fri"],
+                         "start": "09:00", "end": "19:00"}})
         with open(_defaults.DEFAULT_PATH, encoding="utf-8") as fh:
             raw = json.load(fh)
         self.assertNotIn("sensor_path", raw["limits"])

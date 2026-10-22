@@ -1,10 +1,14 @@
 import calendar
+import datetime
+import io
 import json
 import os
 import sys
 import tempfile
 import time
 import unittest
+import zoneinfo
+from contextlib import redirect_stdout
 
 SCRIPTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
@@ -476,6 +480,204 @@ class TestRate(unittest.TestCase):
         r = limits.rates(rs, self.d, self.t + 1500, home=tmp.name)["five_hour"]
         self.assertAlmostEqual(r["usd"], 8.0)  # two $4 messages inside [t, t+1200)
         self.assertAlmostEqual(r["usd_per_pp"], 4.0)
+
+
+class TestWeekBurn(unittest.TestCase):
+    W1 = 1761500000
+    W0 = W1 - 7 * 86400
+    H = 3600
+
+    def setUp(self):
+        self.d = _defaults.load()
+        self.t = self.W1 - 4 * 86400  # the week is half over
+
+    def wk(self, hours, pct, resets=None, source="sensor"):
+        return _sensor_reading(self.t + hours * self.H, week=pct,
+                               week_resets=self.W1 if resets is None else resets,
+                               source=source)
+
+    def test_week_burn_current_week_only(self):
+        rs = [self.wk(-30, 10, self.W0), self.wk(-28, 40, self.W0),
+              self.wk(0, 20), self.wk(1, 21), self.wk(2, 22)]
+        b = limits.week_burn(rs, self.d, self.t + 2 * self.H)
+        self.assertAlmostEqual(b["pp_per_h"], 1.0)
+        self.assertEqual((b["source"], b["intervals"], b["resets_at"]), ("measured", 2, self.W1))
+
+    def test_week_burn_never_across_a_reset(self):
+        rs = [self.wk(-3, 55, self.W0), self.wk(-2, 60, self.W0), self.wk(0, 2), self.wk(0.1, 2)]
+        b = limits.week_burn(rs, self.d, self.t + 0.1 * self.H)
+        self.assertIsNone(b["pp_per_h"])  # a fresh week: no interval of its own yet
+        self.assertEqual((b["source"], b["reason"]), ("none", "no interval within the horizon"))
+        rs += [self.wk(1, 3)]
+        self.assertAlmostEqual(limits.week_burn(rs, self.d, self.t + self.H)["pp_per_h"], 1.0)
+
+    def test_week_burn_rise_over_covered_hours(self):
+        rs = [self.wk(0, 10), self.wk(1, 12), self.wk(3, 13), self.wk(4, 13.4)]
+        b = limits.week_burn(rs, self.d, self.t + 4 * self.H)
+        self.assertAlmostEqual(b["pp_per_h"], 0.75)  # 3 pp over 4 h, the last 0.4 not counted
+        self.assertEqual((b["intervals"], b["pp"], b["hours"]), (2, 3.0, 4.0))
+
+    def test_week_burn_horizon(self):
+        rs = [self.wk(0, 10), self.wk(1, 12)]
+        old = limits.week_burn(rs, self.d, self.t + 1 * self.H + 25 * self.H)
+        self.assertIsNone(old["pp_per_h"])
+        self.assertEqual(old["reason"], "no interval within the horizon")
+        b = limits.week_burn(rs, self.d, self.t + 1 * self.H + 23 * self.H)
+        self.assertEqual(b["intervals"], 1)
+        self.assertAlmostEqual(b["hours"], 1.0)  # from the interval's start to the last reading
+
+    def test_week_burn_needs_sensor_span_and_rise(self):
+        sl = [self.wk(0, 10, source="statusline"), self.wk(2, 20, source="statusline")]
+        b = limits.week_burn(sl, self.d, self.t + 3 * self.H)
+        self.assertEqual((b["pp_per_h"], b["reason"]), (None, "no sensor reading of the current week"))
+        quick = [self.wk(0, 10), self.wk(0.15, 12)]  # 9 min
+        b = limits.week_burn(quick, self.d, self.t + self.H)
+        self.assertEqual((b["pp_per_h"], b["reason"]), (None, "no interval within the horizon"))
+        small = [self.wk(0, 10), self.wk(0.2, 10.5)]  # 12 min, +0.5 pp
+        b = limits.week_burn(small, self.d, self.t + self.H)
+        self.assertEqual((b["pp_per_h"], b["reason"]), (None, "no interval within the horizon"))
+
+    def test_week_burn_past_week_is_not_current(self):
+        rs = [self.wk(0, 10), self.wk(1, 12)]
+        b = limits.week_burn(rs, self.d, self.W1 + 10)
+        self.assertEqual((b["pp_per_h"], b["reason"], b["resets_at"]),
+                         (None, "no sensor reading of the current week", None))
+
+    def test_week_burn_equal_timestamps_both_count(self):
+        rs = [self.wk(0, 10), self.wk(1, 12), _sensor_reading(self.t + self.H, week=13,
+                                                              week_resets=self.W1 + 5)]
+        self.assertEqual(len(limits._current_week(rs)[1]), 3)
+
+
+class TestWorkingHours(unittest.TestCase):
+    CAL = {"days": ["mon", "tue", "wed", "thu", "fri"], "start": "09:00", "end": "19:00"}
+    UTC = zoneinfo.ZoneInfo("UTC")
+
+    def ts(self, y, mo, d, h, mi=0, tz=None):
+        return datetime.datetime(y, mo, d, h, mi, tzinfo=tz or self.UTC).timestamp()
+
+    def test_working_hours_weekend_and_outside_hours(self):
+        f = lambda a, b, cal=None: limits.working_hours(a, b, cal or self.CAL, self.UTC)
+        t = self.ts
+        self.assertEqual(f(t(2026, 10, 24, 10), t(2026, 10, 26, 12)), 3.0)
+        self.assertEqual(f(t(2026, 10, 22, 20), t(2026, 10, 23, 10)), 1.0)
+        self.assertEqual(f(t(2026, 10, 21, 12), t(2026, 10, 22, 12)), 10.0)
+        self.assertEqual(f(t(2026, 10, 21, 19), t(2026, 10, 23, 19)), 20.0)
+        self.assertEqual(f(t(2026, 10, 23, 12), t(2026, 10, 21, 12)), 0.0)
+        self.assertEqual(f(t(2026, 10, 21, 12), t(2026, 10, 22, 12), dict(self.CAL, days=[])), 0.0)
+
+    def test_working_hours_local_wall_time_across_dst(self):
+        berlin = zoneinfo.ZoneInfo("Europe/Berlin")
+        a = self.ts(2026, 10, 24, 9, tz=berlin)
+        b = self.ts(2026, 10, 26, 10, tz=berlin)  # the clocks went back on Sunday
+        self.assertEqual(limits.working_hours(a, b, self.CAL, berlin), 1.0)
+
+    def test_working_hours_bad_calendar(self):
+        with self.assertRaises(ValueError):
+            limits.working_hours(0, 86400, dict(self.CAL, start="19:00", end="09:00"), self.UTC)
+
+
+class TestWeekProjection(unittest.TestCase):
+    UTC = zoneinfo.ZoneInfo("UTC")
+
+    def setUp(self):
+        self.d = _defaults.load()
+        self.now = datetime.datetime(2026, 10, 21, 19, tzinfo=self.UTC).timestamp()
+        self.reset = self.now + 48 * 3600
+
+    def proj(self, used, pace, resets="reset", d=None, lim_extra=None, burn=True):
+        lim = {"seven_day": used}
+        if resets:
+            lim["seven_day_resets_at"] = self.reset
+        lim.update(lim_extra or {})
+        b = {"pp_per_h": pace, "resets_at": None} if burn else None
+        return limits.week_projection(lim, b, d or self.d, self.now, self.UTC)
+
+    def no_calendar(self):
+        d = _defaults.load()
+        d["week"]["calendar"]["days"] = []
+        return d
+
+    def test_week_projection_arithmetic(self):
+        p = self.proj(50.0, 0.3)
+        self.assertEqual((p["hours_to_reset"], p["working_hours"], p["reserve_pp"]), (48.0, 20.0, 20.0))
+        self.assertAlmostEqual(p["projected"], 84.4)
+        self.assertEqual((p["basis"], p["allows"], p["level"]), ("projection", "normal", 0))
+        self.assertEqual(p["resets_at"], self.reset)
+
+    def test_week_projection_levels(self):
+        d = self.no_calendar()
+        got = {u: self.proj(u, 0.0, d=d) for u in (95.0, 94.99, 100.0, 80.0, 80.01)}
+        self.assertEqual(got[95.0]["allows"], "no_new_mass")
+        self.assertEqual(got[94.99]["allows"], "normal")
+        self.assertEqual(got[100.0]["allows"], "clearance_only")
+        self.assertEqual(got[80.0]["allows"], "room")
+        self.assertEqual(got[80.01]["allows"], "normal")
+        self.assertEqual([got[u]["level"] for u in (95.0, 94.99, 100.0, 80.0)], [2, 0, 3, 0])
+        self.assertEqual(got[80.0]["projected"], 80.0)
+
+    def test_week_projection_fallback(self):
+        for used, allows in ((49.9, "normal"), (50, "notify"), (70, "clearance_only"), (10, "normal")):
+            p = self.proj(used, None)
+            self.assertEqual((p["basis"], p["reason"], p["allows"], p["projected"]),
+                             ("fallback", "no measured burn", allows, None))
+        self.assertEqual([self.proj(u, None, burn=False)["level"] for u in (50, 70)], [1, 3])
+        p = self.proj(60.0, 0.5, resets=None)  # a burn but no reset time anywhere
+        self.assertEqual((p["basis"], p["reason"], p["allows"]),
+                         ("fallback", "reset time unknown", "notify"))
+
+    def test_week_projection_stale_sensor_keeps_reset(self):
+        lim = {"seven_day": 50.0, "seven_day_resets_at": None}
+        p = limits.week_projection(lim, {"pp_per_h": 0.3, "resets_at": self.reset}, self.d,
+                                   self.now, self.UTC)
+        self.assertEqual((p["basis"], p["resets_at"]), ("projection", self.reset))
+        p = limits.week_projection(lim, {"pp_per_h": 0.3, "resets_at": self.now - 5}, self.d,
+                                   self.now, self.UTC)
+        self.assertEqual((p["basis"], p["reason"]), ("fallback", "reset time unknown"))
+
+    def test_week_projection_unknown_week(self):
+        p = limits.week_projection({"seven_day": None}, {"pp_per_h": 1.0}, self.d, self.now)
+        self.assertEqual((p["basis"], p["allows"], p["level"], p["projected"]),
+                         ("unknown", "unknown", 0, None))
+        self.assertEqual(limits.week_projection({}, None, self.d, self.now)["allows"], "unknown")
+
+
+class TestCliWeek(unittest.TestCase):
+    def test_cli_week(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        saved = {k: os.environ.get(k) for k in ("HOME", "PRORAB_LOG_DIR")}
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.addCleanup(restore)
+        os.environ["HOME"] = tmp.name
+        os.environ["PRORAB_LOG_DIR"] = os.path.join(tmp.name, "logs")
+        usage = os.path.join(tmp.name, ".cache", "prorab", "usage")
+        os.makedirs(usage)
+        now = time.time()
+        reset = now + 48 * 3600
+        with open(os.path.join(usage, "s1.json"), "w") as fh:
+            json.dump({"rate_limits": {"five_hour": {"used_percentage": 5.0, "resets_at": now + 3600},
+                                       "seven_day": {"used_percentage": 50.0, "resets_at": reset}}}, fh)
+        log = os.path.join(tmp.name, "monitor.log")
+        with open(log, "w") as fh:
+            for h, pct in ((-3, 47.0), (-2, 48.0), (-1, 49.0), (0, 50.0)):
+                fh.write(json.dumps(_sensor_reading(now + h * 3600, week=pct, week_resets=reset)) + "\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = limits.main(["week", "--log", log, "--now", str(now)])
+        self.assertEqual(rc, 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["used"], 50.0)
+        self.assertAlmostEqual(out["burn"]["pp_per_h"], 1.0)
+        self.assertEqual(out["basis"], "projection")
+        self.assertIsNotNone(out["projected"])
+        self.assertIn(out["allows"], ("room", "normal", "no_new_mass", "clearance_only"))
 
 
 if __name__ == "__main__":

@@ -250,15 +250,24 @@ def start(site_path, work_order, name, caller_pane):
     if not herdr_cli.valid_name(name):
         return {"status": "bad_name"}
     rec = journal.issue(work_order)
-    if rec and rec.get("state") in ("issuing", "issued") and rec.get("pane") \
-            and herdr_cli.agent_by_pane(rec["pane"]) is not None:
-        if rec.get("state") == "issuing" and rec.get("name") == name and rec.get("session_id"):
-            # this start's own pane, now holding an agent: the customer answered a consent
-            # prompt there (or is still to); either way no new pane and no new agent
-            pane = rec["pane"]
-            return (_consent_result(herdr_cli.pane_visible(pane), pane)
-                    or _register_started(site_path, work_order, name, pane, rec["session_id"]))
-        return {"status": "already_issued", "name": rec.get("name"), "pane_id": rec["pane"]}
+    if rec and rec.get("state") in ("issuing", "issued") and rec.get("pane"):
+        there = herdr_cli.agent_by_pane(rec["pane"])
+        theirs = None
+        if there is not None and rec.get("state") == "issuing" and rec.get("name") == name \
+                and rec.get("session_id"):
+            seen = (there.get("agent_session") or {}).get("value")
+            if seen == rec["session_id"]:
+                # our own session in this start's pane: the customer answered a consent
+                # prompt there (or is still to); no new pane, no new agent
+                pane = rec["pane"]
+                return (_consent_result(herdr_cli.pane_visible(pane), pane)
+                        or _register_started(site_path, work_order, name, pane,
+                                             rec["session_id"]))
+            theirs = bool(seen)  # someone else's session (the customer's own `claude`)
+        if there is not None and not theirs:
+            return {"status": "already_issued", "name": rec.get("name"),
+                    "pane_id": rec["pane"]}
+        # a foreign session in the pane is left alone: start anew in a new pane
     active = journal.crews()
     if len(active) >= journal.machine()["parallel_ceiling"]:
         return {"status": "parallel_limit"}

@@ -406,9 +406,9 @@ class TestStart(CrewBase):
             crew.start(SITE_DIR, "N1", "a1", "w:p1")
         self.assertEqual(cm.exception.code, "cli_error")
 
-    def issuing_in_p9(self, name="a1"):
+    def issuing_in_p9(self, name="a1", session="sess-first"):
         self.j.issue_set("N1", "issuing", name=name, pane="w:p9", session_id="sess-first")
-        self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.route("agent list", ok({"agents": [agent_entry(session=session)]}))
 
     def test_retry_while_consent_prompt_is_up_returns_it_again(self):
         self.issuing_in_p9()
@@ -447,6 +447,36 @@ class TestStart(CrewBase):
         for c in self.calls():
             self.assertFalse(c.startswith(("pane split", "agent start")), c)
         self.assert_nothing_pressed()
+
+    def test_foreign_session_in_the_pane_starts_anew(self):
+        repo = self.make_repo()
+        self.add_worktree(repo, "N1")
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        self.route("pane split w:p1", ok({"pane": {"pane_id": "w:p10"}}))
+        self.route("agent list", ok({"agents": [agent_entry(session="customers-own"),
+                                                agent_entry(pane="w:p10", session="s2")]}))
+        self.j.issue_set("N1", "issuing", name="a1", pane="w:p9", session_id="sess-first")
+        r = crew.start(repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["status"], "started")
+        self.assertEqual(r["pane_id"], "w:p10")
+        self.assertNotEqual(r["session_id"], "sess-first")
+        self.assertEqual(self.j.issue("N1")["pane"], "w:p10")
+        self.assertEqual(self.j.kv["crew.a1.pane"], "w:p10")
+        calls = self.calls()
+        self.assertTrue([c for c in calls if c.startswith("pane split")])
+        self.assertTrue([c for c in calls if c.startswith("agent start")])
+        for c in calls:
+            self.assertNotIn("w:p9", c.replace("pane layout", ""))
+            self.assertNotIn("close", c)
+        self.assert_nothing_pressed()
+
+    def test_pane_agent_without_session_id_is_already_issued(self):
+        self.issuing_in_p9(session=None)
+        r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "already_issued", "name": "a1", "pane_id": "w:p9"})
+        self.assertEqual(self.j.active, [])
+        self.assertFalse([c for c in self.calls() if c.startswith(("pane split", "agent start"))])
 
     def test_issuing_under_another_name_is_already_issued(self):
         self.issuing_in_p9(name="b1")

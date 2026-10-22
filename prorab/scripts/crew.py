@@ -350,7 +350,7 @@ def _take_pane(work_order, site_path, caller_pane):
 
 def close_start_panes(work_order):
     """Close the panes a start left (the issue record's `pane` and every `spare`) that are
-    still the recorded pane (identity) and hold no agent; a pane with an agent stays
+    still the recorded pane (identity), hold no agent and show a working directory; a pane with an agent stays
     recorded, a gone or recycled one is dropped from the record, never closed. Returns the
     closed pane ids."""
     rec = journal.issue(work_order)
@@ -367,8 +367,8 @@ def close_start_panes(work_order):
         info = _pane_info(e["pane"])
         if not _same_pane(e, info):
             continue
-        if _has_agent(e["pane"], info):
-            kept.append(e)
+        if _has_agent(e["pane"], info) or not info.get("foreground_cwd"):
+            kept.append(e)  # an agent, or a cwd herdr does not show: identity is no proof of idleness
             continue
         if _close_pane(e["pane"]):
             closed.append(e["pane"])

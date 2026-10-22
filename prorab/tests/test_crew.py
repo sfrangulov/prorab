@@ -1947,6 +1947,16 @@ class TestStartPanes(CrewBase):
         crew.stop("a1", "N1")
         self.assertIn("pane close w:p9", self.calls())
 
+    def test_stop_and_cleanup_keep_a_pane_with_an_unknown_cwd(self):
+        ident = {"terminal": "term-w:p9", "tab": "w:1"}
+        self.j.issue_set("N1", "issued", pane="w:p9", pane_identity=ident)
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", cwd=None)}))
+        self.route("pane close w:p9", "")
+        crew.stop("a1", "N1")
+        crew.cleanup(os.path.join(self.dir, "nowhere"), "N1")
+        self.assertNotIn("pane close w:p9", self.calls())
+        self.assertEqual(self.j.issue("N1")["pane"], "w:p9")
+
     def test_cleanup_closes_spare_panes_never_one_with_an_agent(self):
         ident = lambda p: {"pane": p, "terminal": "term-" + p, "tab": "w:1"}  # noqa: E731
         self.j.issue_set("N1", "not_issued", spare=[ident("w:p5"), ident("w:p6")])

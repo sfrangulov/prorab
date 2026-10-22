@@ -1,6 +1,6 @@
 # prorab — design document
 
-21 October 2026. Status: approved by the customer; the customer's amendments S, L, G, R and E are folded in. The decisions marked "the customer may correct" stay open to correction.
+21 October 2026. Status: approved by the customer; the customer's amendments S, L, G, R, E and W are folded in. The decisions marked "the customer may correct" stay open to correction.
 
 ## Why
 
@@ -55,6 +55,10 @@ The terms come from a building site. `SKILL.md` gives the glossary once. One Eng
 | spend | расход | kv `spent.<id>.*`, `shift.spent.*` |
 | budget (shift budget) | бюджет (бюджет смены) | `budget` (monitor event `budget`) |
 | rate ($ per percentage point) | курс | `rate` |
+| burn (consumption speed, pp per hour) | скорость расхода | `burn_rate` (the 5h window, `scheduler.py`), `week_burn` (the week, `limits.py`) |
+| week projection | прогноз недели | `week_projection`, defaults section `week`, the plan's field `week` |
+| working calendar | рабочий календарь | `week.calendar` |
+| customer's reserve | резерв заказчика | `week.reserve_pp_per_hour`, `reserve_pp` |
 | pp (percentage points) | п. п. | `_pp` |
 | stage | этап | `stage` |
 | stop point | точка остановки | — |
@@ -102,7 +106,11 @@ What the terms mean:
 - **clearance** — permission for hazardous work given in advance: mass runs, activity an EDR would notice, heavy downloads.
 - **estimate** — the planned spend of a work order, or of one item of the foreman's own research, in US dollars at API prices (section "Shift budget").
 - **budget** — the ceiling the customer sets for a shift's spend: in dollars and in pp of the week.
-- **rate** — dollars per percentage point of the 5h window or of the week, estimated from the sensor. Not to be confused with the window's consumption speed (pp per hour, section "Crew scheduling"), which the scheduler calls `burn_rate`.
+- **rate** — dollars per percentage point of the 5h window or of the week, estimated from the sensor. Not to be confused with the burn.
+- **burn** — a limit's consumption speed in pp per hour, measured from limit readings. The 5h window's burn bounds the number of crews (section "Crew scheduling"; the scheduler calls it `burn_rate`); the week's burn drives the week projection.
+- **week projection** — where the week limit will stand at its reset at the current burn, with the customer's reserve kept (section "The week by pace to its reset").
+- **working calendar** — the customer's working hours, in `defaults.json`: by default Monday to Friday, 09:00–19:00, the machine's local time.
+- **customer's reserve** — the pp of the week kept for the customer's own work: the working hours left before the reset × the reserve per working hour.
 - **acceptance** — the foreman's check of a stage by evidence and the record of a stage act.
 - **handover** — the crew writes a handover act, and the foreman closes its session and opens a new one.
 - **foreman handover** — the same for the foreman itself.
@@ -260,10 +268,10 @@ A model missing from the table is priced as the most expensive known one: the hi
 
 - an interval counts only between two sensor readings of the same window (the same `resets_at` within the sensor's 10-minute tolerance; never across a reset), at least 10 minutes apart (`schedule.burn_min_span_s`, the same minimum span the window's consumption speed of section "Crew scheduling" uses), with a rise of at least 1 pp (below that, rounding dominates);
 - the rate is the total spend divided by the total rise over the counted intervals within the horizon: the last 5 hours for the window, the current weekly window for the week; it is re-estimated at most every 10 minutes;
-- until the first estimate each rate is its default from `defaults.json`: 3.5 $/pp for the window and 10 $/pp for the week (the foreman's measurement of 22 October gave about $10 per pp of the week); a default is always named as a default in the journal and the report, never as an estimate, and the week's thresholds are still checked against its measured percentage;
+- until the first estimate each rate is its default from `defaults.json`: 3.5 $/pp for the window and 10 $/pp for the week (the foreman's measurement of 22 October gave about $10 per pp of the week); a default is always named as a default in the journal and the report, never as an estimate; the week projection never uses the rate: it starts from the measured percentage and the week's burn (section "The week by pace to its reset");
 - without the sensor the rate is not estimated (status-line readings of idle panes are frozen and would distort the rise): both windows keep their defaults.
 
-The current rate and how it was obtained (estimated or default, over which intervals) go into the journal — with the spend in every stage act and in the foreman's handover act — and into the morning report together with the machine's spend over the shift; the monitor log keeps every estimate. Before issuing a work order the foreman converts its estimate into pp of the window and, once the week rate is known, of the week, and checks that it fits in what is left before the thresholds (section "Five-hour window thresholds") and in the shift budget. The thresholds themselves are always checked against measured percentages, not against the rate.
+The current rate and how it was obtained (estimated or default, over which intervals) go into the journal — with the spend in every stage act and in the foreman's handover act — and into the morning report together with the machine's spend over the shift; the monitor log keeps every estimate. Before issuing a work order the foreman converts its estimate into pp of the window and, once the week rate is known, of the week, and checks that it fits in what is left before the thresholds (section "Five-hour window thresholds") and in the shift budget, and that the week projection does not hold it back (section "The week by pace to its reset"). The thresholds and the week projection themselves are always checked against measured percentages, never against the rate.
 
 **The default budget** (values in `defaults.json`):
 
@@ -271,6 +279,8 @@ The current rate and how it was obtained (estimated or default, over which inter
 |---|---|
 | spend of the shift at API prices | $100 |
 | rise of the Claude Max week limit during the shift | +10 pp |
+
+The +10 pp of the week is a spend ceiling per shift, not a week threshold: it stays whatever the week projection says (section "The week by pace to its reset").
 
 **Machine protection — counts, not budget:**
 
@@ -294,6 +304,8 @@ The customer changes the budget in words (for example "budget for tonight: $500,
 - the safety ceiling `parallel_ceiling` (6 by default), which the customer can replace.
 
 These counts — the ceiling, the heavy-run slots and the heavy-run limit per stage — protect the machine; they are not budget (section "Shift budget").
+
+The week adds no fifth bound. What its projection allows (section "The week by pace to its reset") holds back work orders without a clearance at its alert and at clearance only, and in the margin case lets the foreman fill the number the four bounds allow — never more.
 
 **Heavy-run semaphore.** LibreOffice, test suites, builds: at most `heavy_slots` (2 by default) at once on the whole machine, however many crews there are. The semaphore is file locks (`fcntl.flock`) in `~/.cache/prorab/slots/`. A crew runs a heavy command through `prorab/scripts/slots.py run --kind heavy -- <command>`; the foreman writes the script's absolute path into the work order. Crews still do not write to the foreman's office journal.
 
@@ -382,10 +394,11 @@ Rules:
 |---|---|---|---|
 | Context of a Claude crew | the transcript `~/.claude/projects/<cwd>/<session>.jsonl`, the usage of the last response of the main branch: `input + cache_creation + cache_read + output` | none | min(40 % of the window, 500 000 tokens) — handover (values in `defaults.json`) |
 | The foreman's context | its own transcript (the session id comes from its pane in `herdr agent list`) | none | the same threshold — foreman handover |
-| Claude Max limits | 1) the sensor file; 2) the status line on the screen of any pane, if it shows "5h … NN %"; 3) Claude Code messages about a near or reached limit; 4) the spend, converted into pp by the rate | the sensor, optional | 5h: the day and night thresholds — section "Five-hour window thresholds". Week: 50 % — notify the customer; 70 % — only work orders with a clearance (`clearance_only`) |
+| Claude Max limits | 1) the sensor file; 2) the status line on the screen of any pane, if it shows "5h … NN %"; 3) Claude Code messages about a near or reached limit; 4) the spend, converted into pp by the rate | the sensor, optional | 5h: the day and night thresholds — section "Five-hour window thresholds". Week: by pace to its reset — the week projection against `week.alert_pct` (95 %), `week.clearance_pct` (100 %) and the margin `week.margin_pp` (20 pp); without a measured burn or a reset time the fallback thresholds: 50 % — notify the customer, 70 % — only work orders with a clearance — section "The week by pace to its reset" |
 | Mac load | `sysctl -n vm.loadavg`, `sysctl -n hw.ncpu` | none | one-minute load average above `ncpu` — no new crews |
 | Estimate and shift budget | the spend in dollars the foreman computes from transcripts (section "Shift budget"); kv per work order: estimate, spent; the crew reports its heavy runs in its stage report, and the foreman checks them against the facts | none | overspend — stop and a gate to the customer (lifted only by the command "ignore limits and finish") |
 | Rate ($ per pp) | sensor readings against the machine's spend from all transcripts | the sensor (without it the default stays) | no threshold; goes into the journal and the morning report |
+| Week burn (pp per hour) | sensor readings of the current week in the monitor log | the sensor (without it the week falls back to the fixed thresholds) | no threshold of its own; feeds the week projection; goes into the monitor log and the morning report |
 
 The context window is the largest among the models met in the main branch of the transcript, from the table in `references/`: otherwise one record of a smaller model in a 1-million-token session would distort the percentage. An unknown model gets 200 000 tokens — with margin. Verified: Opus 5.5 has a 1M window (362 873 tokens in the transcript = 36 % in the status line); the Codex model's log has `model_context_window: 475000`.
 
@@ -403,13 +416,45 @@ Below the soft threshold the foreman writes nothing to a crew about its context:
 
 - Night means the night shift (the customer declares it, section "Night shift"). The morning time is `night.morning`, `08:00` by default; the customer replaces it in words or through `bd kv`.
 - The reset time comes from the sensor (`resets_at`), else from the status line (a countdown like `(4h7m)` next to the percentage), else from a Claude Code limit message (a line like "resets 7pm"). A zone named in the message — "(UTC)", "(GMT)", "(Europe/Berlin)" — is resolved through the system's time-zone database; a zone that cannot be resolved makes the reset time unknown, never local time. If the reset time is unknown, the day thresholds apply at night.
-- The week is unchanged: a shift budget of +10 pp, a notification at 50 %, only work orders with a clearance at 70 %. An unknown week — section "Claude Max limit sensor".
+- The week has a rule of its own: by pace to its reset (the next section). The shift budget's +10 pp of the week is a spend ceiling, not a week threshold, and stays. An unknown week — section "Claude Max limit sensor".
+
+### The week by pace to its reset
+
+The week limit is use-it-or-lose-it: whatever is left at the reset is lost. Fixed week thresholds — a notification at 50 %, only work orders with a clearance at 70 % — ignore how much time is left before the reset. On 22 October the customer put it, roughly, as "it is not that bad: half of the week is left, but only two working days are" (amendment W). So the week is judged by where it will stand at its reset at the current pace, leaving a reserve for the customer's own work:
+
+```
+projected = used + burn × hours to the reset + reserve
+```
+
+- **used** — the measured week percentage, by the usual rule: the maximum over the fresh sources (section "Claude Max limit sensor").
+- **burn** — the week's consumption speed in pp per hour, from sensor readings only and by the discipline of the rate (section "Shift budget"): an interval counts only between two sensor readings of the same week (the same `seven_day.resets_at` within the 10-minute tolerance, never across a reset; a week whose reset time has passed is not the current one), at least 10 minutes apart, with a rise of at least 1 pp. The burn is the total rise of the intervals that end within the horizon (`week.burn_horizon_s`, 24 hours: one whole day of the customer's cycle, working hours and a night) over the hours from the start of the first of them to the latest sensor reading of the week. So a quiet stretch since the last interval lowers the burn instead of leaving the last busy interval in force; its rise below 1 pp is not counted, since rounding dominates it. The burn counts every session that draws on the limit, the customer's own included. It is re-estimated with the rate, at most every 10 minutes, and goes into the monitor log. It is not the rate: the rate is dollars per pp, the burn is pp per hour.
+- **hours to the reset** — from the sensor's `seven_day.resets_at`. When the current reading has none (the sensor went stale and the status line took over), the latest sensor reading of the current week gives it: a week's reset time does not move. The status line's week countdown is not used: without the sensor there is no burn either.
+- **reserve** — the customer's working hours left before the reset on the working calendar, × the reserve per working hour. The calendar lives in `defaults.json` (`week.calendar`): by default Monday to Friday, 09:00–19:00, in the machine's local time (the customer's); the part of a day already past, the weekend and the hours outside the calendar count nothing. The reserve per working hour is `week.reserve_pp_per_hour`, 1 pp by default. Both are named as defaults in the plan and in the morning report; measuring the reserve from the customer's own sessions is later work.
+
+**What the projection allows** (values in `defaults.json`):
+
+| Projected at the reset | The week allows | What the foreman does |
+|---|---|---|
+| at most 100 % − `week.margin_pp` (80 %) | room for more | may run as many crews as the four bounds of section "Crew scheduling" allow and write more work orders to fill them, or propose a night or weekend shift to the customer; it never starts one on its own |
+| in between | normal | nothing changes |
+| at least `week.alert_pct` (95 %) | no new mass runs | tells the customer once, in chat and in the morning report (no push notification: this is not one of the urgent matters of section "Night shift"); issues no new work order without a clearance; the crews at work go on |
+| at least `week.clearance_pct` (100 %) | clearance only | as at 95 %, and every crew whose work order has no clearance finishes its step and stands; its work order waits for the customer with a gate |
+
+- **A work order with a clearance** is one whose bead or current stage carries `clearance:granted`. A clearance is advance permission from the customer, so it passes both the alert and clearance only.
+- **Room for more lifts nothing.** The four bounds of section "Crew scheduling" (`parallel_ceiling` and the load bound included), the 5h thresholds, and the shift budget in dollars and in pp of the week all stay. A proposed night or weekend shift names the budget it would need; the customer sets it.
+- **One notice per level per week.** The projection moves with every reading. The monitor reports each level once per week (first 95 %, then 100 %); a projection that drops and rises again within the week raises no second notice. What a level holds back is still checked at every issuing.
+- **Fallback.** Without a measured burn (no sensor, no interval within the horizon yet, a fresh week) or without a reset time, the fixed thresholds stay as the fallback: `week.fallback_notify_pct` (50 %) — the customer is told once; `week.fallback_clearance_pct` (70 %) — clearance only, as in the table. Without a projection there is no margin case. The plan and the morning report name the fallback as such, with its reason.
+- **Unknown week.** If the week percentage is unknown, nothing is projected, and every rule of section "Claude Max limit sensor" holds unchanged: `blind_week` after 30 minutes, and at night no new mass runs.
+- **The command "ignore limits and finish"** lifts the projection and its fallback thresholds exactly as it lifts the 5h thresholds; nothing else about the command changes (next section).
+- **The shift budget's +10 pp of the week stays**: it is a spend ceiling per shift (section "Shift budget"), not a week threshold.
+
+An example (synthetic). Wednesday, 19:00; the week is at 50 % and resets on Friday at 19:00: 48 hours to the reset, 20 working hours left, so a reserve of 20 pp. At a burn of 0.3 pp per hour the projection is 50 + 14.4 + 20 = 84.4 % — normal, and no notice (the fixed thresholds would have notified at 50 %). At 0.1 pp per hour it is 74.8 % — room for more: the foreman may propose a night shift.
 
 ### The command "ignore limits and finish"
 
 This is the customer's command "ignore limits and finish", in any language. It:
 
-- **Lifts** the 5h window thresholds (day and night, the morning reserve included), the week thresholds and the shift budget (dollars and pp of the week), and with the budget the work orders' estimates.
+- **Lifts** the 5h window thresholds (day and night, the morning reserve included), the week thresholds — the week projection and its fallback thresholds (section "The week by pace to its reset") — and the shift budget (dollars and pp of the week), and with the budget the work orders' estimates.
 - **Does not lift:**
   - the safety rules: consent prompts, push, PR, releases, merging into main;
   - machine protection: Mac load, the heavy-run semaphore, the heavy-run limit per stage, and the ceiling `parallel_ceiling` unless the customer replaced it separately.
@@ -427,7 +472,7 @@ The data is updated while at least one Claude Code session is open, and while th
 
 **Status line without the sensor.** The foreman reads all panes and takes the maximum percentage for each window: within a window usage only grows, so the frozen value of an idle pane is always below the real one. A pane that shows the countdown `(0m)` next to the percentage shows the previous window and is not counted for this window; a cut-off countdown does not prevent the value from being counted (an error toward overestimating is acceptable).
 
-**Unknown week.** If no pane shows a week bar and there is no sensor, the week percentage is unknown, not zero. If it stays unknown for more than 30 minutes, the monitor raises the event `blind_week`, and the foreman tells the customer once. At night, with an unknown week, no new mass runs are issued.
+**Unknown week.** If no pane shows a week bar and there is no sensor, the week percentage is unknown, not zero. If it stays unknown for more than 30 minutes, the monitor raises the event `blind_week`, and the foreman tells the customer once. At night, with an unknown week, no new mass runs are issued. An unknown week is not projected (section "The week by pace to its reset").
 
 **Right after a 5h reset.** For about two minutes after a known 5h `resets_at`, the fresh sensor files lack `five_hour` while the older ones are already stale (seen on 22 October). In that window the monitor raises no `blind` (`monitor.reset_grace_s`, 120 s); every other reading goes on as usual.
 
@@ -455,7 +500,7 @@ If the act is unclear, the foreman may question the crew's previous session with
 
 ### Night shift
 
-- **Start.** The customer says "night shift" (in any language), or the foreman offers it itself when there are ready work orders with clearances. The preflight check:
+- **Start.** The customer says "night shift" (in any language), or the foreman offers it itself when there are ready work orders with clearances or when the week projection leaves room for more (section "The week by pace to its reset"); it never starts one on its own. The preflight check:
   - mains power (`pmset -g batt`);
   - `caffeinate -is` is running, tied to the foreman's process;
   - every work order has an estimate in dollars, and the clearances it needs are given;
@@ -467,7 +512,7 @@ If the act is unclear, the foreman may question the crew's previous session with
   - a crew waits on a consent prompt (with the prompt's kind);
   - a crew shows a limit screen or a final provider error;
   - a crew's or the foreman's context threshold is reached;
-  - a limit threshold is reached (day or night);
+  - a limit threshold is reached (day or night), or the week projection reaches a new level (once per level per week);
   - an estimate or the shift budget is exceeded (event `budget`);
   - a crew vanished from herdr or hung;
   - a heartbeat every 20 minutes if there are no events: by it the foreman notices a stopped monitor and hung crews.
@@ -490,7 +535,7 @@ If the act is unclear, the foreman may question the crew's previous session with
   - **A crew counts as hung** only if, with the status `working`, both signs hold: its transcript has not grown for longer than the threshold (about 30 minutes) and the newest file of its worktree is older than the same threshold. A crew holding a heavy-run slot is not hung: a long test suite without output is work. If data is lacking, the foreman writes this into the journal and does not restart the crew.
   - **A vanished or hung crew** the foreman restarts. If its context is below the soft threshold, it continues the same session by its id (`--resume`); otherwise a new session opens with the last act. After two failed restarts on one work order, that work order goes to "waiting for the customer". A restart counts from the moment the new agent has started (`agent start` succeeded), whatever happens to the delivery afterwards: from then on the journal names the new session. A failure before the start changes nothing and does not count. A handover and waiting for a limit reset do not count as restarts.
 - **Limit reached.** The foreman waits until the reset and goes on.
-- **Morning.** A report in `reports/YYYY-MM-DD.md`: what was accepted, what waits for the customer and what is needed from them, the spend against the estimates and the budget in dollars with its pp equivalents, the rate and how it was obtained, the machine's spend over the shift, the limits, incidents, and — if the command "ignore limits and finish" held — a section "Without limits". When the customer returns — a short summary in chat, in the customer's language.
+- **Morning.** A report in `reports/YYYY-MM-DD.md`: what was accepted, what waits for the customer and what is needed from them, the spend against the estimates and the budget in dollars with its pp equivalents, the rate and how it was obtained, the machine's spend over the shift, the limits — with the week's lines: the week used, its burn (measured, or "fallback thresholds" with the reason), the customer's reserve (working hours left × pp per hour), the projection at the reset, and what it allows (room for more, normal, no new mass runs or clearance only; on the fallback: normal, notify or clearance only) — incidents, and — if the command "ignore limits and finish" held — a section "Without limits". When the customer returns — a short summary in chat, in the customer's language.
 
 ### Scripts
 
@@ -502,7 +547,7 @@ All mechanics live in scripts rather than being described in `SKILL.md`. The scr
 - get a digest of a crew's result from its transcript and check the stage report;
 - determine the context use from a transcript;
 - compute the spend in dollars from transcripts (per work order, the foreman's own, the machine's) and estimate the rate;
-- check the limits, going through the sources in order;
+- check the limits, going through the sources in order, and project the week to its reset;
 - compute the issue order by critical path, the permitted number of crews and the window thresholds in force;
 - hold the heavy-run semaphore;
 - watch for events with a minimum of process launches and give the heartbeat;
@@ -557,7 +602,8 @@ Everything is bash and python3 with the standard library. JSON from herdr and bd
    - checking the decisions adopted from Gas City: a multi-line prompt, the session id together with `-w`, continuing a session after a failure, reading the work-order file outside the worktree (`--add-dir` must raise no prompt), the limit-screen texts, the number of processes per monitor poll, the crew-hooks candidate (with the customer's consent);
    - Enter after `stalled`: whether Enter on an empty composer submits a prompt suggestion, and whether a Claude Code setting turns prompt suggestions off (if one does, it goes into the crew settings file, never into the customer's config);
    - the toy work order's spend in dollars covers its crew session, a subagent and a `claude -p` run;
-   - the real JSON herdr prints for `agent prompt --wait` and `agent wait` (where the status is), the composer marker on a real crew pane, and the wording of a limit message's reset time and zone (only if a limit screen occurs naturally).
+   - the real JSON herdr prints for `agent prompt --wait` and `agent wait` (where the status is), the composer marker on a real crew pane, and the wording of a limit message's reset time and zone (only if a limit screen occurs naturally);
+   - the week projection on real sensor data: the week used, the burn, the hours to the reset, the customer's reserve, the projection and what it allows, compared with a computation by hand (nothing is spent to make the week rise).
 
    The limit-screen texts stay placeholders until this run; real texts are captured only if a limit screen occurs naturally, and a limit is never provoked. The customer's real projects are not used for the live run.
 
@@ -565,7 +611,7 @@ Everything is bash and python3 with the standard library. JSON from herdr and bd
 
 ## Decisions
 
-This document folds in the customer's amendments on crew scheduling (S), stale limits (L), patterns adopted from Gas City (G), the budget in API dollars (R) and English everywhere (E), and the foreman's rulings and answers given while the amendments were applied. The Gas City pattern labels P1–P16 are those of the plan.
+This document folds in the customer's amendments on crew scheduling (S), stale limits (L), patterns adopted from Gas City (G), the budget in API dollars (R), English everywhere (E) and the week by pace to its reset (W), and the foreman's rulings and answers given while the amendments were applied. The Gas City pattern labels P1–P16 are those of the plan.
 
 Decided by the customer:
 
@@ -582,6 +628,7 @@ Decided by the customer:
 - the foreman computes the number of crews itself: the minimum of ready tasks, the limit bound, Mac load and the ceiling `parallel_ceiling`; several crews on one site with disjoint files; a heavy-run semaphore;
 - issue by critical path; small tasks inside a work order the crew hands to its own subagents;
 - a night reserve of the 5h window for the morning (the table of day and night thresholds);
+- the week by pace to its reset (amendment W, 22 October): the fixed week thresholds give way to a projection of the week at its reset from the measured burn, leaving a reserve for the customer's working hours; a notice and no new mass runs near 95 %, clearance only near 100 %, and below a margin of 20 pp room for more — more crews or a proposed night or weekend shift, within the shift budget in dollars and the 5h rules; a configurable working calendar (Monday to Friday, 09:00–19:00, the customer's time) and a reserve of 1 pp per working hour, to be measured later from the customer's own sessions; the morning report shows the week used, the burn, the projection, the reserve and what the projection allows;
 - the command "ignore limits and finish" with the bounds from its section;
 - decisions adopted from Gas City: reliable sending without repeating the text, multi-line text as a file (P1); a limit screen is not a failure (P3); the stage report is checked by a script (P4); limits on approval and review cycles (P5); the session id is assigned in advance, and after a failure a crew continues its own session (P6); the catalogue of consent prompts (P7); an economical monitor, and a crew is hung only by two signs (P8); facts from git in the handover act, and a handover is not a restart (P9); the "issuing" record before the start (P13); crew names by herdr's rule (P12); the context window is the largest among the models (P14); one crew — one work order (P16);
 - the custom-API-key dialog at a crew — an urgent push notification to the customer;
@@ -624,7 +671,8 @@ Decided while the amendments were applied — the foreman's rulings and the auth
 - on overspend: over the shift budget nothing new is issued and every crew stops after its current step; a work order over its estimate stops after its current step and waits for the customer with a gate, while the others go on;
 - a work order is postponed only when another crew of the foreman already works on the same site on overlapping files (section "Work-order worktree"); the original wording postponed it whenever another crew worked on the site, which contradicted amendment S (several crews on one site with disjoint files);
 - identifier names the rulings did not give: the issue records `issuing`, `issued`, `not_issued`; the expected duration `duration_min` and `schedule.default_duration_min`, so that `estimate` means only the dollar estimate; acceptance criteria numbered C1…Cn;
-- the open details of the dollar budget: a default shift budget of $100, and default rates of 3.5 $/pp of the window and 10 $/pp of the week until the sensor estimate takes over (the foreman's answers at stop point A; the author had set $350, 5 $/pp and no week default); the rolling estimate's bounds (sensor readings only, same window, at least 10 minutes and 1 pp per interval, a 5-hour horizon for the window and the current weekly window for the week); an unknown model priced at the highest known price in each column; the foreman's own sessions counted in the shift's spend; a default of 60 heavy runs per stage (stop point A: a real stage needed 56; the author had set 20); every `bd`, `herdr` and `git` call of a script has a timeout from `defaults.json`, and a call past it is an error, never a hang (shift 3).
+- the open details of the dollar budget: a default shift budget of $100, and default rates of 3.5 $/pp of the window and 10 $/pp of the week until the sensor estimate takes over (the foreman's answers at stop point A; the author had set $350, 5 $/pp and no week default); the rolling estimate's bounds (sensor readings only, same window, at least 10 minutes and 1 pp per interval, a 5-hour horizon for the window and the current weekly window for the week); an unknown model priced at the highest known price in each column; the foreman's own sessions counted in the shift's spend; a default of 60 heavy runs per stage (stop point A: a real stage needed 56; the author had set 20); every `bd`, `herdr` and `git` call of a script has a timeout from `defaults.json`, and a call past it is an error, never a hang (shift 3);
+- amendment W, the foreman's rulings and the author's choices on what they left open: `projected = used + burn × hours to the reset + reserve`; the burn by the rate's interval discipline, from sensor readings of the current week only, over a horizon of 24 hours, the quiet stretch since the last interval counted in the hours; the reset time from the sensor only, the latest sensor reading of the week standing in for a stale one; the levels in a new `defaults.json` section `week` (alert 95 %, clearance only 100 %, a margin of 20 pp, the fallback 50 % / 70 %, the calendar and the reserve), the old `limits.seven_day` dropped; a clearance passes both levels; at the alert the crews at work go on and only new work orders without a clearance are held back; at clearance only the crews of work orders without a clearance stand with a gate instead of resuming by themselves, so the projection does not swing them on and off; one notice per level per week and no push; room for more lifts nothing; without a measured burn or a reset time the fixed 50 % / 70 % stay as a named fallback, with no margin case; an unknown week keeps every old rule; the command "ignore limits and finish" lifts the projection as it lifted the thresholds; the shift budget's +10 pp of the week stays; the speed in pp per hour is called the burn, never the rate.
 
 ## Left to the implementer
 
@@ -645,6 +693,7 @@ Decided while the amendments were applied — the foreman's rulings and the auth
 - Every work order needs its environment prepared in the worktree: this takes time, disk space and process launches the EDR watches. For projects with heavy dependencies (`node_modules`) it is noticeable.
 - If the foreman stops because of a failure, the monitor ends with it, and there is no daemon. This is the deliberate price of having no daemons. In the morning the customer sees it in the journal.
 - The rate is an estimate. Usage that leaves no transcript on this machine (other devices, the web app, another Claude Code config directory) raises the percentages without spend on the machine: the rate comes out lower and the pp higher — an error toward caution. Local sessions that do not draw on the subscription (a custom API key) raise the spend without the percentage: the rate comes out higher and the pp lower — an error toward overspend, against which the thresholds on measured percentages still hold.
+- The week projection extrapolates the burn of the last day over the days to the reset: a burst shows in it at once, and if it brings the projection to the alert, new work without a clearance waits until the pace drops, while the 5h thresholds bound the burst itself; a quiet stretch lowers it as the busy hours leave the horizon. The burn counts the customer's own sessions too, so the reserve keeps the customer's hours twice — an error toward caution, until the reserve is measured from the customer's own sessions.
 - Dollars at API prices are a proxy: the subscription may weigh models differently from API prices, so the rate can drift with the mix of models; the rolling estimate follows it with a delay.
 - The price table goes stale when prices change or models appear: an unknown model is priced at the highest known prices, but a known model at an old price is not caught — the table is updated by hand.
 - Computing the machine's spend reads every recent transcript under `~/.claude/projects/`: files older than the interval are skipped by their modification time, but a large history still costs disk reads.

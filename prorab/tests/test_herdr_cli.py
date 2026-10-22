@@ -378,6 +378,10 @@ class TestConsent(unittest.TestCase):
                              kind, kind)
             self.assertIn(kind, herdr_cli.CONSENT_NAMES)
 
+    def test_worktree_trust_refusal_is_a_trust_sign(self):
+        self.assertEqual(herdr_cli.consent_dialog(
+            fixture("consent", "worktree_trust_refused.txt")), "trust")
+
     def test_consent_only_in_bottom_block(self):
         self.assertIsNone(herdr_cli.consent_dialog(fixture("consent", "marker_in_scrollback.txt")))
         self.assertEqual(herdr_cli.consent_dialog(

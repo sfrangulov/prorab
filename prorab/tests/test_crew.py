@@ -362,8 +362,97 @@ class TestStart(CrewBase):
         r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
         self.assertEqual(r, {"status": "already_issued", "name": "a1", "pane_id": "w:p9"})
         self.assertFalse([c for c in self.calls() if c.startswith("pane split")])
-        self.j.issue_set("N1", "issuing", name="a1", pane="w:p9")
+        self.j.issue_set("N1", "issuing", name="b1", pane="w:p9")
         self.assertEqual(crew.start(SITE_DIR, "N1", "a1", "w:p1")["status"], "already_issued")
+
+    def routes_for_timeout(self, code="timeout"):
+        self.routes_for_start()
+        self.route("agent start a1", err(code), exit_code=1)
+
+    def assert_nothing_pressed(self):
+        for c in self.calls():
+            for word in ("send", "prompt", "keys"):
+                self.assertNotIn(word, c)
+
+    def test_start_timeout_with_trust_dialog_needs_trust(self):
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_timeout()
+        self.route("pane read w:p9 --source visible", fixture("consent", "trust.txt"))
+        r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "needs_trust", "pane_id": "w:p9"})
+        self.assert_nothing_pressed()
+        self.assertEqual(self.j.active, [])
+
+    def test_start_timeout_with_worktree_refusal_needs_trust(self):
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_timeout()
+        self.route("pane read w:p9 --source visible",
+                   fixture("consent", "worktree_trust_refused.txt"))
+        r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "needs_trust", "pane_id": "w:p9"})
+        self.assert_nothing_pressed()
+
+    def test_start_timeout_with_bare_shell_is_not_ready(self):
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_timeout()
+        self.route("pane read w:p9 --source visible", "~/projects/demo-app  main\n❯\n")
+        r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "not_ready", "pane_id": "w:p9"})
+
+    def test_start_other_error_code_still_raises(self):
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_timeout("cli_error")
+        with self.assertRaises(herdr_cli.HerdrError) as cm:
+            crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(cm.exception.code, "cli_error")
+
+    def issuing_in_p9(self, name="a1"):
+        self.j.issue_set("N1", "issuing", name=name, pane="w:p9", session_id="sess-first")
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+
+    def test_retry_while_consent_prompt_is_up_returns_it_again(self):
+        self.issuing_in_p9()
+        self.route("pane read w:p9 --source visible", fixture("consent", "trust.txt"))
+        r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "needs_trust", "pane_id": "w:p9"})
+        self.route("pane read w:p9 --source visible", fixture("consent", "mcp.txt"))
+        r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "needs_consent", "kind": "mcp", "pane_id": "w:p9"})
+        for c in self.calls():
+            self.assertFalse(c.startswith(("pane split", "agent start")), c)
+        self.assert_nothing_pressed()
+        self.assertEqual(self.j.active, [])
+
+    def test_retry_after_consent_answered_registers_the_crew(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1")
+        self.j.files = {"N1": ["x"]}
+        self.issuing_in_p9()
+        self.route("pane read w:p9 --source visible", "Claude Code\n❯ \n")
+        r = crew.start(repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["status"], "started")
+        self.assertEqual((r["pane_id"], r["session_id"]), ("w:p9", "sess-first"))
+        self.assertEqual(r["branch"], "prorab/N1")
+        self.assertEqual(os.path.realpath(r["worktree"]), os.path.realpath(wt))
+        self.assertEqual(self.j.active, ["a1"])
+        self.assertEqual(self.j.kv["crew.a1.work_order"], "N1")
+        self.assertEqual(self.j.kv["crew.a1.pane"], "w:p9")
+        self.assertEqual(self.j.kv["crew.a1.site"], repo)
+        self.assertEqual(self.j.kv["crew.a1.branch"], "prorab/N1")
+        self.assertEqual(self.j.kv["crew.a1.session"], "sess-first")
+        self.assertEqual(os.path.realpath(json.loads(self.j.kv["issue.N1"])["worktree"]),
+                         os.path.realpath(wt))
+        self.assertEqual(self.j.act_log[0][:2], ("N1", "answer"))
+        self.assertIn("crew a1 started: pane w:p9", self.j.act_log[0][2])
+        for c in self.calls():
+            self.assertFalse(c.startswith(("pane split", "agent start")), c)
+        self.assert_nothing_pressed()
+
+    def test_issuing_under_another_name_is_already_issued(self):
+        self.issuing_in_p9(name="b1")
+        r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "already_issued", "name": "b1", "pane_id": "w:p9"})
+        self.assertEqual(self.j.active, [])
 
     def test_start_continues_when_issued_pane_is_empty(self):
         self.j.issue_set("N1", "issued", name="a1", pane="w:p9")

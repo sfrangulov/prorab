@@ -1,0 +1,5 @@
+❯ claude --session-id 00000000-0000-4000-8000-000000000000 --add-dir /home/user/.cache/prorab/work-orders -w prorab-N1
+Error creating worktree: Workspace trust not yet accepted. Run `claude` once
+in this directory and accept the trust dialog, then retry with --worktree.
+ /home/user/projects/demo-app  main
+❯

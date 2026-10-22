@@ -252,6 +252,12 @@ def start(site_path, work_order, name, caller_pane):
     rec = journal.issue(work_order)
     if rec and rec.get("state") in ("issuing", "issued") and rec.get("pane") \
             and herdr_cli.agent_by_pane(rec["pane"]) is not None:
+        if rec.get("state") == "issuing" and rec.get("name") == name and rec.get("session_id"):
+            # this start's own pane, now holding an agent: the customer answered a consent
+            # prompt there (or is still to); either way no new pane and no new agent
+            pane = rec["pane"]
+            return (_consent_result(herdr_cli.pane_visible(pane), pane)
+                    or _register_started(site_path, work_order, name, pane, rec["session_id"]))
         return {"status": "already_issued", "name": rec.get("name"), "pane_id": rec["pane"]}
     active = journal.crews()
     if len(active) >= journal.machine()["parallel_ceiling"]:
@@ -278,11 +284,16 @@ def start(site_path, work_order, name, caller_pane):
                       + _claude_args(("--session-id", session_id), ("--add-dir", _files_dir()),
                                      ("-w", "prorab-%s" % work_order)), timeout_s=90)
     except herdr_cli.HerdrError as e:
-        if e.code != "agent_not_ready":
+        if e.code not in ("agent_not_ready", "timeout"):
             raise
         return (_consent_result(herdr_cli.pane_visible(pane), pane)
                 or {"status": "not_ready", "pane_id": pane})
+    return _register_started(site_path, work_order, name, pane, session_id)
 
+
+def _register_started(site_path, work_order, name, pane, session_id):
+    """The tail of `start` once Claude Code runs in `pane`: find the worktree, name the
+    branch, record the issue, register the crew."""
     wt = _find_worktree(site_path, work_order)
     worktree = wt["path"] if wt else None
     branch = wt["branch"] if wt else None

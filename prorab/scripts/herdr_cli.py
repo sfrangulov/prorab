@@ -140,7 +140,8 @@ def bottom_block(visible, n):
 # consent prompt be answered as a question.
 CONSENT_KINDS = (
     ("api_key", ("use this api key",)),
-    ("trust", ("trust this folder", "quick safety check", "do you trust the files")),
+    ("trust", ("trust this folder", "quick safety check", "do you trust the files",
+               "workspace trust not yet accepted")),
     ("bypass_warning", ("bypass permissions mode",)),
     ("claude_md_imports", ("claude.md file imports", "external claude.md")),
     ("mcp", ("mcp server",)),

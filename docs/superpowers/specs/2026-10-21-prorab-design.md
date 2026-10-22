@@ -260,8 +260,8 @@ A model missing from the table is priced as the most expensive known one: the hi
 
 - an interval counts only between two sensor readings of the same window (the same `resets_at` within the sensor's 10-minute tolerance; never across a reset), at least 10 minutes apart (`schedule.burn_min_span_s`, the same minimum span the window's consumption speed of section "Crew scheduling" uses), with a rise of at least 1 pp (below that, rounding dominates);
 - the rate is the total spend divided by the total rise over the counted intervals within the horizon: the last 5 hours for the window, the current weekly window for the week; it is re-estimated at most every 10 minutes;
-- until the first estimate the window rate is the default from `defaults.json`, 5 $/pp; the week rate has no default — it stays unknown, never guessed, and meanwhile the week is checked only by the measured rise of its percentage;
-- without the sensor the rate is not estimated (status-line readings of idle panes are frozen and would distort the rise): the window keeps the default, the week stays unknown.
+- until the first estimate each rate is its default from `defaults.json`: 3.5 $/pp for the window and 10 $/pp for the week (the foreman's measurement of 22 October gave about $10 per pp of the week); a default is always named as a default in the journal and the report, never as an estimate, and the week's thresholds are still checked against its measured percentage;
+- without the sensor the rate is not estimated (status-line readings of idle panes are frozen and would distort the rise): both windows keep their defaults.
 
 The current rate and how it was obtained (estimated or default, over which intervals) go into the journal — with the spend in every stage act and in the foreman's handover act — and into the morning report together with the machine's spend over the shift; the monitor log keeps every estimate. Before issuing a work order the foreman converts its estimate into pp of the window and, once the week rate is known, of the week, and checks that it fits in what is left before the thresholds (section "Five-hour window thresholds") and in the shift budget. The thresholds themselves are always checked against measured percentages, not against the rate.
 
@@ -269,7 +269,7 @@ The current rate and how it was obtained (estimated or default, over which inter
 
 | Item | Default |
 |---|---|
-| spend of the shift at API prices | $350 |
+| spend of the shift at API prices | $100 |
 | rise of the Claude Max week limit during the shift | +10 pp |
 
 **Machine protection — counts, not budget:**
@@ -278,7 +278,7 @@ The current rate and how it was obtained (estimated or default, over which inter
 |---|---|
 | ceiling on simultaneous crews (`parallel_ceiling`), a safety fuse | 6 |
 | heavy-run slots for the whole machine (`heavy_slots`) | 2 |
-| heavy runs per stage | 20 |
+| heavy runs per stage | 60 |
 
 A work order may set its own heavy-run limit per stage; a stage that needs more heavy runs than its limit needs a clearance, and without one the crew stops at the limit and the foreman raises a gate to the customer. Sessions and agent runs are not budget items.
 
@@ -429,6 +429,8 @@ The data is updated while at least one Claude Code session is open, and while th
 
 **Unknown week.** If no pane shows a week bar and there is no sensor, the week percentage is unknown, not zero. If it stays unknown for more than 30 minutes, the monitor raises the event `blind_week`, and the foreman tells the customer once. At night, with an unknown week, no new mass runs are issued.
 
+**Right after a 5h reset.** For about two minutes after a known 5h `resets_at`, the fresh sensor files lack `five_hour` while the older ones are already stale (seen on 22 October). In that window the monitor raises no `blind` (`monitor.reset_grace_s`, 120 s); every other reading goes on as usual.
+
 ### Crew handover
 
 1. When the threshold is reached (40 % of the window or 500 000 tokens, whichever is lower), the crew stops starting new long runs: the foreman tells it so at once.
@@ -509,7 +511,7 @@ All mechanics live in scripts rather than being described in `SKILL.md`. The scr
 - install and remove the sensor;
 - compose the morning report from the journal.
 
-Everything is bash and python3 with the standard library. JSON from herdr and bd is parsed in Python.
+Everything is bash and python3 with the standard library. JSON from herdr and bd is parsed in Python. Every `bd`, `herdr` and `git` call has a timeout from `defaults.json` (`timeouts.*`): a call that runs past it raises an error that names the command and the timeout, so a stuck call never blocks the foreman, the monitor or a test run.
 
 ## Safety rules
 
@@ -572,7 +574,7 @@ Decided by the customer:
 - the name `prorab`, the foreman's office `~/projects/prorab`, building-site terminology (English terms with the customer's Russian words alongside, section "Glossary");
 - everything generated or shipped is in English, identifiers included; trigger phrases in English and in Russian; the foreman answers in the customer's language (section "Language");
 - the foreman draws up estimates within the shift budget; there is a default budget, and the customer can change it;
-- estimates and the budget are in US dollars at API prices; the conversion into pp of the window and of the week goes by a rate estimated from the sensor (5 $/pp of the window until the first estimate); counts stay only as machine protection (`heavy_slots`, the heavy-run limit per stage, `parallel_ceiling`); the foreman's own research and one-off subagents are costed in dollars too; a crew handover at about 40 % of the context; overspend — stop and a gate to the customer;
+- estimates and the budget are in US dollars at API prices; the conversion into pp of the window and of the week goes by a rate estimated from the sensor (until the first estimate, the defaults: 3.5 $/pp of the window and 10 $/pp of the week); counts stay only as machine protection (`heavy_slots`, the heavy-run limit per stage, `parallel_ceiling`); the foreman's own research and one-off subagents are costed in dollars too; a crew handover at about 40 % of the context; overspend — stop and a gate to the customer;
 - beads are required;
 - the main thing is hours of work without the customer;
 - the limit sensor is optional and is installed with consent on the first run;
@@ -622,7 +624,7 @@ Decided while the amendments were applied — the foreman's rulings and the auth
 - on overspend: over the shift budget nothing new is issued and every crew stops after its current step; a work order over its estimate stops after its current step and waits for the customer with a gate, while the others go on;
 - a work order is postponed only when another crew of the foreman already works on the same site on overlapping files (section "Work-order worktree"); the original wording postponed it whenever another crew worked on the site, which contradicted amendment S (several crews on one site with disjoint files);
 - identifier names the rulings did not give: the issue records `issuing`, `issued`, `not_issued`; the expected duration `duration_min` and `schedule.default_duration_min`, so that `estimate` means only the dollar estimate; acceptance criteria numbered C1…Cn;
-- the open details of the dollar budget: a default shift budget of $350; no default week rate; the rolling estimate's bounds (sensor readings only, same window, at least 10 minutes and 1 pp per interval, a 5-hour horizon for the window and the current weekly window for the week); an unknown model priced at the highest known price in each column; the foreman's own sessions counted in the shift's spend; a default of 20 heavy runs per stage.
+- the open details of the dollar budget: a default shift budget of $100, and default rates of 3.5 $/pp of the window and 10 $/pp of the week until the sensor estimate takes over (the foreman's answers at stop point A; the author had set $350, 5 $/pp and no week default); the rolling estimate's bounds (sensor readings only, same window, at least 10 minutes and 1 pp per interval, a 5-hour horizon for the window and the current weekly window for the week); an unknown model priced at the highest known price in each column; the foreman's own sessions counted in the shift's spend; a default of 60 heavy runs per stage (stop point A: a real stage needed 56; the author had set 20); every `bd`, `herdr` and `git` call of a script has a timeout from `defaults.json`, and a call past it is an error, never a hang (shift 3).
 
 ## Left to the implementer
 

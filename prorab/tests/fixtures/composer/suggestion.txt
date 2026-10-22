@@ -1,7 +1,7 @@
 ● Ready for the next work order.
 
 ────────────────────────────────────────────────────────────────────────────
-❯ run the tests again
+❯ run the tests again
 ────────────────────────────────────────────────────────────────────────────
   Opus 5.5 · xhigh │ ▓▓░░░░░░░░ 17.0% │ ⎇ main (+0,-0)
   ⏵⏵ bypass permissions on (shift+tab to cycle)

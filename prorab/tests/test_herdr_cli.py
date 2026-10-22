@@ -277,11 +277,23 @@ class TestComposer(unittest.TestCase):
         self.assertIsNone(herdr_cli.composer_text("out\n❯ hi\nstatus\n"))
         self.assertIsNone(herdr_cli.composer_text("out\n> hi\n%s\n" % rule))
 
+    def test_composer_text_after_no_break_space(self):
+        # Claude Code 2.1.307 puts U+00A0, not a space, after the marker
+        rule = "─" * 40
+        self.assertEqual(herdr_cli.composer_text(fixture("composer", "suggestion.txt")),
+                         "run the tests again")
+        self.assertEqual(herdr_cli.composer_text("out\n%s\n❯\xa0hi there\n%s\n" % (rule, rule)),
+                         "hi there")
+        self.assertEqual(herdr_cli.composer_text("out\n%s\n❯\xa0\n%s\n" % (rule, rule)), "")
+        self.assertEqual(herdr_cli.composer_text("out\n%s\n>\xa0hi\n%s\n" % (rule, rule)), "hi")
+
     def test_choice_dialog_line_is_not_a_composer(self):
         self.assertIsNone(herdr_cli.composer_text(DIALOG))
         rule = "─" * 40
         self.assertIsNone(herdr_cli.composer_text(
             "%s\n❯ 1. Yes\n%s\n  2. No\n" % (rule, rule)))
+        self.assertIsNone(herdr_cli.composer_text(
+            "%s\n❯\xa01. Yes\n%s\n  2. No\n" % (rule, rule)))
 
 
 class TestRecoverStalled(FakeBase):
@@ -327,6 +339,16 @@ class TestRecoverStalled(FakeBase):
 
     def test_recover_stalled_empty_composer_presses_nothing(self):
         self.setup_agent("done", "empty.txt")
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
+        self.assertEqual(self.keys(), [])
+
+    def test_recover_stalled_no_break_space_composer(self):
+        # the fixtures carry the real U+00A0 rendering: ours is found, a suggestion is not
+        self.setup_agent("done", "ours.txt")
+        self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "accepted")
+        self.assertEqual(self.keys(), ["agent send-keys a1 enter"])
+        open(os.path.join(self.dir, "calls.log"), "w").close()
+        self.setup_agent("done", "suggestion.txt")
         self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
         self.assertEqual(self.keys(), [])
 

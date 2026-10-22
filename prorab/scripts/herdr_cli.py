@@ -173,7 +173,8 @@ def consent_dialog(visible, tail_lines=None):
     return None
 
 
-_COMPOSER = re.compile(r"^[❯>](?: (.*))?$")
+# Claude Code 2.1.307 renders a no-break space (U+00A0) after the marker, older ones a space
+_COMPOSER = re.compile(r"^[❯>](?:[ \u00a0](.*))?$")
 _COMPOSER_RULE = re.compile(r"^\s*[─━]{3,}\s*$")
 _CHOICE_ROW = re.compile(r"^\d+\.\s")
 

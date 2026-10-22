@@ -779,7 +779,8 @@ def answer(name, choice=None, text=None):
 
 def wait_limit(name):
     """On a limit screen: choose "Stop and wait" (never "Upgrade") and note the reset time.
-    Never counts as a restart."""
+    Moves first, re-reads the screen, and presses Enter alone only when "Stop and wait" is
+    highlighted; otherwise "unknown_limit_dialog". Never counts as a restart."""
     d = _defaults.load()
     visible = herdr_cli.agent_visible(name)
     found = limits.limit_screen(visible, d)
@@ -788,7 +789,17 @@ def wait_limit(name):
     if found["kind"] == "limit_choice":
         delta = found["wait_option"] - found["highlighted"]
         keys = ["down"] * delta if delta > 0 else ["up"] * -delta
-        herdr_cli.send_keys(name, keys + ["enter"])
+        if keys:
+            herdr_cli.send_keys(name, keys)
+        # Enter only after the screen shows "Stop and wait" highlighted: a move that landed
+        # elsewhere must never confirm "Upgrade"
+        again = limits.limit_screen(herdr_cli.agent_visible(name), d)
+        wait = d["limits"]["limit_choice"]["wait"].lower()
+        if (again is None or again["kind"] != "limit_choice"
+                or again["highlighted"] != again["wait_option"]
+                or not again["options"][again["highlighted"]].lower().startswith(wait)):
+            return {"status": "unknown_limit_dialog"}
+        herdr_cli.send_keys(name, ["enter"])
     elif herdr_cli.choice_state(herdr_cli.bottom_block(visible, d["screen"]["tail_lines"])):
         return {"status": "unknown_limit_dialog"}
     resets_at = found["resets_at"]

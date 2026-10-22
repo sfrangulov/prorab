@@ -978,31 +978,62 @@ class TestWaitLimit(CrewBase):
     def keys(self):
         return [c for c in self.calls() if c.startswith("agent send-keys")]
 
+    def screens(self):
+        """(Upgrade highlighted, Stop and wait highlighted, wait listed second and
+        highlighted on Upgrade, wait listed second and highlighted on it)."""
+        up = fixture("limit_choice.txt")
+        stop = up.replace("  1. Stop", "❯ 1. Stop").replace("❯ 2. Upgrade", "  2. Upgrade")
+        swapped_up = up.replace("  1. Stop and wait for limit to reset", "❯ 1. Upgrade your plan") \
+            .replace("❯ 2. Upgrade your plan", "  2. Stop and wait for limit to reset")
+        swapped_stop = swapped_up.replace("❯ 1. Upgrade", "  1. Upgrade") \
+            .replace("  2. Stop and wait", "❯ 2. Stop and wait")
+        return up, stop, swapped_up, swapped_stop
+
+    def reads(self):
+        return [c for c in self.calls() if c.startswith("agent read")]
+
     def test_wait_limit_presses_stop_and_wait_only(self):
-        self.route("agent read a1 --source visible", fixture("limit_choice.txt"))
+        up, stop, _, _ = self.screens()
+        self.route_seq("agent read a1 --source visible", [up, stop, stop])
         r = crew.wait_limit("a1")
         self.assertEqual(r["status"], "waiting")
         self.assertIsInstance(r["resets_at"], int)
-        # "Upgrade" is highlighted: move up to "Stop and wait", then enter, in that order
-        self.assertEqual(self.keys(), ["agent send-keys a1 up enter"])
+        # "Upgrade" is highlighted: move up, re-read the screen, then enter alone
+        self.assertEqual(self.keys(), ["agent send-keys a1 up", "agent send-keys a1 enter"])
         self.assertEqual(self.j.restarts, {})
         self.assertEqual(self.j.kv["crew.a1.limit_until"], str(r["resets_at"]))
         self.assertEqual(self.j.act_log[0][:2], ("N1", "answer"))
         self.assertTrue(self.j.act_log[0][2].startswith(
             "crew waits for the limit reset until "))
 
+    def test_wait_limit_moves_then_rereads_then_enter(self):
+        up, stop, _, _ = self.screens()
+        self.route_seq("agent read a1 --source visible", [up, stop])
+        crew.wait_limit("a1")
+        order = [c.split(" ")[1] for c in self.calls() if c.startswith(("agent read", "agent send-keys"))]
+        self.assertEqual(order, ["read", "send-keys", "read", "send-keys"])
+        self.assertEqual(self.keys(), ["agent send-keys a1 up", "agent send-keys a1 enter"])
+
+    def test_wait_limit_no_enter_when_highlight_did_not_move(self):
+        up, _, _, _ = self.screens()
+        self.route_seq("agent read a1 --source visible", [up, up])
+        self.assertEqual(crew.wait_limit("a1"), {"status": "unknown_limit_dialog"})
+        self.assertEqual(self.keys(), ["agent send-keys a1 up"])  # the move only, never enter
+        self.assertEqual(self.j.act_log, [])
+        self.assertNotIn("crew.a1.limit_until", self.j.kv)
+
     def test_wait_limit_moves_down_and_enters_in_place(self):
-        screen = fixture("limit_choice.txt")
-        down = screen.replace("  1. Stop", "❯ 1. Stop").replace("❯ 2. Upgrade", "  2. Upgrade")
-        self.route("agent read a1 --source visible", down)
+        _, stop, _, _ = self.screens()
+        self.route_seq("agent read a1 --source visible", [stop, stop])
         crew.wait_limit("a1")
-        self.assertEqual(self.keys(), ["agent send-keys a1 enter"])
-        swapped = screen.replace("  1. Stop and wait for limit to reset", "❯ 1. Upgrade your plan") \
-            .replace("❯ 2. Upgrade your plan", "  2. Stop and wait for limit to reset")
-        self.route("agent read a1 --source visible", swapped)
-        os.remove(os.path.join(self.dir, "calls.log"))
+        self.assertEqual(self.keys(), ["agent send-keys a1 enter"])  # re-read once, then enter
+        self.assertEqual(len(self.reads()), 2)
+
+    def test_wait_limit_moves_down_when_wait_is_listed_after_upgrade(self):
+        _, _, swapped_up, swapped_stop = self.screens()
+        self.route_seq("agent read a1 --source visible", [swapped_up, swapped_stop])
         crew.wait_limit("a1")
-        self.assertEqual(self.keys(), ["agent send-keys a1 down enter"])
+        self.assertEqual(self.keys(), ["agent send-keys a1 down", "agent send-keys a1 enter"])
 
     def test_wait_limit_plain_message_presses_nothing(self):
         self.route("agent read a1 --source visible", fixture("limit_screen.txt"))

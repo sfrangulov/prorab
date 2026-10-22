@@ -287,7 +287,20 @@ def _same_pane(rec, info):
 
 
 def _has_agent(pane_id, info):
-    return herdr_cli.agent_by_pane(pane_id) is not None or bool(info.get("agent"))
+    """Whether an agent runs in the pane; when herdr cannot say, True (the pane is left alone)."""
+    try:
+        return herdr_cli.agent_by_pane(pane_id) is not None or bool(info.get("agent"))
+    except herdr_cli.HerdrError:
+        return True
+
+
+def _close_pane(pane_id):
+    """`pane close`, best-effort: False when herdr fails (the pane stays recorded)."""
+    try:
+        herdr_cli.run_ack(["pane", "close", pane_id])
+        return True
+    except herdr_cli.HerdrError:
+        return False
 
 
 def _spares_of(rec):
@@ -320,14 +333,15 @@ def _take_pane(work_order, site_path, caller_pane):
         info = _pane_info(cur["pane"])
         if not _same_pane(cur, info):
             cur = None  # gone, or the id was recycled: forgotten, never reused or closed
-        elif _has_agent(cur["pane"], info):
-            spares.append(cur)
+        elif _has_agent(cur["pane"], info) or not info.get("foreground_cwd"):
+            spares.append(cur)  # an agent, or a cwd herdr does not show: left alone
             cur = None
         elif _same_dir(info.get("foreground_cwd"), site_path):
             _record_panes(work_order, rec, cur, spares)
             return cur["pane"]
         else:
-            herdr_cli.run_ack(["pane", "close", cur["pane"]])
+            if not _close_pane(cur["pane"]):
+                spares.append(cur)
             cur = None
     pane, ident = _open_pane(caller_pane, site_path)
     _record_panes(work_order, rec, dict(ident, pane=pane), spares)
@@ -356,8 +370,10 @@ def close_start_panes(work_order):
         if _has_agent(e["pane"], info):
             kept.append(e)
             continue
-        herdr_cli.run_ack(["pane", "close", e["pane"]])
-        closed.append(e["pane"])
+        if _close_pane(e["pane"]):
+            closed.append(e["pane"])
+        else:
+            kept.append(e)
     if closed or len(kept) != len(entries):
         was_current = bool(rec.get("pane")) and entries[0] in kept
         _record_panes(work_order, rec, entries[0] if was_current else None,

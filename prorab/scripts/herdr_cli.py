@@ -91,7 +91,7 @@ def run_ack(args, timeout_s=None):
         err = data["error"]
         raise HerdrError(err.get("code", "cli_error"),
                          "%s: %s" % (where, err.get("message") or err.get("code", "")))
-    return data
+    return data if isinstance(data, dict) else {"text": out[:200]}
 
 
 def check_env():

@@ -118,6 +118,10 @@ class TestRunAck(FakeBase):
         self.assertEqual(herdr_cli.run_ack(["pane", "close", "w:p1"])["result"],
                          {"closed": True})
 
+    def test_run_ack_non_object_json_is_wrapped(self):
+        self.route("pane close w:p1", "true")
+        self.assertEqual(herdr_cli.run_ack(["pane", "close", "w:p1"]), {"text": "true"})
+
     def test_run_ack_failure_names_args_rc_and_stderr(self):
         self.route("pane close w:p1", "", exit_code=1, stderr="boom")
         with self.assertRaises(herdr_cli.HerdrError) as cm:

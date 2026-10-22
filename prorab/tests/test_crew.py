@@ -1897,17 +1897,20 @@ class TestStartPanes(CrewBase):
         self.assertFalse([c for c in self.later() if c.startswith("pane close")])
         self.assertFalse(self.j.issue("N1").get("spare"))
 
-    def test_recycled_pane_id_is_not_closed(self):
-        for other in ({"terminal": "term-new"}, {"tab": "w:2"}):
-            with self.subTest(other=other):
-                self.setUp()
-                self.splits(split_pane("w:p9"), split_pane("w:p10"))
-                self.first_needs_trust()
-                self.pane_get("w:p9", cwd="/home/user/elsewhere", **other)
-                r = crew.start(self.repo, "N1", "a1", "w:p1")
-                self.assertEqual(r["pane_id"], "w:p10")
-                self.assertFalse([c for c in self.later() if c.startswith("pane close")])
-                self.assertEqual(crew.close_start_panes("N1"), [])
+    def check_recycled(self, **other):
+        self.splits(split_pane("w:p9"), split_pane("w:p10"))
+        self.first_needs_trust()
+        self.pane_get("w:p9", cwd="/home/user/elsewhere", **other)
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p10")
+        self.assertFalse([c for c in self.later() if c.startswith("pane close")])
+        self.assertEqual(crew.close_start_panes("N1"), [])
+
+    def test_recycled_terminal_is_not_closed(self):
+        self.check_recycled(terminal="term-new")
+
+    def test_recycled_tab_is_not_closed(self):
+        self.check_recycled(tab="w:2")
 
     def test_recycled_pane_id_is_not_closed_by_cleanup(self):
         self.splits(split_pane("w:p9"))
@@ -1956,7 +1959,56 @@ class TestStartPanes(CrewBase):
         calls = self.calls()
         self.assertNotIn("pane close w:p5", calls)
         self.assertLess(calls.index("pane get w:p6"), calls.index("pane close w:p6"))
+        self.assertLess(calls.index("agent list"), calls.index("pane close w:p6"))
         self.assertEqual(self.j.issue("N1")["spare"], [ident("w:p5")])
+
+    def test_unknown_cwd_is_never_closed(self):
+        self.splits(split_pane("w:p9"), split_pane("w:p10"))
+        self.first_needs_trust()
+        self.route("pane get w:p9", ok({"pane": {"pane_id": "w:p9", "terminal_id": "term-w:p9",
+                                                 "tab_id": "w:1"}}))
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p10")
+        self.assertFalse([c for c in self.later() if c.startswith("pane close")])
+        self.assertEqual([x["pane"] for x in self.j.issue("N1")["spare"]], ["w:p9"])
+
+    def test_failed_close_in_a_start_goes_on_with_a_new_split(self):
+        self.splits(split_pane("w:p9"), split_pane("w:p10"))
+        self.first_needs_trust()
+        self.pane_get("w:p9", cwd="/home/user/elsewhere")
+        self.route("pane close w:p9", err("pane_busy"), exit_code=1)
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p10")
+        self.assertEqual([x["pane"] for x in self.j.issue("N1")["spare"]], ["w:p9"])
+
+    def stale_record(self):
+        self.j.kv.update({"crew.a1.work_order": "N1", "crew.a1.pane": "w:p9"})
+        self.j.active = ["a1"]
+        self.j.issue_set("N1", "issued", pane="w:p9",
+                         pane_identity={"terminal": "term-w:p9", "tab": "w:1"})
+        self.pane_get("w:p9")
+        self.route("pane close w:p9", err("pane_busy"), exit_code=1)
+
+    def test_failed_close_does_not_abort_stop(self):
+        self.stale_record()
+        r = crew.stop("a1", "N1")
+        self.assertEqual(r["status"], "stopped")
+        self.assertNotIn("crew.a1.work_order", self.j.kv)
+        self.assertEqual(self.j.active, [])
+
+    def test_failed_close_does_not_abort_cleanup(self):
+        repo = self.repo
+        wt = self.add_worktree(repo, "N1")
+        self.stale_record()
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "removed")  # the worktree step ran
+        self.assertEqual(self.j.issue("N1")["pane"], "w:p9")
+
+    def test_agent_check_failure_leaves_the_pane(self):
+        self.stale_record()
+        self.route("agent list", err("boom"), exit_code=1)
+        self.assertEqual(crew.close_start_panes("N1"), [])
+        self.assertNotIn("pane close w:p9", self.calls())
 
 
 class TestExitDialog(CrewBase):

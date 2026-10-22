@@ -747,6 +747,30 @@ class TestJournalG(JournalBase):
         self.assertEqual(list(out), ["wo-3"])
 
 
+class TestOverrideHistory(JournalBase):
+    def test_history_written_on_set_and_closed_on_expiry(self):
+        journal.set_override("g1")
+        hist = journal.override_history()
+        self.assertEqual([(h["goal"], h["until"]) for h in hist], [("g1", None)])
+        self.assertIsInstance(hist[0]["since"], int)
+        n = new_work_order("T", goal="g1")
+        st = journal.create_stage(n, "S", "b")
+        journal.start_stage(st)
+        journal.accept_stage(st, "ok")
+        journal.bd(["close", n])
+        self.assertIsNone(journal.override())
+        hist = journal.override_history()
+        self.assertEqual(len(hist), 1)
+        self.assertGreaterEqual(hist[0]["until"], hist[0]["since"])
+
+    def test_history_closed_when_the_customer_cancels(self):
+        journal.set_override("g1")
+        journal.clear_override()
+        self.assertIsNotNone(journal.override_history()[0]["until"])
+        journal.set_override("g2")
+        self.assertEqual([h["until"] is None for h in journal.override_history()], [False, True])
+
+
 class TestJournalLabels(JournalBase):
     def test_add_label_and_labels(self):
         n = new_work_order()

@@ -298,8 +298,8 @@ class TestReport(ShiftBase):
     def test_report_override_section(self):
         self.start_shift()
         since = T0 + 100
-        journal.kv_set(journal.OVERRIDE_KEY, json.dumps(
-            {"goal": "G1", "since": since, "source": "customer's words"}))
+        journal.kv_set(journal.OVERRIDE_HISTORY_KEY, json.dumps(
+            [{"goal": "G1", "since": since, "until": None, "source": "customer's words"}]))
         self.write_log([
             {"ts": T0 + 50, "five_hour": 10, "seven_day": 20, "source": "sensor"},
             {"ts": T0 + 150, "five_hour": 20, "seven_day": 22, "source": "sensor"},
@@ -313,6 +313,57 @@ class TestReport(ShiftBase):
         self.assertIn("5h window: +22 pp", text)  # 10 + 15 + 7 (the drop is skipped)
         self.assertIn("week: +4 pp", text)  # 26 - 22
         self.assertIn("$8.00", text)
+
+    def test_report_override_survives_expiry(self):
+        self.start_shift()
+        n = new_work_order("Importer", goal="G1")
+        s = self.stage(n)
+        journal.start_stage(s)
+        journal.accept_stage(s, "Acceptance")
+        journal.bd(["close", n])
+        journal.set_override("G1")
+        self.assertIsNone(journal.override())  # the goal is done: the record is gone
+        self.assertIsNone(journal.kv_get(journal.OVERRIDE_KEY))
+        hist = journal.override_history()
+        self.assertEqual(len(hist), 1)
+        self.assertIsNotNone(hist[0]["until"])
+        hist[0].update(since=T0 + 100, until=T0 + 400)
+        journal.kv_set(journal.OVERRIDE_HISTORY_KEY, json.dumps(hist))
+        self.write_log([
+            {"ts": T0 + 150, "five_hour": 20, "seven_day": 22, "source": "sensor"},
+            {"ts": T0 + 250, "five_hour": 35, "seven_day": 24, "source": "sensor"},
+            {"ts": T0 + 900, "five_hour": 90, "seven_day": 50, "source": "sensor"}])
+        text = self.report_text()
+        free = text.split("## Without limits")[1].split("\n## ")[0]
+        self.assertIn("G1", free)
+        self.assertIn(" since ", free)
+        self.assertIn(" until ", free)
+        self.assertIn("5h window: +15 pp", free)  # the reading after the expiry does not count
+        self.assertIn("week: +2 pp", free)
+
+    def test_report_override_before_the_shift_is_not_shown(self):
+        self.start_shift()
+        journal.kv_set(journal.OVERRIDE_HISTORY_KEY, json.dumps(
+            [{"goal": "G0", "since": T0 - 5000, "until": T0 - 1000, "source": "customer's words"}]))
+        self.assertNotIn("## Without limits", self.report_text())
+
+    def test_report_incidents_unknown_without_the_monitor_log(self):
+        self.start_shift()
+        text = self.report_text()
+        self.assertIn("Incidents unknown: monitor log missing", text)
+        self.assertNotIn("No incidents.", text)
+
+    def test_report_incidents_unknown_with_an_unreadable_log(self):
+        self.start_shift()
+        os.makedirs(os.path.join(self.logs, "monitor.log"))  # a directory cannot be read
+        text = self.report_text()
+        self.assertIn("Incidents unknown: monitor log unreadable", text)
+
+    def test_report_no_incidents_with_a_readable_log(self):
+        self.start_shift()
+        self.write_log([{"ts": T0 + 60, "events": []}])
+        text = self.report_text()
+        self.assertIn("No incidents.", text)
 
     def test_report_incidents(self):
         self.start_shift()
@@ -411,6 +462,39 @@ class TestHandoff(ShiftBase):
         self.assertEqual(res["status"], "timeout")
         self.assertIsNone(journal.kv_get("prorab:handoff"))
         self.assertEqual(journal.kv_get("prorab:active"), "w:p1")
+
+    def test_handoff_timeout_race_new_foreman_takes_the_lock_at_the_deadline(self):
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p1")
+        real_clear = journal.kv_clear
+
+        def clear(key):
+            if key == "prorab:handoff":  # the new foreman acquires just before the withdrawal
+                journal.kv_set("prorab:active", "w:p9")
+            real_clear(key)
+        with mock.patch.object(journal, "kv_clear", clear):
+            res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
+        self.assertEqual(res["status"], "handed_over")
+        self.assertEqual(journal.kv_get("prorab:active"), "w:p9")
+
+    def test_handoff_timeout_race_handoff_consumed_by_the_new_foreman(self):
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p1")
+        real_get = journal.kv_get
+        calls = []
+
+        def get(key):
+            if key == "prorab:active":
+                calls.append(1)
+                if len(calls) == 1:  # the loop's read sees the old holder ...
+                    return "w:p1"
+                return "w:p1"        # ... and so does everything after it
+            if key == "prorab:handoff" and len(calls) >= 1:
+                return None  # ... but the handoff was consumed meanwhile
+            return real_get(key)
+        with mock.patch.object(journal, "kv_get", get):
+            res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
+        self.assertEqual(res["status"], "handed_over")
 
     def test_handoff_prorab_start_failure(self):
         self.routes_for_handoff()

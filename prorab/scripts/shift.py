@@ -215,8 +215,14 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
             return {"status": "handed_over", "new_pane": pane, "bead": bead,
                     "delivery": delivery}
         if time.monotonic() >= deadline:
+            # the new foreman may take the lock between the read above and the withdrawal:
+            # a consumed handoff or a changed holder after the withdrawal is a handover
+            consumed = journal.kv_get("prorab:handoff") != pane
             journal.kv_clear("prorab:handoff")
-            return {"status": "timeout", "new_pane": pane, "bead": bead, "delivery": delivery}
+            holder = journal.kv_get("prorab:active")
+            status = ("handed_over" if consumed or (holder is not None and holder != caller_pane)
+                      else "timeout")
+            return {"status": status, "new_pane": pane, "bead": bead, "delivery": delivery}
         time.sleep(poll_s)
 
 
@@ -432,37 +438,57 @@ def _incidents(work_orders, start):
                 elif text.startswith(INCIDENT_PREFIXES):
                     lines.append("- %s: %s" % (bead, text))
     seen = set()
+    log = scheduler.log_path()
+    unknown = None
+    if not os.path.exists(log):
+        unknown = "missing"
+    else:
+        try:
+            with open(log, encoding="utf-8"):
+                pass
+        except OSError:
+            unknown = "unreadable"
     for r in scheduler.readings(since=start):
         for ev in r.get("events") or []:
             if isinstance(ev, str) and ev.split(" ")[0] in INCIDENT_EVENTS and ev not in seen:
                 seen.add(ev)
                 lines.append("- monitor: %s" % ev)
+    if unknown:  # never claim what was not verified
+        lines.append("Incidents unknown: monitor log %s" % unknown)
     return lines or ["No incidents."]
 
 
-def _without_limits(d, kv, start):
-    raw = kv.get(journal.OVERRIDE_KEY)
-    try:
-        rec = json.loads(raw) if raw else None
-    except ValueError:
-        rec = None
-    if not isinstance(rec, dict) or not rec.get("goal"):
-        return None
-    since = rec.get("since")
-    since = float(since) if isinstance(since, (int, float)) else start
-    pts = [r for r in scheduler.readings(since=since)]
+def _override_section(d, rec, now):
+    since, until = float(rec["since"]), rec.get("until")
+    end = now if until is None else float(until)
+    pts = [r for r in scheduler.readings(since=since) if r["ts"] <= end]
     fives = [r["five_hour"] for r in pts if isinstance(r.get("five_hour"), (int, float))]
     weeks = [r["seven_day"] for r in pts if isinstance(r.get("seven_day"), (int, float))]
     rise5 = sum(max(0.0, b - a) for a, b in zip(fives, fives[1:]))
     rise7 = weeks[-1] - weeks[0] if len(weeks) >= 2 else None
-    usd = transcript.cost(transcript.machine_files(since=since), d, since=since)["usd"]
-    lines = ["The customer's command 'ignore limits and finish' held for the goal %s%s."
-             % (rec["goal"], "" if since is None else " since " + _clock(since)),
-             "- 5h window: +%s pp while it held (sum of rises between monitor readings)" % _g(rise5),
-             "- week: %s while it held (last reading minus first)"
-             % ("unknown" if rise7 is None else "+%s pp" % _g(rise7)),
-             "- machine spend over the same time: %s" % _usd(usd)]
-    return lines
+    usd = transcript.cost(transcript.machine_files(since=since), d, since=since,
+                          until=end)["usd"]
+    return ["The customer's command 'ignore limits and finish' held for the goal %s, since %s, "
+            "%s." % (rec["goal"], _clock(since),
+                     "until " + _clock(until) if until is not None else "and still holds"),
+            "- 5h window: +%s pp while it held (sum of rises between monitor readings)" % _g(rise5),
+            "- week: %s while it held (last reading minus first)"
+            % ("unknown" if rise7 is None else "+%s pp" % _g(rise7)),
+            "- machine spend over the same time: %s" % _usd(usd)]
+
+
+def _without_limits(d, kv, start, now):
+    """One block per override that held during the shift (the journal keeps their history
+    after the record itself has expired)."""
+    lines = []
+    for rec in journal.override_history(kv):
+        if not isinstance(rec.get("since"), (int, float)) or not rec.get("goal"):
+            continue
+        until = rec.get("until")
+        if until is not None and start is not None and until < start:
+            continue
+        lines += _override_section(d, rec, now) + [""]
+    return lines[:-1]
 
 
 def report(date, out_dir):
@@ -488,7 +514,7 @@ def report(date, out_dir):
     section("Budget", _budget(sp, d, kv, lim, rates, start, work_orders))
     section("Limits", _limits_lines(d, now, lim))
     section("Incidents", _incidents(work_orders, start))
-    free = _without_limits(d, kv, start)
+    free = _without_limits(d, kv, start, now)
     if free:
         section("Without limits", free)
     os.makedirs(out_dir, exist_ok=True)

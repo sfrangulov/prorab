@@ -226,13 +226,53 @@ def durations(kind):
 OVERRIDE_KEY = "override.ignore_limits"
 
 
+OVERRIDE_HISTORY_KEY = "override.history"
+OVERRIDE_HISTORY_MAX = 20
+
+
+def override_history(kv=None):
+    """Every override ever set, oldest first: ``{"goal", "since", "until", "source"}``;
+    `until` is None while it holds. Survives the record's expiry (the morning report reads it)."""
+    v = kv_get(OVERRIDE_HISTORY_KEY) if kv is None else _kv_value(kv, OVERRIDE_HISTORY_KEY)
+    try:
+        data = json.loads(v) if v else []
+    except ValueError:
+        return []
+    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+def _save_history(history):
+    kv_set(OVERRIDE_HISTORY_KEY, json.dumps(history[-OVERRIDE_HISTORY_MAX:], ensure_ascii=False))
+
+
+def _close_history(goal, until):
+    history = override_history()
+    for rec in history:
+        if rec.get("goal") == goal and rec.get("until") is None:
+            rec["until"] = until
+    _save_history(history)
+
+
 def set_override(goal):
-    kv_set(OVERRIDE_KEY, json.dumps({"goal": goal, "since": int(time.time()),
-                                     "source": "customer's words"}, ensure_ascii=False))
+    since = int(time.time())
+    source = "customer's words"
+    kv_set(OVERRIDE_KEY, json.dumps({"goal": goal, "since": since, "source": source},
+                                    ensure_ascii=False))
+    _save_history(override_history() + [{"goal": goal, "since": since, "until": None,
+                                         "source": source}])
 
 
-def clear_override():
+def clear_override(data=None):
+    """Remove the record (the customer cancelled it, or it expired) and close its history entry."""
+    if data is None:
+        v = kv_get(OVERRIDE_KEY)
+        try:
+            data = json.loads(v) if v else None
+        except ValueError:
+            data = None
     kv_clear(OVERRIDE_KEY)
+    if isinstance(data, dict) and data.get("goal"):
+        _close_history(data["goal"], int(time.time()))
 
 
 def _open_gate(item):
@@ -296,7 +336,7 @@ def override(kv=None):
         clear_override()
         return None
     if _goal_done(data["goal"]):
-        clear_override()
+        clear_override(data)
         return None
     return data
 

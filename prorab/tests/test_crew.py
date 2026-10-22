@@ -485,6 +485,14 @@ class TestStart(CrewBase):
                          crew.transcript.transcript_path(r["worktree"], uuid_str))
         self.assertEqual(self.j.issue("N1")["session_id"], uuid_str)
 
+    def test_sessions_recorded_in_the_issue_record(self):
+        repo = self.make_repo()
+        self.add_worktree(repo, "N1")
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        r = crew.start(repo, "N1", "a1", "w:p1")
+        self.assertEqual(self.j.issue("N1")["sessions"], [r["session_id"]])
+
     def test_start_refuses_already_issued(self):
         self.j.issue_set("N1", "issued", name="a1", pane="w:p9")
         self.route("agent list", ok({"agents": [agent_entry()]}))
@@ -915,6 +923,18 @@ class TestHandover(CrewBase):
         self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
         self.assertEqual(self.j.set_spent_log, [("N1", 0.0)])
         self.assertIn("Spend:", self.j.act_log[0][2])
+
+    def test_complete_handover_records_the_new_session(self):
+        self.j.issue_set("N1", "issued", sessions=["sess-1"])
+        self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
+        inwt = {"pane": {"pane_id": "w:p9", "foreground_cwd": self.wt}}
+        self.route("pane get w:p9", ok(inwt))
+        self.route("pane run w:p9", "")
+        self.route("agent start a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        r = crew.complete_handover("a1", "N1", "Work order text", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "restarted")
+        self.assertEqual(self.j.issue("N1")["sessions"], ["sess-1", r["session_id"]])
 
     def test_restart_never_falls_back_to_site_dir(self):
         self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
@@ -1415,6 +1435,21 @@ class TestRestart(CrewBase):
         self.assertIn("--session-id", second)
         self.assertNotIn("--resume", second)
 
+    def test_sessions_grow_on_a_new_session_never_on_a_resume(self):
+        self.j.issue_set("N1", "issued", worktree=self.wt, sessions=["old-session"])
+        self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
+        self.assertEqual(self.go()["status"], "resumed")
+        self.assertEqual(self.j.issue("N1")["sessions"], ["old-session"])
+        self.j.kv["crew.a1.session"] = "old-session"
+        self.write_transcript("/work", "old-session", "x", tokens=(130000, 0, 0))
+        self.j.kv["crew.a1.transcript"] = crew.transcript.transcript_path(
+            "/work", "old-session", self.home)
+        self.assertEqual(self.go()["status"], "restarted")
+        new = self.j.kv["crew.a1.session"]
+        self.assertEqual(self.j.issue("N1")["sessions"], ["old-session", new])
+        crew._set_session("a1", self.wt, new, "N1")  # never repeated
+        self.assertEqual(self.j.issue("N1")["sessions"], ["old-session", new])
+
     def test_limit_death_restart_not_counted(self):
         self.assertEqual(self.go("limit_died")["status"], "resumed")
         self.assertEqual(self.j.restarts, {})
@@ -1780,6 +1815,16 @@ class TestWorkOrderSpend(CrewBase):
         self.assertAlmostEqual(r["pp_week"], 6.1 / 10.0)
         self.assertEqual(r["rates"]["five_hour"]["source"], "default")
         self.assertEqual(r["rates"]["seven_day"]["usd_per_pp"], 10.0)
+
+    def test_spend_after_a_worktree_exit(self):
+        site = "/home/user/projects/demo-app"
+        wt = site + "/.claude/worktrees/prorab-N2"
+        self.j.issue_set("N2", "issued", worktree=wt, sessions=["moved-s"])
+        self.write_usage(site, "moved-s", [("mv1", "claude-opus-5", 1000000, 0)])
+        self.write_usage(site, "customer-s", [("cu1", "claude-opus-5", 1000000, 0)])
+        r = crew.work_order_spend("N2")
+        self.assertGreater(r["usd"], 0)
+        self.assertAlmostEqual(r["usd"], 4.0)
 
     def test_work_order_spend_unknown_week_rate(self):
         d = _defaults.load()

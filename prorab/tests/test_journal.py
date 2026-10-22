@@ -491,6 +491,23 @@ class TestJournalDollars(JournalBase):
         self.assertAlmostEqual(sp["usd"], 6.0)
         self.assertEqual(sp["since"], T0)
 
+    def test_shift_spend_counts_a_moved_session(self):
+        a = new_work_order("A", usd=10)
+        site = "/home/user/projects/demo-app"
+        wt = site + "/.claude/worktrees/prorab-A"
+        journal.issue_set(a, "issued", worktree=wt, sessions=["crew-s"])
+        self.start()
+        self.write(wt, "crew-s", [("m1", T0 + 60, 2.0)])
+        moved = os.path.join(self.home, ".claude", "projects", "-home-user-projects-demo-app")
+        os.makedirs(moved)
+        src = os.path.join(self.home, ".claude", "projects",
+                           __import__("transcript").project_slug(wt), "crew-s.jsonl")
+        os.rename(src, os.path.join(moved, "crew-s.jsonl"))
+        self.write(site, "customer-s", [("c1", T0 + 70, 9.0)])
+        sp = self.spend()
+        self.assertAlmostEqual(sp["work_orders"][a]["usd_shift"], 2.0)
+        self.assertAlmostEqual(sp["usd"], 2.0)
+
     def test_research_items_by_start_time(self):
         self.start(foreman="fs1")
         own = "/home/user/projects/demo-app"

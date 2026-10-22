@@ -241,6 +241,36 @@ def worktree_files(worktree, home=None):
     return out
 
 
+def _site_of(worktree):
+    """The site a worktree ``<site>/.claude/worktrees/<name>`` belongs to, else None."""
+    marker = os.sep + os.path.join(".claude", "worktrees") + os.sep
+    head, found, _ = worktree.rstrip(os.sep).partition(marker)
+    return head if found and head else None
+
+
+def _session_transcript(worktree, session_id, home):
+    """A session's transcript: in the worktree's project directory, else in the site's (where
+    Claude Code moves it when a ``-w`` session exits), else in any project directory."""
+    base = _projects_dir(home)
+    for cwd in (worktree, _site_of(worktree)):
+        if cwd:
+            path = os.path.join(base, project_slug(cwd), session_id + ".jsonl")
+            if os.path.isfile(path):
+                return path
+    return find_transcript("", session_id, home)
+
+
+def work_order_files(worktree, sessions=(), home=None):
+    """Transcripts of a work order: every run in its worktree, plus each crew session by id
+    wherever Claude Code left it (and its subagents). The site's directory is never listed whole."""
+    files = set(worktree_files(worktree, home))
+    for session_id in sessions:
+        path = _session_transcript(worktree, session_id, home)
+        if path:
+            files.update(session_cost_files(path))
+    return sorted(files)
+
+
 def machine_files(since=None, home=None):
     """Every transcript on the machine; files untouched since ``since`` are left out unopened."""
     out = []
@@ -365,7 +395,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("cmd", choices=["status", "text", "usage", "cost"])
     ap.add_argument("--cwd")
-    ap.add_argument("--session")
+    ap.add_argument("--session", action="append", default=[])
     ap.add_argument("--worktree")
     ap.add_argument("--machine", action="store_true")
     ap.add_argument("--file", action="append", default=[])
@@ -375,7 +405,7 @@ def main(argv=None):
     if args.cmd == "cost":
         since, until = _ts_arg(args.since), _ts_arg(args.until)
         if args.worktree:
-            paths = worktree_files(args.worktree)
+            paths = work_order_files(args.worktree, args.session)
         elif args.machine:
             paths = machine_files(since)
         elif args.file:
@@ -386,7 +416,7 @@ def main(argv=None):
         return 0
     if not args.cwd or not args.session:
         ap.error("--cwd and --session are required")
-    path = find_transcript(args.cwd, args.session)
+    path = find_transcript(args.cwd, args.session[-1])
     if path is None:
         print(json.dumps({"error": "transcript not found"}), file=sys.stderr)
         return 1

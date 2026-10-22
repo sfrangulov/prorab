@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 SCRIPTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
@@ -241,6 +242,64 @@ class TestCost(unittest.TestCase):
         mine = self.put("main.jsonl", self.wt, "s.jsonl")
         self.put("main.jsonl", other, "s.jsonl")
         self.assertEqual(transcript.worktree_files(self.wt, self.home), [mine])
+
+    def moved_layout(self):
+        """A site with a worktree under it, as Claude Code lays them out."""
+        site = os.path.join(self.root, "site")
+        wt = os.path.join(site, ".claude", "worktrees", "prorab-N1")
+        os.makedirs(wt)
+        return site, wt
+
+    def test_work_order_files_finds_a_moved_session(self):
+        site, wt = self.moved_layout()
+        moved = self.put("main.jsonl", wt, "crew-s.jsonl", slug_of=site)
+        sub = self.put("subagent.jsonl", wt, os.path.join("crew-s", "subagents", "a.jsonl"),
+                       slug_of=site)
+        run = self.put("no_split.jsonl", wt, "print1.jsonl")
+        self.put("main.jsonl", site, "customer-s.jsonl")
+        files = transcript.work_order_files(wt, ["crew-s"], self.home)
+        self.assertEqual(files, sorted([moved, sub, run]))
+        self.assertAlmostEqual(transcript.cost(files, self.d)["usd"], 0.0404 + 0.014 + 0.008)
+
+    def test_work_order_files_prefers_the_worktree_directory(self):
+        site, wt = self.moved_layout()
+        here = self.put("main.jsonl", wt, "crew-s.jsonl")
+        self.put("main.jsonl", wt, "crew-s.jsonl", slug_of=site)
+        self.assertEqual(transcript.work_order_files(wt, ["crew-s"], self.home), [here])
+
+    def test_work_order_files_falls_back_to_any_project_directory(self):
+        site, wt = self.moved_layout()
+        elsewhere = self.put("main.jsonl", wt, "crew-s.jsonl",
+                             slug_of=os.path.join(self.root, "elsewhere"))
+        self.assertEqual(transcript.work_order_files(wt, ["crew-s"], self.home), [elsewhere])
+        self.assertEqual(transcript.work_order_files(wt, ["no-such"], self.home), [])
+
+    def test_moved_and_forked_message_counts_once(self):
+        site, wt = self.moved_layout()
+        moved = self.put("main.jsonl", wt, "crew-s.jsonl", slug_of=site)
+        fork = self.put("fork.jsonl", wt, "fork-s.jsonl")
+        files = transcript.work_order_files(wt, ["crew-s"], self.home)
+        self.assertEqual(files, sorted([moved, fork]))
+        c = transcript.cost(files, self.d)
+        self.assertEqual(c["messages"], 2)
+        self.assertAlmostEqual(c["usd"], 0.0404)
+
+    def test_work_order_files_sibling_slug_not_attributed(self):
+        other = os.path.join(self.root, "wt-other")
+        os.makedirs(other)
+        mine = self.put("main.jsonl", self.wt, "s.jsonl")
+        self.put("main.jsonl", other, "s.jsonl")
+        self.assertEqual(transcript.work_order_files(self.wt, [], self.home), [mine])
+
+    def test_cost_cli_takes_sessions(self):
+        site, wt = self.moved_layout()
+        self.put("main.jsonl", wt, "crew-s.jsonl", slug_of=site)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), unittest.mock.patch.dict(
+                os.environ, {"HOME": self.home}):
+            self.assertEqual(transcript.main(
+                ["cost", "--worktree", wt, "--session", "crew-s"]), 0)
+        self.assertAlmostEqual(json.loads(out.getvalue())["usd"], 0.0404)
 
     def test_cost_time_window_and_old_files(self):
         p = self.put("main.jsonl", self.wt, "s.jsonl")

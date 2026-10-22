@@ -220,7 +220,14 @@ def _claude_args(*pairs):
     return ["--"] + [x for pair in pairs for x in pair]
 
 
-def _set_session(name, worktree, session_id):
+def _set_session(name, worktree, session_id, work_order):
+    """Record the crew's current session; the work order's issue record lists every one."""
+    rec = journal.issue(work_order)
+    if rec is not None:
+        sessions = list(rec.get("sessions") or [])
+        if session_id not in sessions:
+            journal.issue_set(work_order, rec.get("state", "issuing"),
+                              sessions=sessions + [session_id])
     journal.kv_set(_kv(name, "session"), session_id)
     if worktree:
         journal.kv_set(_kv(name, "transcript"), transcript.transcript_path(worktree, session_id))
@@ -456,7 +463,9 @@ def start(site_path, work_order, name, caller_pane):
         journal.issue_set(work_order, "not_issued", name=name, pane=pane, reason="needs_trust")
         return {"status": "needs_trust", "pane_id": pane, "site": site_path, "trust": "missing"}
     session_id = str(uuid.uuid4())
-    journal.issue_set(work_order, "issuing", name=name, pane=pane, session_id=session_id)
+    earlier = list((journal.issue(work_order) or {}).get("sessions") or [])
+    journal.issue_set(work_order, "issuing", name=name, pane=pane, session_id=session_id,
+                      sessions=earlier + [session_id])
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
                       + _claude_args(("--session-id", session_id), ("--add-dir", _files_dir()),
@@ -495,7 +504,7 @@ def _register_started(site_path, work_order, name, pane, session_id):
         fields += [("worktree", worktree), ("branch", branch or "")]
     for field, value in fields:
         journal.kv_set(_kv(name, field), value)
-    _set_session(name, worktree, session_id)
+    _set_session(name, worktree, session_id, work_order)
     result = {"status": "started" if worktree else "started_no_worktree", "pane_id": pane, "name": name,
               "session_id": session_id, "worktree": worktree, "branch": branch}
     journal.add_act(work_order, "answer", "crew %s started: pane %s, branch %s, session %s"
@@ -597,8 +606,9 @@ def _issue_worktree(work_order):
 
 
 def _spend_of(work_order, worktree, d=None, home=None):
+    sessions = (journal.issue(work_order) or {}).get("sessions") or []
     d = d or _defaults.load()
-    usd = transcript.cost(transcript.worktree_files(worktree, home), d)["usd"]
+    usd = transcript.cost(transcript.work_order_files(worktree, sessions, home), d)["usd"]
     est = journal.estimate(work_order)
     rates = limits.rates(scheduler.readings(), d, time.time(), home=home)
     return {"usd": usd, "estimate_usd": est["usd"],
@@ -876,7 +886,7 @@ def _restart_after_exit(name, work_order, work_order_text, worktree, pane, spend
         name, pane, (("--session-id", session_id), ("--add-dir", _files_dir())))
     if failed:
         return failed
-    _set_session(name, worktree, session_id)
+    _set_session(name, worktree, session_id, work_order)
     try:
         sent = deliver(name, _handover_text(work_order, work_order_text), work_order)
     except herdr_cli.HerdrError as e:
@@ -988,7 +998,7 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
     failed, _screen = _start_session(name, pane, (("--session-id", session_id), files))
     if failed:
         return failed
-    _set_session(name, worktree, session_id)
+    _set_session(name, worktree, session_id, work_order)
     if counted:
         journal.bump_restarts(work_order)
     try:

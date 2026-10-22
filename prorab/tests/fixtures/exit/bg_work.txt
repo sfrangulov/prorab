@@ -1,0 +1,11 @@
+● Waiting for the test run.
+
+────────────────────────────────────────────────────────────────────────────
+ Background work is running
+
+ 1 shell and 1 monitor are still running. Exiting now will stop them.
+
+ ❯ 1. Exit and stop tasks
+   2. Stay in the session
+
+ Enter to confirm · Esc to cancel

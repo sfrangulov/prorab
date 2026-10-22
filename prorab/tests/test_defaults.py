@@ -73,7 +73,10 @@ class TestDefaults(unittest.TestCase):
         )
         self.assertEqual(
             d["screen"],
-            {"tail_lines": 15, "resume_failed": "no conversation found with session id"},
+            {"tail_lines": 15, "resume_failed": "no conversation found with session id",
+             "worktree_exit": {"marker": "exiting worktree session",
+                               "keep": "1. keep worktree"},
+             "exit_bg_work": "background work is running"},
         )
         self.assertEqual(d["cycles"], {"approval": 6, "review": 10, "report_fix": 3})
         self.assertEqual(d["handover"], {"min_interval_s": 600})
@@ -81,6 +84,7 @@ class TestDefaults(unittest.TestCase):
             "ask_timeout_s": 600,
             "trust_path": os.path.expanduser("~/.claude.json"),
             "trust_retry_s": 1,
+            "exit_window_s": 300,
         })
 
         self.assertEqual(

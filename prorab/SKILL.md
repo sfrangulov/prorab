@@ -20,7 +20,7 @@ Rules here, mechanics in scripts (`<file> …` is `python3 scripts/<file> …` f
 3. `shift.py reconcile` before any issuing.
 4. `sensor.py status`; not installed: offer it once, naming its gain (exact percentage and reset, so a measured rate), edit (`statusLine` in `~/.claude/settings.json`, backed up), install `sensor.py install --yes`, removal `sensor.py uninstall`; only an explicit yes installs. Till then: limits from status lines and limit messages, default rates.
 5. `monitor.py` in the background, never two; handle each event by its section, then restart it. `blind`, `blind_week`: tell the customer once.
-6. `shift.py preflight [--night]`, `shift.py begin [--night]` (not on a takeover: it resets the spend), at night `shift.py caffeinate PID` (this Claude Code); tell morning, thresholds, budget, rate.
+6. `shift.py preflight [--night]`, `shift.py begin [--night]` (not on a takeover), at night `shift.py caffeinate PID` (this Claude Code); tell morning, thresholds, budget, rate.
 
 ## The cycle
 
@@ -64,10 +64,10 @@ All execution (code and documents, commits, releases, push, PR, installs) goes t
 
 At `settled`: `crew.py summary NAME`, a report or a question.
 1. `crew.py check_report NAME WO --stage STAGE`, always `--stage`, else `heavy runs not verifiable`.
-2. Fails: FILE holds its `problems` verbatim, one per line, plus facts it cannot see (uncommitted files); `crew.py report_fix NAME WO STAGE --problems-file FILE`; `journal.py act STAGE answer "report check failed: <claim vs fact>"`. Past `cycles.report_fix` it gates; add `wait STAGE` naming the problems, to the crew only `pause`. No next stage.
+2. Fails: FILE holds its `problems` verbatim, one per line, plus facts it cannot see (uncommitted files); `crew.py report_fix NAME WO STAGE --problems-file FILE`; `journal.py act STAGE answer "report check failed: <claim vs fact>"`. Past `cycles.report_fix` it gates; add `wait STAGE` naming the problems, the crew only `pause`. No next stage.
 3. Passes: facts on top of it, never instead: `crew.py evidence WORKTREE`, cheap checks, a review subagent under its estimate.
 4. Act from `references/acts.md`, every mismatch in it: `crew.py accept WO STAGE --act-file FILE` (checks nothing; adds spend, rate). "done, review needs rework" is not "failed".
-5. Then the next stage (`stage-start`), a fix, or closed: `crew.py stop NAME WO`, never a second WO. Passport: `journal.py passport SITE --set-file FILE`.
+5. Then the next stage (`stage-start`), a fix, or closed: `crew.py stop NAME WO`, never a second WO; not `stopped`: still running, no `cleanup` or end-of-branch option yet; `bg_shells`/`bg_work`: wait, `stop` again; `not_exited`: incident, gate. Passport: `journal.py passport SITE --set-file FILE`.
 
 ## Answers
 
@@ -92,7 +92,6 @@ At `settled`: `crew.py summary NAME`, a report or a question.
 ## Rationalizations
 
 - "One keystroke" / "enables nothing": any key answers a consent prompt.
-- "It never arrived, a re-send cannot double it": you cannot see what arrived.
 - "Fresh crew" / "silent 40 min: Ctrl+C": restart only on `gone`/`hung`.
 - "A paperwork defect" / "I'll check C3 myself": a failing report is never accepted.
 - "Writing is light" / "stop at 90 %" / "dollars left": `cap` and measured percentages decide.

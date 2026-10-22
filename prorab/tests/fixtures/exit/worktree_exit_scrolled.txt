@@ -1,0 +1,36 @@
+● Handover act written. HANDOVER READY
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+ Exiting worktree session
+
+ You are working in a worktree. Keep it to continue working there, or remove it to clean up.
+ The worktree is now on branch prorab/N1, which is kept either way.
+
+ ❯ 1. Keep worktree
+      Stays at /home/user/projects/demo-app/.claude/worktrees/prorab-N1
+   2. Remove worktree
+      All changes and commits will be lost
+
+ Enter to confirm · Esc to cancel
+● later output line 1
+● later output line 2
+● later output line 3
+● later output line 4
+● later output line 5
+● later output line 6
+● later output line 7
+● later output line 8
+● later output line 9
+● later output line 10
+● later output line 11
+● later output line 12
+● later output line 13
+● later output line 14
+● later output line 15
+● later output line 16
+● Ready for the next work order.
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 · xhigh │ ▓▓░░░░░░░░ 17.0% │ ⎇ main (+0,-0)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

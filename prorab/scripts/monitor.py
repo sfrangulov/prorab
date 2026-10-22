@@ -235,6 +235,14 @@ def _find_agent(name, listed, kv):
     return a or next((x for x in listed if x.get("name") == name), None)
 
 
+def _exiting(mark, now, window_s):
+    """Whether a kv mark `crew.<name>.exiting` (epoch seconds) is younger than the window."""
+    try:
+        return 0 <= now - float(mark) < window_s
+    except (TypeError, ValueError):
+        return False
+
+
 def _inside(path, root):
     path, root = os.path.realpath(path), os.path.realpath(root)
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
@@ -340,6 +348,8 @@ def _poll(crews, d, mem, now, dp):
     spend = (mem.get("spend") or {}).get("value")
 
     for name in (crews if listed is not None else ()):
+        if _exiting(kv_get("crew.%s.exiting" % name), now, d["crew"]["exit_window_s"]):
+            continue  # a script is exiting this crew: no event, the episode state stays as it was
         a = _find_agent(name, listed, kv)
         prev = last.get(name) or {}
         screen = None

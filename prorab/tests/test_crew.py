@@ -1786,9 +1786,12 @@ class TestStop(CrewBase):
         self.write_transcript("/work", "sess-1", "x", tokens=(1, 2, 3))
         self.j.active = ["a1"]
         self.j.kv["crew.a1.work_order"] = "N1"
-        self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
         self.route("agent prompt a1", err("agent_not_found"), exit_code=1)
-        crew.stop("a1", "N1")
+        self.route("pane read w:p9 --source visible", "$ \n")
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9")}))
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "stopped")
         self.assertEqual(self.j.active, [])
         self.assertEqual(self.j.spent, [("N1", 0, 0, 6)])
         self.assertIn("agent prompt a1 /exit --wait --until working --until done --until blocked --timeout 60000", self.calls())
@@ -1954,6 +1957,172 @@ class TestStartPanes(CrewBase):
         self.assertNotIn("pane close w:p5", calls)
         self.assertLess(calls.index("pane get w:p6"), calls.index("pane close w:p6"))
         self.assertEqual(self.j.issue("N1")["spare"], [ident("w:p5")])
+
+
+class TestExitDialog(CrewBase):
+    """Every crew exit answers the worktree exit dialog with Keep (F3)."""
+    EXIT_CALL = ("agent prompt a1 /exit --wait --until working --until done "
+                 "--until blocked --timeout 60000")
+
+    def setUp(self):
+        super().setUp()
+        self.wt = "/home/user/projects/demo-app/.claude/worktrees/prorab-N1"
+        self.j.kv.update({"crew.a1.worktree": self.wt, "crew.a1.pane": "w:p9",
+                          "crew.a1.session": "old-session", "crew.a1.work_order": "N1"})
+        self.j.active = ["a1"]
+        self.write_transcript("/work", "sess-1", "Act: done A\nHANDOVER READY")
+        self.composer = fixture("composer", "empty.txt")
+        self.dialog = fixture("exit", "worktree_exit.txt")
+        self.shell = ok({"pane": pane_info("w:p9")})
+        self.inwt = ok({"pane": pane_info("w:p9", cwd=self.wt)})
+        self.route("agent read a1 --source visible", self.composer)
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        self.route("pane send-keys w:p9", "")
+        self.route("pane run w:p9", ok({}))
+        self.route("agent start a1", ok({}))
+
+    def listed(self, *present):
+        """`agent list` answers in turn: True = a1 listed, False = no agents."""
+        bodies = [ok({"agents": [agent_entry()] if p else []}) for p in present]
+        if len(bodies) == 1:
+            self.route("agent list", bodies[0])
+        else:
+            self.route_seq("agent list", bodies)
+
+    def screens(self, *texts):
+        if len(texts) == 1:
+            self.route("pane read w:p9 --source visible", texts[0])
+        else:
+            self.route_seq("pane read w:p9 --source visible", list(texts))
+
+    def keys(self):
+        return [c for c in self.calls() if c.startswith("pane send-keys")]
+
+    def handover(self, timeout_s=2):
+        return crew.complete_handover("a1", "N1", "t", timeout_s=timeout_s, poll_s=0.01)
+
+    def test_exit_dialog_markers(self):
+        self.assertEqual(crew.exit_dialog(fixture("exit", "worktree_exit.txt")), "worktree")
+        self.assertIsNone(crew.exit_dialog(fixture("exit", "worktree_exit_scrolled.txt")))
+        self.assertEqual(crew.exit_dialog(fixture("exit", "bg_work.txt")), "bg_work")
+        self.assertIsNone(crew.exit_dialog(fixture("composer", "empty.txt")))
+        # the marker alone, without the Keep option, is no dialog
+        self.assertIsNone(crew.exit_dialog("Exiting worktree session\nsomething else\n"))
+
+    def test_complete_handover_answers_the_exit_dialog_with_1(self):
+        self.listed(True, True, False)
+        self.screens(self.composer, self.dialog)
+        self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
+        r = self.handover()
+        self.assertEqual(r["status"], "restarted")
+        calls = self.calls()
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 1"])
+        i_exit = calls.index(self.EXIT_CALL)
+        i_key = calls.index("pane send-keys w:p9 1")
+        i_cd = calls.index("pane run w:p9 cd %s" % self.wt)
+        i_start = next(i for i, c in enumerate(calls) if c.startswith("agent start a1"))
+        self.assertTrue(i_exit < i_key < i_cd < i_start)
+
+    def test_exit_dialog_key_pressed_once(self):
+        self.listed(True)
+        self.screens(self.composer, self.dialog)
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", agent="claude")}))
+        r = self.handover(timeout_s=0.3)
+        self.assertEqual(r["status"], "restart_failed")
+        self.assertEqual(r["reason"], "agent did not exit")
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 1"])
+        self.assertNotIn("agent start", " ".join(self.calls()))
+
+    def test_stop_answers_the_exit_dialog(self):
+        self.listed(True, True, False)
+        self.screens(self.composer, self.dialog)
+        self.route("pane get w:p9", self.shell)
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "stopped")
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 1"])
+        self.assertEqual(self.j.active, [])
+        self.assertNotIn("crew.a1.exiting", self.j.kv)
+
+    def test_restart_answers_the_exit_dialog(self):
+        self.listed(True, True, False)
+        self.route_seq("pane get w:p9", [self.shell, self.inwt])
+        self.screens(self.composer, self.dialog, self.composer)
+        r = crew.restart("a1", "N1", "t", "gone", caller_pane="w:p1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "resumed")
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 1"])
+
+    def test_exit_with_bg_shells_sends_nothing(self):
+        self.listed(True)
+        self.screens("bar · 1 shell\n")
+        self.route("pane get w:p9", self.shell)
+        r = crew.stop("a1", "N1", timeout_s=0.3, poll_s=0.01)
+        self.assertEqual(r["status"], "bg_shells")
+        self.assertEqual(self.j.active, ["a1"])
+        self.assertEqual(self.j.kv["crew.a1.work_order"], "N1")
+        r = crew.restart("a1", "N1", "t", "hung", caller_pane="w:p1", timeout_s=0.3,
+                         poll_s=0.01)
+        self.assertEqual(r["status"], "restart_failed")
+        self.assertEqual(r["step"], "exit")
+        for c in self.calls():
+            self.assertFalse(c.startswith(("agent prompt", "pane send-keys", "agent start")), c)
+        self.assertNotIn("crew.a1.exiting", self.j.kv)
+
+    def test_bg_work_dialog_cancelled_with_esc(self):
+        self.listed(True)
+        self.screens(self.composer, fixture("exit", "bg_work.txt"))
+        self.route("pane get w:p9", self.shell)
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "bg_work")
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 esc"])
+        self.assertEqual(self.j.active, ["a1"])
+        self.assertNotIn("crew.a1.exiting", self.j.kv)
+        self.listed(True)
+        r = self.handover()
+        self.assertEqual(r["status"], "bg_shells")
+
+    def test_exit_without_changes_presses_nothing(self):
+        self.listed(True, False)
+        self.screens(self.composer, self.composer)
+        self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
+        self.assertEqual(self.handover()["status"], "restarted")
+        self.assertEqual(self.keys(), [])
+
+    def test_answer_refuses_the_exit_dialog(self):
+        self.route("agent read a1 --source visible", self.dialog)
+        self.assertEqual(crew.answer("a1", choice=1), "exit_dialog")
+        self.route("agent read a1 --source visible", fixture("exit", "bg_work.txt"))
+        self.assertEqual(crew.answer("a1", text="hello"), "exit_dialog")
+        for c in self.calls_or_empty():
+            self.assertFalse(c.startswith(("agent send-keys", "pane send", "agent prompt")), c)
+
+    def test_state_shows_the_exit_dialog(self):
+        a = agent_entry(status="blocked")
+        self.assertEqual(crew.state("a1", a, screen=self.dialog)["exit_dialog"], "worktree")
+        self.assertIsNone(crew.state("a1", a, screen=self.composer)["exit_dialog"])
+        self.assertIsNone(crew.state("a1", a, read_screen=False)["exit_dialog"])
+        self.assertIsNone(crew.gone_state()["exit_dialog"])
+
+    def test_exiting_mark_set_and_cleared(self):
+        log = []
+        real_set, real_clear = self.j.kv_set, self.j.kv_clear
+        self.j.kv_set = lambda k, v: (log.append(("set", k)), real_set(k, v))[1]
+        self.j.kv_clear = lambda k: (log.append(("clear", k)), real_clear(k))[1]
+        self.listed(True, True, False)
+        self.screens(self.composer, self.dialog)
+        self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
+        self.assertEqual(self.handover()["status"], "restarted")
+        self.assertIn(("set", "crew.a1.exiting"), log)
+        self.assertLess(log.index(("set", "crew.a1.exiting")),
+                        log.index(("clear", "crew.a1.exiting")))
+        self.assertNotIn("crew.a1.exiting", self.j.kv)
+        # a failed exit clears the mark at once
+        log.clear()
+        self.listed(True)
+        self.screens(self.composer)
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", agent="claude")}))
+        self.j.kv.pop("handover.N1.last", None)
+        self.assertEqual(self.handover(timeout_s=0.2)["status"], "restart_failed")
+        self.assertNotIn("crew.a1.exiting", self.j.kv)
 
 
 if __name__ == "__main__":

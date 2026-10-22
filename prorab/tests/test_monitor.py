@@ -174,6 +174,24 @@ class TestMonitorPoll(PollBase):
         self.s.crews["b1"] = st("done")
         self.assertEqual(self.poll(), ["settled b1 done"])
 
+    def test_exiting_crew_raises_no_event(self):
+        self.s.kv["crew.b1.exiting"] = str(self.now - 30)
+        self.s.crews["b1"] = st("blocked")
+        self.assertEqual(self.poll(), [])
+        self.s.crews["b1"] = st("idle", consent="trust")
+        self.assertEqual(self.poll(), [])
+        del self.s.crews["b1"]
+        self.assertEqual(self.poll(), [])
+        self.assertEqual(self.mem.get("gone", {}), {})
+        self.assertEqual(self.mem.get("settled", {}), {})
+
+    def test_stale_exiting_mark_is_ignored(self):
+        self.s.kv["crew.b1.exiting"] = str(self.now - 400)
+        self.s.crews["b1"] = st("blocked")
+        self.assertEqual(self.poll(), ["settled b1 blocked"])
+        del self.s.crews["b1"]
+        self.assertEqual(self.poll(), ["gone b1"])
+
     def test_gone_once(self):
         del self.s.crews["b1"]
         self.assertEqual(self.poll(), ["gone b1"])

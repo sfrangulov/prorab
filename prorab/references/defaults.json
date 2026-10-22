@@ -76,7 +76,12 @@
   },
   "screen": {
     "tail_lines": 15,
-    "resume_failed": "no conversation found with session id"
+    "resume_failed": "no conversation found with session id",
+    "worktree_exit": {
+      "marker": "exiting worktree session",
+      "keep": "1. keep worktree"
+    },
+    "exit_bg_work": "background work is running"
   },
   "cycles": {
     "approval": 6,
@@ -89,7 +94,8 @@
   "crew": {
     "ask_timeout_s": 600,
     "trust_path": "~/.claude.json",
-    "trust_retry_s": 1
+    "trust_retry_s": 1,
+    "exit_window_s": 300
   },
   "budget": {
     "usd": 100,

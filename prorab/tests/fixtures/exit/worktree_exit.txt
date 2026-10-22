@@ -1,0 +1,14 @@
+● Handover act written. HANDOVER READY
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+ Exiting worktree session
+
+ You are working in a worktree. Keep it to continue working there, or remove it to clean up.
+ The worktree is now on branch prorab/N1, which is kept either way.
+
+ ❯ 1. Keep worktree
+      Stays at /home/user/projects/demo-app/.claude/worktrees/prorab-N1
+   2. Remove worktree
+      All changes and commits will be lost
+
+ Enter to confirm · Esc to cancel

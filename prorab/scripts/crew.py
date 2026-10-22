@@ -512,7 +512,7 @@ def _transcript_for(name, a=None, kv=None):
 def gone_state():
     """The state of a crew whose agent is not listed."""
     return {"status": "gone", "name_ok": False, "bg_shells": 0, "consent": None,
-            "limit_screen": None, "provider_error": None, "ctx": None,
+            "limit_screen": None, "provider_error": None, "exit_dialog": None, "ctx": None,
             "session_id": None, "cwd": None, "pane_id": None}
 
 
@@ -532,6 +532,7 @@ def state(name, a=None, *, read_screen=True, screen=None, kv=None):
     path = _transcript_for(name, a, kv)
     out = {"status": a.get("agent_status"), "name_ok": a.get("name") == name,
            "bg_shells": None, "consent": None, "limit_screen": None, "provider_error": None,
+           "exit_dialog": None,
            "ctx": transcript.context_status(path, _defaults.load()) if path else None,
            "session_id": (a.get("agent_session") or {}).get("value"),
            "cwd": a.get("cwd"), "pane_id": a.get("pane_id")}
@@ -543,7 +544,8 @@ def state(name, a=None, *, read_screen=True, screen=None, kv=None):
         out.update(bg_shells=herdr_cli.bg_shells(screen),
                    consent=herdr_cli.consent_dialog(screen),
                    limit_screen=limits.limit_screen(screen, d),
-                   provider_error=limits.provider_error(screen, d))
+                   provider_error=limits.provider_error(screen, d),
+                   exit_dialog=exit_dialog(screen))
     return out
 
 
@@ -609,12 +611,79 @@ def accept(work_order, stage, act_text):
             "over": spend["over"]}
 
 
-def _exit(name):
-    """Send /exit; the agent vanishing is success."""
+def exit_dialog(visible):
+    """The dialog Claude Code shows after `/exit`, read in the bottom block only: "worktree"
+    (the keep-or-remove question of a `-w` session), "bg_work" (background work is running),
+    else None. Words above the bottom block are no dialog."""
+    d = _defaults.load()["screen"]
+    low = herdr_cli.bottom_block(visible, d["tail_lines"]).lower()
+    wt = d["worktree_exit"]
+    if wt["marker"] in low and any(wt["keep"] in ln for ln in low.splitlines()):
+        return "worktree"
+    if d["exit_bg_work"] in low:
+        return "bg_work"
+    return None
+
+
+def _screen_of(pane):
     try:
-        herdr_cli.send(name, "/exit")
+        return herdr_cli.pane_visible(pane)
+    except herdr_cli.HerdrError:
+        return ""
+
+
+def _press(pane, key):
+    """One key into the pane, by the pane (the agent that owns the dialog is leaving). A
+    failed press is not retried: the exit then runs out of time."""
+    try:
+        herdr_cli.run_ack(["pane", "send-keys", pane, key])
     except herdr_cli.HerdrError:
         pass
+
+
+def _agent_left(pane):
+    info = _pane_info(pane)
+    return herdr_cli.agent_by_pane(pane) is None and not (info or {}).get("agent")
+
+
+def _exit(name, pane, timeout_s, poll_s):
+    """Exit the crew's agent in `pane`: "exited" | "bg_shells" | "bg_work" | "not_exited".
+    With background shells nothing is sent. The worktree exit dialog is answered once with
+    `1` (Keep worktree), never Enter and never `2`; the background-work dialog is cancelled
+    once with Esc. The kv mark `crew.<name>.exiting` (the monitor's quiet window) is set for
+    the exit and cleared here on every result but "exited": the caller clears it after
+    its follow-up."""
+    mark = _kv(name, "exiting")
+    if herdr_cli.bg_shells(_screen_of(pane)) > 0:
+        return "bg_shells"
+    journal.kv_set(mark, time.time())
+    result = "not_exited"
+    try:
+        try:
+            herdr_cli.send(name, "/exit")
+        except herdr_cli.HerdrError:
+            pass
+        deadline = time.monotonic() + timeout_s
+        pressed = False
+        while True:
+            if _agent_left(pane):
+                result = "exited"
+                break
+            dialog = exit_dialog(_screen_of(pane))
+            if dialog == "worktree" and not pressed:
+                pressed = True
+                _press(pane, "1")
+            elif dialog == "bg_work":
+                _press(pane, "esc")
+                result = "bg_work"
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(poll_s)
+    finally:
+        if result != "exited":
+            journal.kv_clear(mark)
+    return result
 
 
 # ---- handover, restart ------------------------------------------------------
@@ -739,11 +808,20 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
     journal.set_spent(work_order, spend["usd"])  # the predecessor's dollars are in the worktree
     journal.spend(work_order, sessions=1)
 
-    _exit(name)
-    gone = _wait(lambda: herdr_cli.agent(name) is None
-                 and not _pane(pane).get("agent"), timeout_s, poll_s)
-    if not gone:
+    left = _exit(name, pane, timeout_s, poll_s)
+    if left in ("bg_shells", "bg_work"):
+        return {"status": "bg_shells"}
+    if left != "exited":
         return {"status": "restart_failed", "reason": "agent did not exit"}
+    try:
+        return _restart_after_exit(name, work_order, work_order_text, worktree, pane, spend,
+                                   timeout_s, poll_s)
+    finally:
+        journal.kv_clear(_kv(name, "exiting"))
+
+
+def _restart_after_exit(name, work_order, work_order_text, worktree, pane, spend, timeout_s,
+                        poll_s):
     if not _enter_worktree(pane, worktree, timeout_s, poll_s):
         return {"status": "restart_failed", "reason": "shell did not enter the worktree"}
     session_id = str(uuid.uuid4())
@@ -785,6 +863,8 @@ def restart(name, work_order, work_order_text, reason, caller_pane=None,
                         timeout_s, poll_s, counted)
     except herdr_cli.HerdrError as e:  # before the agent was started again: nothing changed
         return {"status": "restart_failed", "reason": str(e)}
+    finally:
+        journal.kv_clear(_kv(name, "exiting"))
 
 
 def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s, poll_s,
@@ -802,9 +882,11 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
     if alive:
         a = herdr_cli.agent_by_pane(pane)
         if a is not None:
-            _exit(a.get("name") or name)
-            if not _wait(lambda: herdr_cli.agent_by_pane(pane) is None, timeout_s, poll_s):
-                return {"status": "restart_failed", "reason": "agent did not exit",
+            left = _exit(a.get("name") or name, pane, timeout_s, poll_s)
+            if left != "exited":
+                reason = {"bg_shells": "background shells are running",
+                          "bg_work": "background work is running"}.get(left, "agent did not exit")
+                return {"status": "restart_failed", "reason": reason, "step": "exit",
                         "pane_id": pane}
     else:
         if not caller_pane:
@@ -916,6 +998,8 @@ def answer(name, choice=None, text=None):
     kind = herdr_cli.consent_dialog(visible)
     if kind is not None:
         return "consent:%s" % kind
+    if exit_dialog(visible) is not None:
+        return "exit_dialog"  # the script that sent /exit answers it, never a work order
     if limits.limit_screen(visible, _defaults.load()) is not None:
         return "limit_screen"
     dialog = herdr_cli.choice_state(visible)
@@ -991,21 +1075,28 @@ def wait_limit(name):
 
 # ---- stop, cleanup ----------------------------------------------------------
 
-def stop(name, work_order):
+def stop(name, work_order, timeout_s=60, poll_s=1):
+    """Exit the crew and unregister it: {"status": "stopped", ...}. When the agent does not
+    leave ("bg_shells", "bg_work", "not_exited") the result is {"status": <that>}, and the
+    crew stays registered with its kv in place: nothing is unregistered while its agent runs."""
     a = herdr_cli.agent(name)
     tokens = _tokens_of(a, name)
     worktree = journal.kv_get(_kv(name, "worktree")) or \
         (journal.issue(work_order) or {}).get("worktree")
     if a is not None:
-        _exit(name)
+        pane = a.get("pane_id") or journal.kv_get(_kv(name, "pane"))
+        left = _exit(name, pane, timeout_s, poll_s)
+        if left != "exited":
+            return {"status": left}
     journal.unregister_crew(name)
     if worktree:
         journal.set_spent(work_order, _spend_of(work_order, worktree)["usd"])
     journal.spend(work_order, tokens=tokens)
     close_start_panes(work_order)
     for field in ("work_order", "site", "pane", "pane_identity", "worktree", "branch", "session",
-                  "transcript", "limit_until"):
+                  "transcript", "limit_until", "exiting"):
         journal.kv_clear(_kv(name, field))
+    return {"status": "stopped", "tokens": tokens}
 
 
 def _default_branch(site_path):

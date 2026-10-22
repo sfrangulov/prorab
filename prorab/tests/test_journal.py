@@ -893,6 +893,321 @@ class TestOverrideHistory(JournalBase):
         self.assertEqual([h["until"] is None for h in journal.override_history()], [False, True])
 
 
+SITE = "/home/user/projects/demo-app"
+
+
+def cli(*argv):
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        rc = journal.main(list(argv))
+    return rc, json.loads(buf.getvalue())
+
+
+def cli_exit(*argv):
+    """The exit code of a CLI call that argparse or the journal refuses."""
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+    with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+        with unittest.TestCase().assertRaises(SystemExit) as cm:
+            journal.main(list(argv))
+    return cm.exception.code
+
+
+class TestDue(JournalBase):
+    def setUp(self):
+        super().setUp()
+        saved_tz = os.environ.get("TZ")
+
+        def restore_tz():
+            if saved_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = saved_tz
+            time.tzset()
+        self.addCleanup(restore_tz)
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.log_dir = os.path.join(self.tmp.name, "logs")
+        os.makedirs(self.log_dir)
+        saved = os.environ.get("PRORAB_LOG_DIR")
+        os.environ["PRORAB_LOG_DIR"] = self.log_dir
+
+        def restore_log():
+            if saved is None:
+                os.environ.pop("PRORAB_LOG_DIR", None)
+            else:
+                os.environ["PRORAB_LOG_DIR"] = saved
+        self.addCleanup(restore_log)
+
+    def test_due_at_next_occurrence(self):
+        import datetime
+        utc = datetime.timezone.utc
+
+        def ts(*a, tz=utc):
+            return datetime.datetime(*a, tzinfo=tz).timestamp()
+        self.assertEqual(journal.due_at("15:30", ts(2026, 10, 22, 14, 0), utc),
+                         ts(2026, 10, 22, 15, 30))
+        self.assertEqual(journal.due_at("15:30", ts(2026, 10, 22, 16, 0), utc),
+                         ts(2026, 10, 23, 15, 30))
+        self.assertEqual(journal.due_at("15:30", ts(2026, 10, 22, 15, 30), utc),
+                         ts(2026, 10, 22, 15, 30))
+        import zoneinfo
+        berlin = zoneinfo.ZoneInfo("Europe/Berlin")
+        now = ts(2026, 10, 24, 23, 0, tz=berlin)
+        got = journal.due_at("09:00", now, berlin)
+        self.assertEqual(got, ts(2026, 10, 25, 9, 0, tz=berlin))
+        self.assertEqual(got - now, 11 * 3600)   # the clock change is inside the gap
+        for bad in ("24:00", "9:5", "x", "12:60", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                journal.due_at(bad, now, utc)
+
+    def test_due_set_list_clear(self):
+        now = time.time()
+        rec = journal.set_due("check-tests", now + 1200, "the unit suite of wo-12")
+        self.assertEqual(rec["label"], "check-tests")
+        self.assertEqual(rec["at_local"], time.strftime("%Y-%m-%d %H:%M",
+                                                         time.localtime(now + 1200)))
+        stored = json.loads(journal.kv_get("due.check-tests"))
+        self.assertEqual(stored["at"], now + 1200)
+        self.assertEqual(stored["text"], "the unit suite of wo-12")
+        self.assertAlmostEqual(stored["set_at"], now, delta=30)
+        listed = journal.dues(now=now)
+        self.assertEqual([(d["label"], d["overdue"]) for d in listed], [("check-tests", False)])
+        self.assertIn("at_local", listed[0])
+        self.assertTrue(journal.dues(now=now + 1300)[0]["overdue"])
+        journal.set_due("check-tests", now + 600, "moved")
+        listed = journal.dues(now=now)
+        self.assertEqual((len(listed), listed[0]["at"], listed[0]["text"]),
+                         (1, now + 600, "moved"))
+        self.assertTrue(journal.clear_due("check-tests"))
+        self.assertFalse(journal.clear_due("check-tests"))
+        self.assertEqual(journal.dues(now=now), [])
+
+    def test_dues_sorted_and_unreadable_listed(self):
+        now = time.time()
+        journal.set_due("late", now + 900)
+        journal.set_due("early", now + 60)
+        journal.kv_set("due.broken", "garbage")
+        listed = journal.dues(now=now)
+        self.assertEqual([d["label"] for d in listed if "error" not in d], ["early", "late"])
+        self.assertIn({"label": "broken", "error": "unreadable"}, listed)
+
+    def test_due_bad_label(self):
+        for bad in ("Check Tests", "1abc", "a" * 33, "", "a.b"):
+            with self.assertRaises(ValueError, msg=bad):
+                journal.set_due(bad, time.time() + 60, "t")
+        self.assertEqual([k for k in journal.kv_all() if k.startswith("due.")], [])
+        journal.set_due("a" * 32, time.time() + 60, "ok")   # the longest label
+
+    def test_due_cli(self):
+        before = time.time()
+        rc, out = cli("due", "set", "check-tests", "--in", "20", "--text", "T")
+        self.assertEqual(rc, 0)
+        self.assertAlmostEqual(out["at"], before + 1200, delta=60)
+        self.assertEqual((out["label"], out["text"], out["monitor"]), ("check-tests", "T", False))
+        with open(os.path.join(self.log_dir, "monitor-w_p1.json"), "w", encoding="utf-8") as fh:
+            json.dump({"pid": os.getpid(), "pane": "w:p1", "started_at": before}, fh)
+        _, out = cli("due", "set", "second", "--in", "0.5")
+        self.assertTrue(out["monitor"])
+        self.assertAlmostEqual(out["at"], time.time() + 30, delta=30)
+        _, out = cli("due", "set", "clock", "--at", "23:59", "--text", "late")
+        self.assertRegex(out["at_local"], r" 23:59$")
+        self.assertEqual(cli_exit("due", "set", "x1", "--at", "10:00", "--in", "5"), 2)
+        self.assertEqual(cli_exit("due", "set", "x1"), 2)
+        self.assertEqual(cli_exit("due", "set", "x1", "--in", "0"), 2)
+        self.assertEqual(cli_exit("due", "set", "x1", "--at", "25:00"), 2)
+        self.assertEqual(cli_exit("due", "set", "Bad Label", "--in", "5"), 2)
+        _, out = cli("due", "list")
+        self.assertEqual({d["label"] for d in out}, {"check-tests", "second", "clock"})
+        self.assertEqual(cli("due", "clear", "second")[1], {"label": "second", "cleared": True})
+        self.assertEqual(cli("due", "clear", "second")[1], {"label": "second", "cleared": False})
+
+    def test_due_cli_ignores_a_dead_monitor_mark(self):
+        with open(os.path.join(self.log_dir, "monitor-w_p1.json"), "w", encoding="utf-8") as fh:
+            json.dump({"pid": 2 ** 22 + 12345, "pane": "w:p1", "started_at": 0}, fh)
+        self.assertFalse(cli("due", "set", "x1", "--in", "5")[1]["monitor"])
+
+
+class TestConsent(JournalBase):
+    def work_order(self, **issue):
+        wo = new_work_order("Handbook")
+        fields = dict(name="a1", pane="w:p9", site=SITE)
+        fields.update(issue)
+        journal.issue_set(wo, "not_issued", **fields)
+        return wo
+
+    def gate_open(self, gate):
+        return journal.bd(["show", gate])[0]["status"] != "closed"
+
+    def wait(self, bead, reason):
+        return cli("wait", bead, reason)[1]
+
+    def test_wait_on_consent_records_the_watch(self):
+        wo = self.work_order()
+        out = self.wait(wo, "consent prompt: trust")
+        self.assertIsNone(out["no_watch"])
+        self.assertFalse(out["reused"])
+        rec = json.loads(journal.kv_get("consent.%s.trust" % wo))
+        self.assertEqual(out["watch"], rec)
+        self.assertEqual((rec["kind"], rec["gate"], rec["bead"], rec["pane"], rec["name"],
+                          rec["site"], rec["watch"], rec["no_watch"]),
+                         ("trust", out["gate"], wo, "w:p9", "a1", SITE, True, None))
+        self.assertAlmostEqual(rec["since"], time.time(), delta=60)
+        self.assertEqual(journal.consents()[(wo, "trust")], rec)
+        self.assertTrue(self.gate_open(out["gate"]))
+
+    def test_wait_on_a_stage_finds_its_work_order(self):
+        wo = self.work_order()
+        stage = journal.create_stage(wo, "S1", "b")
+        out = self.wait(stage, "consent prompt: mcp")
+        self.assertIsNone(out["no_watch"])
+        rec = json.loads(journal.kv_get("consent.%s.mcp" % wo))
+        self.assertEqual((rec["bead"], rec["gate"]), (stage, out["gate"]))
+        self.assertIsNone(journal.kv_get("consent.%s.mcp" % stage))
+
+    def test_wait_watch_takes_the_crews_current_pane(self):
+        wo = self.work_order()
+        journal.register_crew("a1")
+        journal.kv_set("crew.a1.pane", "w:p12")
+        self.wait(wo, "consent prompt: mcp")
+        self.assertEqual(json.loads(journal.kv_get("consent.%s.mcp" % wo))["pane"], "w:p12")
+
+    def test_wait_site_from_the_crew_when_the_record_lacks_it(self):
+        wo = self.work_order(site=None)
+        journal.register_crew("a1")
+        journal.kv_set("crew.a1.site", SITE)
+        self.wait(wo, "consent prompt: trust")
+        self.assertEqual(json.loads(journal.kv_get("consent.%s.trust" % wo))["site"], SITE)
+
+    def test_wait_reports_why_no_watch(self):
+        orphan = new_work_order("No record")
+        out = self.wait(orphan, "consent prompt: trust")
+        self.assertEqual((out["watch"], out["no_watch"]), (None, "no_issue_record"))
+        self.assertEqual([k for k in journal.kv_all() if k.startswith("consent.")], [])
+        wo = self.work_order()
+        out = self.wait(wo, "consent prompt: folder trust")
+        self.assertEqual((out["watch"], out["no_watch"]), (None, "unknown_kind"))
+        self.assertEqual([k for k in journal.kv_all() if k.startswith("consent.")], [])
+        for kind, issue, why in (("api_key", {}, "api_key"),
+                                 ("mcp", {"pane": None}, "no_pane"),
+                                 ("trust", {"site": None}, "no_site")):
+            wo = self.work_order(**issue)
+            out = self.wait(wo, "consent prompt: %s" % kind)
+            self.assertEqual((out["watch"], out["no_watch"]), (None, why), kind)
+            rec = json.loads(journal.kv_get("consent.%s.%s" % (wo, kind)))
+            self.assertEqual((rec["watch"], rec["no_watch"]), (False, why))
+
+    def test_wait_other_reason_records_no_watch(self):
+        wo = self.work_order()
+        out = self.wait(wo, "spent $31 of estimate $30")
+        self.assertEqual((out["watch"], out["no_watch"], out["reused"]), (None, None, False))
+        self.assertEqual([k for k in journal.kv_all() if k.startswith("consent")], [])
+        self.assertTrue(self.gate_open(out["gate"]))
+        self.assertEqual(journal.acts(wo, "answer"), ["spent $31 of estimate $30"])
+
+    def test_second_watch_same_kind_in_shift_is_not_armed(self):
+        wo = self.work_order()
+        first = self.wait(wo, "consent prompt: trust")
+        again = self.wait(wo, "consent prompt: trust")
+        self.assertEqual((again["gate"], again["reused"], again["watch"], again["no_watch"]),
+                         (first["gate"], True, None, "repeat"))
+        rec = json.loads(journal.kv_get("consent.%s.trust" % wo))
+        self.assertEqual((rec["watch"], rec["no_watch"]), (False, "repeat"))
+        self.assertTrue(self.gate_open(first["gate"]))   # nothing is resolved
+        gates = [d for d in journal.bd(["list", "--type", "gate", "--all", "--limit", "0"])]
+        self.assertEqual(len(gates), 1)
+        done = journal.consent_done(wo, "trust", by="customer")
+        self.assertTrue(done["resolved"])
+        third = self.wait(wo, "consent prompt: trust")   # the prompt came back later
+        self.assertNotEqual(third["gate"], first["gate"])
+        self.assertFalse(third["reused"])
+        self.assertEqual((third["watch"], third["no_watch"]), (None, "repeat"))
+        other = self.wait(wo, "consent prompt: mcp")     # another kind is armed
+        self.assertIsNotNone(other["watch"])
+        seen = json.loads(journal.kv_get("consent_seen.%s" % wo))
+        self.assertEqual([s["kind"] for s in seen], ["trust", "mcp"])
+        self.assertNotIn((wo, "seen"), journal.consents())
+        self.assertTrue(all(k[1] != "seen" for k in journal.consents()))
+
+    def test_a_later_shift_arms_the_same_kind_again(self):
+        wo = self.work_order()
+        self.wait(wo, "consent prompt: trust")
+        journal.consent_done(wo, "trust", by="customer")
+        journal.kv_set("shift.started_at", time.time() + 5)
+        out = self.wait(wo, "consent prompt: trust")
+        self.assertIsNotNone(out["watch"])
+
+    def test_records_of_two_kinds_stand_side_by_side(self):
+        wo = self.work_order()
+        trust = self.wait(wo, "consent prompt: trust")
+        mcp = self.wait(wo, "consent prompt: mcp")
+        self.assertNotEqual(trust["gate"], mcp["gate"])
+        self.assertEqual({k for k in journal.consents()}, {(wo, "trust"), (wo, "mcp")})
+        done = journal.consent_done(wo, "mcp")
+        self.assertTrue(done["resolved"])
+        self.assertTrue(self.gate_open(trust["gate"]))
+        self.assertFalse(self.gate_open(mcp["gate"]))
+        self.assertEqual(set(journal.consents()), {(wo, "trust")})
+
+    def test_consent_done_resolves_a_watchless_record(self):
+        wo = self.work_order()
+        out = self.wait(wo, "consent prompt: api_key")
+        rc, done = cli("consent", "done", wo, "api_key", "--by", "customer")
+        self.assertEqual((rc, done["found"], done["resolved"], done["gate"]),
+                         (0, True, True, out["gate"]))
+        self.assertFalse(self.gate_open(out["gate"]))
+        self.assertIsNone(journal.kv_get("consent.%s.api_key" % wo))
+
+    def test_consent_done_gate_without_a_record(self):
+        orphan = new_work_order("No record")
+        out = self.wait(orphan, "consent prompt: trust")
+        self.assertEqual(cli_exit("consent", "done", orphan, "trust", "--gate", out["gate"]), 2)
+        self.assertEqual(cli_exit("consent", "done", orphan, "trust", "--gate", out["gate"],
+                                  "--by", "monitor"), 2)
+        self.assertTrue(self.gate_open(out["gate"]))
+        rc, done = cli("consent", "done", orphan, "trust", "--gate", out["gate"],
+                       "--by", "customer")
+        self.assertEqual((done["found"], done["resolved"], done["gate"]), (True, True, out["gate"]))
+        self.assertFalse(self.gate_open(out["gate"]))
+        acts = journal.acts(orphan, "answer")
+        self.assertTrue(any(a.startswith("consent done: trust answered by the customer")
+                            for a in acts), acts)
+
+    def test_consent_done_resolves_clears_and_records(self):
+        wo = self.work_order()
+        out = self.wait(wo, "consent prompt: trust")
+        rc, done = cli("consent", "done", wo, "trust")
+        self.assertEqual(done, {"work_order": wo, "kind": "trust", "found": True,
+                                "gate": out["gate"], "resolved": True})
+        self.assertFalse(self.gate_open(out["gate"]))
+        self.assertIsNone(journal.kv_get("consent.%s.trust" % wo))
+        self.assertIn("consent done: trust answered by the customer in pane w:p9 "
+                      "(seen by monitor)", journal.acts(wo, "answer"))
+        again = journal.consent_done(wo, "trust")
+        self.assertEqual(again, {"work_order": wo, "kind": "trust", "found": False})
+        wo2 = self.work_order()
+        self.wait(wo2, "consent prompt: mcp")
+        rc, done = cli("consent", "done", wo2, "mcp", "--by", "customer")
+        self.assertIn("(seen by customer)", journal.acts(wo2, "answer")[-1])
+
+    def test_consent_list_cli(self):
+        wo = self.work_order()
+        self.wait(wo, "consent prompt: trust")
+        rc, listed = cli("consent", "list")
+        self.assertEqual([(r["kind"], r["work_order"]) for r in listed], [("trust", wo)])
+
+    def test_consent_done_gate_already_closed(self):
+        wo = self.work_order()
+        out = self.wait(wo, "consent prompt: trust")
+        journal.bd(["gate", "resolve", out["gate"]], json_out=False)   # the customer closed it
+        done = journal.consent_done(wo, "trust")
+        self.assertEqual((done["found"], done["resolved"]), (True, False))
+        self.assertIsNone(journal.kv_get("consent.%s.trust" % wo))
+        self.assertTrue(any(a.startswith("consent done: trust") for a in journal.acts(wo, "answer")))
+
+
 class TestJournalLabels(JournalBase):
     def test_add_label_and_labels(self):
         n = new_work_order()

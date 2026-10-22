@@ -104,6 +104,9 @@ class FakeJournal:
             return str(self.restarts[key[len("restarts."):]])
         return self.kv.get(key)
 
+    def kv_all(self):
+        return dict(self.kv)
+
     def kv_set(self, key, value):
         self.kv[key] = str(value)
 
@@ -419,6 +422,30 @@ class TestStart(CrewBase):
             crew.site_trust(SITE_DIR)
         self.assertEqual(self.stat_trust(), before)
         self.assertEqual([f for f in os.listdir(self.home) if "claude" in f], [".claude.json"])
+
+    def test_trust_gate_records_the_site(self):
+        self.write_trust(["/home/user/projects/other"])
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(self.j.issue("N1")["site"], SITE_DIR)
+
+    def test_issuing_record_has_the_site(self):
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        crew.start(SITE_DIR, "N1", "a1", "w:p1")   # reaches `agent start`
+        self.assertTrue(any(c.startswith("agent start a1") for c in self.calls()))
+        self.assertEqual(self.j.issue("N1")["site"], SITE_DIR)
+
+    def test_site_trust_without_retry_does_not_sleep(self):
+        with open(self.trust_file(), "w", encoding="utf-8") as fh:
+            fh.write('{"projects": {')
+        with mock.patch.object(crew.time, "sleep") as sleep:
+            self.assertIsNone(crew.site_trust(SITE_DIR, retry=False))
+        sleep.assert_not_called()
+        with mock.patch.object(crew.time, "sleep") as sleep:
+            self.assertIsNone(crew.site_trust(SITE_DIR))
+        sleep.assert_called_once_with(_defaults.load()["crew"]["trust_retry_s"])
 
     def test_start_parallel_limit(self):
         self.j.active = ["b0", "b1"]
@@ -1146,6 +1173,14 @@ class TestGit(CrewBase):
         self.assertEqual(len(ev["commits"]), 2)
         self.assertIn("g.txt", ev["diffstat"])
         self.assertTrue(ev["dirty"])
+
+    def test_cleanup_clears_the_consent_watch(self):
+        repo = self.make_repo()
+        self.j.kv.update({"consent.N1.trust": "{}", "consent.N1.mcp": "{}",
+                          "consent.N2.trust": "{}", "consent_seen.N1": "[]"})
+        crew.cleanup(repo, "N1")
+        self.assertEqual(sorted(k for k in self.j.kv if k.startswith("consent")),
+                         ["consent.N2.trust", "consent_seen.N1"])
 
     def test_cleanup_keeps_unmerged(self):
         repo = self.make_repo()

@@ -27,13 +27,13 @@ import scheduler  # noqa: E402
 SETTLED = ("idle", "done", "blocked")
 SKIP_DIRS = frozenset((".git", "node_modules", ".venv", "__pycache__"))
 EVENT_ORDER = ("emergency_stop", "emergency_released", "gone", "consent", "provider_error",
-               "limit_screen", "limit", "blind", "blind_week", "budget", "prorab_context",
-               "compacted", "context_hard", "context_soft", "hung", "hung_unclear", "settled",
-               "error")
+               "limit_screen", "limit", "blind", "blind_week", "budget", "due", "prorab_context",
+               "compacted", "context_hard", "context_soft", "hung", "hung_unclear",
+               "consent_done", "settled", "error")
 # What a poll under the emergency stop keeps of its own state: readings and spend are still
 # logged; every dedupe mark is dropped, so what happened meanwhile is raised after the release.
 STOP_KEEPS = ("last_reading", "spend", "rate", "week_burn", "poll_errors", "last_error",
-              "emergency")
+              "emergency", "due", "next_due")
 
 
 # ---- log and state files --------------------------------------------------------------
@@ -196,6 +196,8 @@ def real_deps():
         "crews": journal.crews,
         # the only deliveries a poll ever makes: the emergency stop's pauses
         "pause": crew.pause,
+        # a file read in this process (the monitor's next poll reads again): no process
+        "site_trust": lambda path: crew.site_trust(path, retry=False),
     }
 
 
@@ -380,7 +382,8 @@ def poll(crews, d, mem, now, *, deps=None):
         kept = {k: work[k] for k in STOP_KEEPS if k in work}
         work = copy.deepcopy(mem)
         work.update(kept)
-        out = [line for line in out if line.startswith("emergency_stop")]
+        # keeping a promise means telling the customer what stands: `due` is still raised
+        out = [line for line in out if line.startswith(("emergency_stop", "due "))]
         work["active"] = bool(out)
     mem.clear()
     mem.update(work)
@@ -716,6 +719,13 @@ def _poll(crews, d, mem, now, dp, stopping=False):
             ev["prorab_context"].append("prorab_context %s" % own["pct"])
         ctx_mem["_prorab"] = lv
 
+    # promised times and consent outcomes: from the kv snapshot only
+    lock = kv_get("prorab:active")
+    if isinstance(kv_snap, dict):
+        _timers(mem, kv, now, lock, errors, ev)
+        if listed is not None and not stopping:
+            _consent_watches(mem, kv, listed, screens, now, lock, d, dp, errors, ev, guard)
+
     # errors: `error <source>` after error_polls consecutive failing polls, once per streak
     streak, fired = mem.setdefault("err_streak", {}), mem.setdefault("err_fired", [])
     for src in list(streak):
@@ -736,6 +746,86 @@ def _poll(crews, d, mem, now, dp, stopping=False):
     lines = [line for k in EVENT_ORDER for line in ev[k]]
     mem["active"] = bool(active or lines)  # read by main: backoff resets while it is set
     return lines
+
+
+# ---- promised times and consent outcomes ------------------------------------------------
+
+def _timers(mem, kv, now, lock, errors, ev):
+    """Raise `due <label> <text>` once per timer and foreman pane; remember the next one."""
+    fired = mem.setdefault("due", {})
+    labels, upcoming = set(), []
+    for key, value in sorted(kv.items()):
+        if not key.startswith("due.") or value in (None, ""):
+            continue
+        label = key[len("due."):]
+        try:
+            rec = json.loads(value)
+            at = float(rec["at"])
+            text = rec.get("text") or ""
+        except (TypeError, ValueError, KeyError, AttributeError):
+            errors.setdefault(key, "unreadable timer record")
+            continue
+        labels.add(label)
+        mark = [at, lock]
+        if at <= now:
+            if fired.get(label) != mark:
+                first = str(text).splitlines()[0][:80] if str(text).strip() else ""
+                ev["due"].append(("due %s %s" % (label, first)).rstrip())
+                fired[label] = mark
+        elif fired.get(label) != mark:
+            upcoming.append(at)
+    for label in list(fired):
+        if label not in labels:
+            del fired[label]
+    mem["next_due"] = min(upcoming) if upcoming else None
+
+
+def _consent_watches(mem, kv, listed, screens, now, lock, d, dp, errors, ev, guard):
+    """Raise `consent_done <work order> <kind>` when the signs of an armed watch hold. Nothing
+    is read from a screen that was not read this poll, and nothing is pressed or written."""
+    done = mem.setdefault("consent_done", {})
+    present, trust_seen = set(), {}
+    for key, value in sorted(kv.items()):
+        if not key.startswith("consent.") or value in (None, ""):
+            continue
+        work_order, _, kind = key[len("consent."):].rpartition(".")
+        try:
+            rec = json.loads(value)
+            if not isinstance(rec, dict):
+                raise ValueError
+        except ValueError:
+            errors.setdefault(key, "unreadable consent record")
+            continue
+        label = "%s %s" % (work_order, kind)
+        present.add(label)
+        if rec.get("watch") is not True:
+            continue
+        if _exiting(_kv_value(kv, "crew.%s.exiting" % rec.get("name")), now,
+                    d["crew"]["exit_window_s"]):
+            continue
+        pane, name = rec.get("pane"), rec.get("name")
+        if kind == "trust":
+            site = rec.get("site")
+            if not (pane and site) or any(a.get("pane_id") == pane for a in listed):
+                continue
+            if site not in trust_seen:
+                trust_seen[site] = guard("site_trust.%s" % site, dp["site_trust"], site)
+            holds = trust_seen[site] is True
+        elif kind in ("mcp", "claude_md_imports", "bypass_warning", "tool_permission"):
+            agent = next((a for a in listed if pane and a.get("pane_id") == pane
+                          and a.get("name") == name), None)
+            holds = (agent is not None
+                     and agent.get("agent_status") in ("idle", "done", "working")
+                     and not (pane in screens and herdr_cli.consent_dialog(screens[pane])))
+        else:
+            holds = False   # api_key and unknown kinds are never inferred
+        mark = [rec.get("since"), lock]
+        if holds and done.get(label) != mark:
+            ev["consent_done"].append("consent_done %s %s" % (work_order, kind))
+            done[label] = mark
+    for label in list(done):
+        if label not in present:
+            del done[label]
 
 
 # ---- main ---------------------------------------------------------------------------
@@ -795,6 +885,8 @@ def _run(argv, deps):
                 sleep_for = mem["interval"] = base
             else:  # quiet: sleep as planned, then back off for the next time
                 mem["interval"] = min(sleep_for * mon["backoff_factor"], mon["interval_max_s"])
+            if mem.get("next_due") is not None:   # an exact wake-up for the next timer
+                sleep_for = min(sleep_for, max(0.0, mem["next_due"] - time.time()))
             save_mem(mem)
             entry = dict(mem.get("last_reading") or {"ts": now}, events=events)
             if mem.get("poll_errors"):

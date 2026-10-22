@@ -164,6 +164,30 @@ class TestActs(unittest.TestCase):
         self.assertTrue(block("acts.md", "Incident").startswith(shift.INCIDENT_TAG))
 
 
+class TestCustomerReferences(unittest.TestCase):
+    def test_customer_md_sections(self):
+        text = read("customer.md")
+        sections = split_sections(text)
+        for heading in ("Promised times", "Consent outcomes", "Panes", "Grey suggestions",
+                        "Reports", "Delegation words", "Stuck or working", "Budget units"):
+            self.assertIn(heading, sections)
+        self.assertIn("journal.py due set", text)
+        self.assertIn("journal.py consent done", text)
+
+    def test_customer_approval_block(self):
+        sections = split_sections(read("acts.md"))
+        self.assertIn("Customer approval", sections)
+        blocks = fenced_blocks(sections["Customer approval"])
+        self.assertTrue(blocks)
+        self.assertTrue(blocks[0].startswith("[customer decision] approve:"))
+        self.assertFalse(blocks[0].startswith(crew.DROP_MARKER))
+
+    def test_foreman_handover_act_names_timers(self):
+        body = split_sections(read("acts.md"))["Foreman's handover act"]
+        line = next(ln for ln in body.splitlines() if ln.startswith("Expected events:"))
+        self.assertIn("journal.py due list", line)
+
+
 class TestWorkOrder(unittest.TestCase):
     def setUp(self):
         self.text = read("work-order.md")

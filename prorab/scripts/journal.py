@@ -885,10 +885,237 @@ def acquire_active(pane_id):
 
 # ---- waiting for the customer, restarts, crews ------------------------------
 
-def wait_customer(bead, reason):
+def _new_gate(bead, reason):
     gate = bd(["gate", "create", "--type", "human", "--blocks", bead, "--reason", reason])
     add_act(bead, "answer", reason)
     return gate["id"]
+
+
+_CONSENT_REASON = re.compile(r"^consent prompt: (\w+)")
+
+
+def consent_kind(reason):
+    """The kind word of a reason of the form ``consent prompt: <kind>``, else None."""
+    m = _CONSENT_REASON.match(reason or "")
+    return m.group(1) if m else None
+
+
+def wait_customer(bead, reason):
+    kind = consent_kind(reason)
+    if kind is not None:
+        return record_consent(bead, kind, reason)["gate"]
+    return _new_gate(bead, reason)
+
+
+# ---- promised times: timers in the office journal ------------------------------------------
+
+DUE_LABEL = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_CLOCK = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+
+def due_at(clock, now, tz=None):
+    """The next time the local clock shows `clock` (HH:MM): that wall time on `now`'s local
+    date when it is not before `now`, else on the next date. Built from the local wall time,
+    so a daylight-saving change never moves it."""
+    m = _CLOCK.match(clock or "")
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        raise ValueError("expected HH:MM between 00:00 and 23:59, got %r" % (clock,))
+    hh, mm = int(m.group(1)), int(m.group(2))
+    local = datetime.datetime.fromtimestamp(now, tz)
+    day = local.date()
+    for _ in range(2):
+        wall = datetime.datetime(day.year, day.month, day.day, hh, mm)
+        ts = (wall.replace(tzinfo=tz) if tz is not None else wall).timestamp()
+        if ts >= now:
+            return ts
+        day += datetime.timedelta(days=1)
+    return ts
+
+
+def _at_local(at):
+    return datetime.datetime.fromtimestamp(at).strftime("%Y-%m-%d %H:%M")
+
+
+def set_due(label, at, text=""):
+    """Write the timer `due.<label>`; a second call of a label replaces it."""
+    if not isinstance(label, str) or not DUE_LABEL.match(label):
+        raise ValueError("bad timer label %r (expected %s)" % (label, DUE_LABEL.pattern))
+    rec = {"at": float(at), "text": text, "set_at": time.time()}
+    kv_set("due.%s" % label, json.dumps(rec, ensure_ascii=False))
+    return dict(rec, label=label, at_local=_at_local(rec["at"]))
+
+
+def dues(kv=None, now=None):
+    """Every timer by `at`, with `label`, `at_local` and `overdue`; an unreadable one is
+    ``{"label", "error": "unreadable"}``."""
+    kv = kv_all() if kv is None else kv
+    now = time.time() if now is None else now
+    good, bad = [], []
+    for k, v in kv.items():
+        if not k.startswith("due."):
+            continue
+        label = k[len("due."):]
+        try:
+            rec = json.loads(v)
+            at = float(rec["at"])
+            if not isinstance(rec, dict):
+                raise ValueError
+        except (TypeError, ValueError, KeyError):
+            bad.append({"label": label, "error": "unreadable"})
+            continue
+        good.append(dict(rec, label=label, at=at, at_local=_at_local(at), overdue=at <= now))
+    return sorted(good, key=lambda r: r["at"]) + sorted(bad, key=lambda r: r["label"])
+
+
+def clear_due(label):
+    if kv_get("due.%s" % label) is None:
+        return False
+    kv_clear("due.%s" % label)
+    return True
+
+
+def _monitor_alive():
+    """True when a monitor mark of the log directory names a pid that is alive."""
+    import glob
+    import monitor  # lazy: only this check needs it
+    for path in glob.glob(os.path.join(monitor.log_dir(), "monitor-*.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                pid = int(json.load(fh)["pid"])
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return False
+
+
+# ---- consent gates: records, watches and their outcome -------------------------------------
+
+def _json_record(value):
+    try:
+        rec = json.loads(value) if value else None
+    except (TypeError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _work_order_of(bead, kv):
+    """`bead` when it has an issue record, else its parent when that has one, else None."""
+    if _kv_value(kv, "issue.%s" % bead):
+        return bead
+    item = _show(bead)
+    parent = item.get("parent") or next(
+        (d.get("id") for d in item.get("dependencies") or []
+         if d.get("dependency_type") == "parent-child"), None)
+    if parent and _kv_value(kv, "issue.%s" % parent):
+        return parent
+    return None
+
+
+def record_consent(bead, kind, gate_reason):
+    """Gate a consent prompt and, when the journal can place it, arm its watch.
+    Returns ``{"gate", "record", "no_watch", "reused"}``."""
+    import herdr_cli  # lazy
+    kv = kv_all()
+    work_order = _work_order_of(bead, kv)
+    if work_order is None:
+        return {"gate": _new_gate(bead, gate_reason), "record": None,
+                "no_watch": "no_issue_record", "reused": False}
+    if kind not in herdr_cli.CONSENT_NAMES:
+        return {"gate": _new_gate(bead, gate_reason), "record": None,
+                "no_watch": "unknown_kind", "reused": False}
+    key = "consent.%s.%s" % (work_order, kind)
+    open_rec = _json_record(_kv_value(kv, key))
+    if open_rec is not None and open_rec.get("gate"):
+        open_rec.update(watch=False, no_watch="repeat")
+        kv_set(key, json.dumps(open_rec, ensure_ascii=False))
+        return {"gate": open_rec["gate"], "record": open_rec, "no_watch": "repeat",
+                "reused": True}
+    gate = _new_gate(bead, gate_reason)
+    issue_rec = _json_record(_kv_value(kv, "issue.%s" % work_order)) or {}
+    name = issue_rec.get("name")
+    pane = issue_rec.get("pane")
+    if name and name in crews(kv):
+        pane = _kv_value(kv, "crew.%s.pane" % name) or pane
+    site = issue_rec.get("site") or (_kv_value(kv, "crew.%s.site" % name) if name else None)
+    started = _kv_value(kv, "shift.started_at")
+    seen = []
+    try:
+        seen = json.loads(_kv_value(kv, "consent_seen.%s" % work_order) or "[]")
+    except ValueError:
+        pass
+    seen = [x for x in seen if isinstance(x, dict)] if isinstance(seen, list) else []
+    repeat = any(x.get("kind") == kind and (started is None or float(x.get("at") or 0) >= float(started))
+                 for x in seen)
+    no_watch = None
+    if kind == "api_key":
+        no_watch = "api_key"
+    elif repeat:
+        no_watch = "repeat"
+    elif not pane:
+        no_watch = "no_pane"
+    elif kind == "trust" and not site:
+        no_watch = "no_site"
+    now = time.time()
+    rec = {"kind": kind, "gate": gate, "bead": bead, "pane": pane, "name": name, "site": site,
+           "since": now, "watch": no_watch is None, "no_watch": no_watch}
+    if no_watch is None:
+        kv_set("consent_seen.%s" % work_order,
+               json.dumps(seen + [{"kind": kind, "at": now}], ensure_ascii=False))
+    kv_set(key, json.dumps(rec, ensure_ascii=False))
+    return {"gate": gate, "record": rec, "no_watch": no_watch, "reused": False}
+
+
+def consents(kv=None):
+    """``{(work order, kind): record}`` for every ``consent.<work order>.<kind>`` that parses."""
+    kv = kv_all() if kv is None else kv
+    out = {}
+    for k, v in kv.items():
+        if not k.startswith("consent."):
+            continue
+        work_order, _, kind = k[len("consent."):].rpartition(".")
+        rec = _json_record(v)
+        if work_order and kind and rec is not None:
+            out[(work_order, kind)] = rec
+    return out
+
+
+def _resolve_gate(gate):
+    """True when this call closed the gate; False when it was closed already or bd refuses."""
+    p = _run(["show", gate, "--json"], check=False)
+    try:
+        if json.loads(p.stdout)[0].get("status") == "closed":
+            return False
+    except (ValueError, IndexError, AttributeError, TypeError):
+        return False
+    return _run(["gate", "resolve", gate], check=False).returncode == 0
+
+
+def consent_done(work_order, kind, by="monitor", gate=None):
+    """The customer's part of a consent gate is done: resolve the gate, drop the watch, record
+    the act. A gate without a record is resolved only with `gate` and `by="customer"`."""
+    if by not in ("monitor", "customer"):
+        raise ValueError("by must be monitor or customer")
+    if gate is not None and by != "customer":
+        raise ValueError("--gate needs --by customer")
+    key = "consent.%s.%s" % (work_order, kind)
+    rec = _json_record(kv_get(key))
+    if rec is None and gate is None:
+        return {"work_order": work_order, "kind": kind, "found": False}
+    if rec is not None:
+        gate_id, bead = rec.get("gate"), rec.get("bead") or work_order
+        where = " in pane %s" % rec["pane"] if rec.get("pane") else ""
+    else:
+        gate_id, bead, where = gate, work_order, ""
+    resolved = _resolve_gate(gate_id) if gate_id else False
+    if rec is not None or kv_get(key) is not None:
+        kv_clear(key)
+    add_act(bead, "answer", "consent done: %s answered by the customer%s (seen by %s)"
+            % (kind, where, by))
+    return {"work_order": work_order, "kind": kind, "found": True, "gate": gate_id,
+            "resolved": resolved}
 
 
 def bump_restarts(work_order):
@@ -997,6 +1224,20 @@ def main(argv=None):
     p.add_argument("pane_id")
     p = sub.add_parser("wait")
     p.add_argument("bead"); p.add_argument("reason")
+    p = sub.add_parser("due")
+    dsub = p.add_subparsers(dest="duecmd", required=True)
+    g = dsub.add_parser("set"); g.add_argument("label")
+    grp = g.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--at"); grp.add_argument("--in", dest="in_min", type=float)
+    g.add_argument("--text", default="")
+    dsub.add_parser("list")
+    dsub.add_parser("clear").add_argument("label")
+    p = sub.add_parser("consent")
+    csub = p.add_subparsers(dest="concmd", required=True)
+    csub.add_parser("list")
+    g = csub.add_parser("done"); g.add_argument("work_order"); g.add_argument("kind")
+    g.add_argument("--by", choices=("monitor", "customer"), default="monitor")
+    g.add_argument("--gate")
     p = sub.add_parser("restarts")
     p.add_argument("work_order"); p.add_argument("--bump", action="store_true")
     p = sub.add_parser("crews")
@@ -1014,6 +1255,18 @@ def main(argv=None):
     g = ksub.add_parser("get"); g.add_argument("key")
     s = ksub.add_parser("set"); s.add_argument("key"); s.add_argument("value")
     a = ap.parse_args(argv)
+    if a.cmd == "due" and a.duecmd == "set":
+        if a.in_min is not None and not a.in_min > 0:
+            ap.error("--in needs minutes above 0")
+        if a.at is not None:
+            try:
+                due_at(a.at, time.time())
+            except ValueError as e:
+                ap.error(str(e))
+        if not DUE_LABEL.match(a.label):
+            ap.error("bad timer label %r (expected %s)" % (a.label, DUE_LABEL.pattern))
+    if a.cmd == "consent" and a.concmd == "done" and a.gate and a.by != "customer":
+        ap.error("--gate needs --by customer")
 
     if a.cmd == "ensure":
         ensure_db()
@@ -1119,7 +1372,26 @@ def main(argv=None):
         _emit({"acquired": got})
         return 0 if got else 1
     if a.cmd == "wait":
-        return _emit({"gate": wait_customer(a.bead, a.reason)})
+        kind = consent_kind(a.reason)
+        if kind is None:
+            return _emit({"gate": wait_customer(a.bead, a.reason), "watch": None,
+                          "no_watch": None, "reused": False})
+        res = record_consent(a.bead, kind, a.reason)
+        rec = res["record"]
+        return _emit({"gate": res["gate"], "watch": rec if rec and rec.get("watch") else None,
+                      "no_watch": res["no_watch"], "reused": res["reused"]})
+    if a.cmd == "due":
+        if a.duecmd == "set":
+            now = time.time()
+            at = due_at(a.at, now) if a.at is not None else now + a.in_min * 60
+            return _emit(dict(set_due(a.label, at, a.text), monitor=_monitor_alive()))
+        if a.duecmd == "list":
+            return _emit(dues())
+        return _emit({"label": a.label, "cleared": clear_due(a.label)})
+    if a.cmd == "consent":
+        if a.concmd == "list":
+            return _emit([dict(r, work_order=w) for (w, _k), r in sorted(consents().items())])
+        return _emit(consent_done(a.work_order, a.kind, by=a.by, gate=a.gate))
     if a.cmd == "restarts":
         n = bump_restarts(a.work_order) if a.bump else _kv_int("restarts.%s" % a.work_order)
         return _emit({"restarts": n})

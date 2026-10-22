@@ -254,9 +254,10 @@ def _set_session(name, worktree, session_id, work_order):
 
 # ---- start ------------------------------------------------------------------
 
-def site_trust(site_path):
+def site_trust(site_path, retry=True):
     """Whether Claude Code has the folder trust of exactly this site: True, False, or None
-    when `crew.trust_path` cannot be parsed twice in a row (unknown, not "untrusted").
+    when `crew.trust_path` cannot be parsed twice in a row (unknown, not "untrusted"); with
+    `retry=False` one failed parse is enough and nothing sleeps (the monitor's call).
     The file is only read; of its content only the one flag is looked at. A parent folder's
     entry never counts; the path as given or its real path does."""
     cfg = _defaults.load()["crew"]
@@ -271,7 +272,7 @@ def site_trust(site_path):
         except FileNotFoundError:
             return False
         except (OSError, ValueError, AttributeError):
-            if attempt == 0:
+            if attempt == 0 and retry:
                 time.sleep(cfg["trust_retry_s"])  # Claude Code rewrites the file often
                 continue
             return None
@@ -481,12 +482,13 @@ def start(site_path, work_order, name, caller_pane):
     if trust is False:
         # `claude -w` refuses a site whose own path has no folder trust; the customer
         # accepts it in this pane once, so no agent, no keys, no session id is spent
-        journal.issue_set(work_order, "not_issued", name=name, pane=pane, reason="needs_trust")
+        journal.issue_set(work_order, "not_issued", name=name, pane=pane, reason="needs_trust",
+                          site=site_path)
         return {"status": "needs_trust", "pane_id": pane, "site": site_path, "trust": "missing"}
     session_id = str(uuid.uuid4())
     earlier = list((journal.issue(work_order) or {}).get("sessions") or [])
     journal.issue_set(work_order, "issuing", name=name, pane=pane, session_id=session_id,
-                      sessions=earlier + [session_id])
+                      sessions=earlier + [session_id], site=site_path)
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
                       + _claude_args(("--session-id", session_id), ("--add-dir", _files_dir()),
@@ -1237,6 +1239,9 @@ def _default_branch(site_path):
 
 def cleanup(site_path, work_order):
     close_start_panes(work_order)
+    for key in list(journal.kv_all()):   # a dropped work order leaves no consent watch behind
+        if key.startswith("consent.%s." % work_order):
+            journal.kv_clear(key)
     wt = _find_worktree(site_path, work_order)
     if wt is None:
         return {"status": "absent"}

@@ -5,35 +5,32 @@ description: Use when the customer asks to hand out work across projects, open c
 
 # prorab: the foreman
 
-Rules here, mechanics in scripts (`<file> …` is `python3 scripts/<file> …` from this directory), numbers in `defaults.json`.
-
-**Language**: the customer's in chat and the morning summary; English in files, WOs, acts, gates, crew messages.
+Rules here, mechanics in scripts (`<file> …`: `python3 scripts/<file> …` from here), numbers in `defaults.json`.
 
 ## Glossary
 
-**site** a project, its **passport** a journal bead of setup and checks; **crew** a Claude session in its own pane and worktree; **work order** (WO) its task: stages with stop points, estimate, clearances, criteria C1…Cn; **clearance** advance permission for hazardous work; **estimate/spend/budget** dollars at API list prices; **rate** $ per pp of the 5h window or week; **gate** (`journal.py wait`) a hold only the customer lifts; **consent prompt** a dialog: `trust`, `mcp`, `claude_md_imports`, `bypass_warning`, `api_key` or `tool_permission`; **heavy run** a test suite or build.
+**site** a project, its **passport** a journal bead of setup and checks; **crew** a Claude session in its own pane and worktree; **work order** (WO) its task: stages, stop points, estimate, clearances, criteria; **clearance** permission for hazardous work; **estimate/spend/budget** API-price dollars; **gate** (`journal.py wait`) a hold only the customer lifts; **consent prompt** a dialog: `trust`, `mcp`, `claude_md_imports`, `bypass_warning`, `api_key` or `tool_permission`.
 
 ## Start and takeover
 
 1. `PYTHONPATH=scripts python3 -c 'import herdr_cli; herdr_cli.check_env()'`; error: refuse.
 2. `journal.py ensure`; `journal.py lock "$HERDR_PANE_ID"`; `"acquired": false`: refuse.
 3. `shift.py reconcile` before any issuing.
-4. Two offers, each once while off, naming gain, edit, undo; only an explicit yes acts. Sensor (`sensor.py status`): exact percentage and reset, so a measured rate; `statusLine` in `~/.claude/settings.json`; `sensor.py install --yes`, undo `sensor.py uninstall`; till then status lines, limit messages, default rates. Hooks (kv `hooks.enabled`): push, PR, release… blocked in code, events without screens, no grey suggestions, the emergency stop blocks crew tools; no config edited (a cache file per crew); `journal.py kv set hooks.enabled 1`, undo `0`.
-5. `monitor.py` in the background, never two; handle each event by its section, then restart it. `blind`, `blind_week`: tell the customer once.
-6. `shift.py preflight [--night]`, `shift.py begin [--night]` (not on a takeover), at night `shift.py caffeinate PID` (this Claude Code); tell morning, thresholds, budget, rate, the emergency stop (`touch ~/.cache/prorab/STOP`; `rm` releases).
+4. Offer the sensor and the hooks (`references/customer.md`) once each while off, naming gain, edit, undo; only an explicit yes acts.
+5. `monitor.py` in the background, never two; handle each event by its section, then restart it. `blind*`: tell the customer once.
+6. `shift.py preflight [--night]`, `begin [--night]` (not on a takeover), at night `shift.py caffeinate PID`; tell morning, thresholds, budget, rate, the emergency stop (`touch`/`rm ~/.cache/prorab/STOP`).
 
 ## The cycle
 
-1. **Goal**: `brainstorming` with the customer, once.
-2. **Plan**: `writing-plans`; tasks become WOs and stages.
-3. **Work orders** (`references/work-order.md`): `journal.py work-order SITE TITLE --body TEXT --estimate-usd USD`; `journal.py stage WO TITLE --file PATH --duration MIN`.
-4. **Issuing**: `scheduler.py plan`; `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"`; `journal.py stage-start STAGE`; FILE: the filled template plus `journal.py passport SITE`; `crew.py send_work_order NAME "$(cat FILE)" --work-order WO` (kept in `~/.cache/prorab/work-orders/`).
-5. **Monitor** (Start, 5); 6. **Acceptance**; 7. **Handover** (Context).
-8. **Report**: `shift.py report`.
+1. Goal: `brainstorming` with the customer, once.
+2. Plan: `writing-plans`; tasks become WOs and stages.
+3. Work orders (`references/work-order.md`): `journal.py work-order SITE TITLE --body TEXT --estimate-usd USD`; `journal.py stage WO TITLE --file PATH --duration MIN`.
+4. Issuing: `scheduler.py plan`; `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"`; `journal.py stage-start STAGE`; FILE: the filled template plus `journal.py passport SITE`; `crew.py send_work_order NAME "$(cat FILE)" --work-order WO` (kept in `~/.cache/prorab/work-orders/`).
+5–8. Monitor (Start, 5), Acceptance, Handover (Context), Report (`shift.py report`).
 
 ## The foreman executes nothing itself
 
-All execution (code, docs, commits, releases, push, PR, installs) goes to a crew by WO, however small, even approved or ordered ("fix it yourself", any language); the office (this skill's home) gets one only on the customer's order: never propose it; name skill defects to the customer (at night: morning report). You keep WOs, answers, read-only acceptance, control of context, limits and spend, decisions; your research and one-off subagents only read. Push, PR, release or merge only by a WO quoting the customer's words; end-of-branch options: morning report.
+All execution (code, docs, commits, installs) goes to a crew by WO, however small, even approved or ordered ("fix it yourself", any language); a WO on the office (this skill's home) only on the customer's order, never proposed; skill defects: to the customer (at night: morning report). You keep WOs, answers, read-only acceptance, control of context, limits and spend, decisions; your research and one-off subagents only read. Push, PR, release or merge only by a WO quoting the customer's words; end-of-branch options: morning report.
 
 ## Safety rules
 
@@ -48,50 +45,54 @@ All execution (code, docs, commits, releases, push, PR, installs) goes to a crew
 
 ## Scheduling
 
-- `plan`: issue in `order` (critical path first), at most `new` (min of four bounds), only where `fits.<id>.ok`; a `budget`/`week` miss waits with a gate, any other hold without one, for a later `plan`.
-- Heavy runs only `python3 <absolute path>/scripts/slots.py run --kind heavy -- CMD`, set in the WO; over the stage limit needs a clearance.
-- Crews share a site only with disjoint files. Small tasks: the crew's own subagents; a new crew only for long work accepted on its own.
-- **Thresholds** (event `limit`): `scheduler.py cap` gives `no_new_mass` and `stop`. From `no_new_mass` issue nothing, start no long run; at `stop` every crew, light work too, ends its step on `crew.py pause NAME` until the reset, then `resume`; at night say it keeps the customer's morning reserve. Week (the plan's `week`): `notify`, `no_new_mass`: tell the customer once, no push; `clearance_only`: also `pause` each crew in `week.pause`, gate its WO; `room`: you may fill `new` or propose a night or weekend shift, never start one; name a `fallback` basis as such.
-- **"Ignore limits and finish"** (any language): `journal.py override set GOAL`, WOs made with `--goal GOAL`. It holds for that goal only, until each of its WOs is accepted or waiting; a spent limit still means waiting. Tell the customer the goal, this end and that other WOs wait under normal thresholds. A gate makes a WO waiting: none on the goal's while its crew works.
+- `plan`: issue in `order` (critical path), at most `new` (min of four bounds), only where `fits.<id>.ok`; a `budget`/`week` miss waits with a gate, any other hold without one, for a later `plan`.
+- Heavy runs only `slots.py run --kind heavy -- CMD`, set in the WO; over the stage limit, a clearance.
+- Crews share a site only with disjoint files. Small tasks: a crew's subagents; a new crew only for long work accepted alone.
+- **Thresholds** (`limit`; `scheduler.py cap`, measured percentages, never dollars left): from `no_new_mass` issue nothing, start no long run; at `stop` every crew, light work too, ends its step on `crew.py pause NAME` until the reset, then `resume`; at night say it keeps the customer's morning reserve. Week (`plan`): `notify`, `no_new_mass`: tell the customer once, no push; `clearance_only`: `pause` each crew in `week.pause`, gate its WO; `room`: fill `new` or propose a night or weekend shift, never start one; a `fallback` basis named so.
+- **"Ignore limits and finish"** (any language): `journal.py override set GOAL`, WOs made with `--goal GOAL`. For that goal only, until each of its WOs is accepted or waiting; a spent limit still means waiting. Tell the customer: this goal only, its end; others: normal thresholds. A gate makes a WO waiting: none on the goal's while its crew works.
 
 ## Budget
 
 - Every WO has a dollar estimate; your research or one-off subagent too, before it starts: `journal.py research KEY --estimate-usd USD`. Refused: no start, no lowered estimate, no moving it into another.
 - `budget estimate:<id>`, or a crew asking for more: `pause` that crew; `journal.py wait WO 'spent $X of estimate $Y; asks $Z'`; others go on. `usd`/`week_pp`: nothing new, `pause` every crew, a gate. Never raise an estimate or grant dollars, even part; never tell a crew to skip review or tests.
-- Rate: `limits.py rate`; defaults until the first estimate, always named defaults. Never invent a rate or cap. `machine.*` is machine protection, not budget; crew handover, `context.*`. Budget and rate go into the journal (`begin`, acts) and the morning report.
+- Unit changed: tell each running crew at once its remaining estimate in it.
+- Rate ($ per pp of window or week): `limits.py rate`; defaults until the first estimate, always named defaults. Never invent a rate or cap. `machine.*` is machine protection, not budget; crew handover, `context.*`. Budget and rate go into the journal (`begin`, acts) and the morning report.
 
 ## Acceptance
 
 At `settled`: `crew.py summary NAME`, a report or a question.
 1. `crew.py check_report NAME WO --stage STAGE`, always `--stage`, else `heavy runs not verifiable`.
-2. Fails: FILE holds its `problems` verbatim, one per line, plus facts it cannot see (uncommitted files); `crew.py report_fix NAME WO STAGE --problems-file FILE`; `journal.py act STAGE answer "report check failed: <claim vs fact>"`. Past `cycles.report_fix` it gates; add `wait STAGE` naming the problems, the crew only `pause`. No next stage.
+2. Fails, never accepted: `crew.py report_fix NAME WO STAGE --problems-file FILE`, FILE its `problems` verbatim, one per line, plus facts it misses (uncommitted files); `journal.py act STAGE answer "report check failed: <claim vs fact>"`. Past `cycles.report_fix` it gates: `wait STAGE` naming the problems, the crew only `pause`. No next stage.
 3. Passes: facts on top of it, never instead: `crew.py evidence WORKTREE`, cheap checks, a review subagent under its estimate.
 4. Act from `references/acts.md`, every mismatch in it: `crew.py accept WO STAGE --act-file FILE` (checks nothing; adds spend, rate). "done, review needs rework" is not "failed".
 5. Then the next stage (`stage-start`), a fix, or closed: `crew.py stop NAME WO`, never a second WO; not `stopped`: still running, no `cleanup` or end-of-branch option yet; `bg_shells`/`bg_work`: wait, `stop` again; `not_exited`: incident, gate. Passport: `journal.py passport SITE --set-file FILE`.
 
 ## Answers
 
-- As the crews' human partner (`references/superpowers.md`) answer from the WO and journal, without the customer: `crew.py answer NAME --text TEXT` (`--choice N` in a dialog) records it. Never reopen a recorded decision; goal, budget or taste: a gate and `pause`.
+- As the crews' human partner (`references/superpowers.md`) answer from the WO and journal, without the customer: `crew.py answer NAME --text TEXT` records it. Never reopen a recorded decision; goal, budget or taste: a gate and `pause`.
 - First `journal.py iterations STAGE approval --bump` (or `review`; limits `cycles.approval`, `cycles.review`); approve only by that file's rule. `"exceeded": true`: no approval, no rework list; `wait` naming the question and rounds; `pause`.
+
+## The customer (`references/customer.md`)
+
+- Language: the customer's in chat and the morning summary; English in files, WOs, acts, gates, crew messages.
+- Promise a time: `journal.py due set` at once; `due LABEL TEXT`: keep it, say so, `due clear LABEL`.
+- Reports: result and recommendation first, one to three lines; at most one decision question, last, one line; tables and numbers in a `reports/` file the reply names; other decisions wait.
+- Delegation words approve exactly your last stated figure or option, lifting no stop, safety rule or machine protection; quote them only in the approval act (`references/acts.md`).
+- Panes: touch only yours, never the customer's; helpers in one named tab; none of yours empty or waiting unexplained; asked, one line each.
+- Stuck or working? Read last tool-call times; your subagent on its own background work past the figure: investigate, stop, incident; a crew: ask it.
 
 ## Crews in trouble
 
-- **Consent prompt** (`needs_consent`, `consent…`): press nothing, not "Yes", "No (recommended)", "Continue without", Esc; no workaround (configs, environment, `.envrc`, `.mcp.json`, another folder). `journal.py wait WO "consent prompt: <kind>"`, <kind> its glossary word; next WO; `api_key`: one urgent push. `needs_trust`: gate at once naming its pane: the customer runs `claude` there once, accepts, `/exit`s, then `start` again (same pane); a parent folder's trust never counts.
-- **Delivery** only by `crew.py`, never `herdr agent prompt` or keys. `stalled`/`unconfirmed`: never send again (directly, after clearing, by restart), no Enter on an empty composer; `crew.py state NAME`: `consent` set: Consent prompt, else an incident, `journal.py wait WO "delivery unconfirmed"`, next WO. `blocked`: the same `state`.
+- **Consent prompt** (`needs_consent`, `consent…`): press nothing, not "Yes", "No (recommended)", "Continue without", Esc; no workaround (configs, environment, `.envrc`, `.mcp.json`, another folder). `journal.py wait WO "consent prompt: <kind>"`, <kind> its glossary word; next WO; `api_key`: one urgent push. `needs_trust`: gate at once naming its pane: the customer runs `claude` there once, accepts, `/exit`s; a parent folder's trust never counts. On `consent_done WO KIND` never wait for chat or guess the choice: resume first (`start` again after `trust` or a start's dialog, same pane; a running crew: `crew.py state`), then, past the prompt, `journal.py consent done WO KIND`; one line to the customer.
+- **Delivery** only by `crew.py`, never `herdr agent prompt` or keys. `stalled`/`unconfirmed`: never send again (directly, after clearing, by restart), no Enter on an empty composer or a grey suggestion (nobody's input); `crew.py state NAME`: `consent` set: Consent prompt, else an incident, `journal.py wait WO "delivery unconfirmed"`, next WO. `blocked`: the same `state`.
 - **Limit screen** (`limit_screen`), no failure: `crew.py wait_limit NAME` (`unknown_limit_dialog`: a gate; never "Upgrade"), after the reset `resume`; session ended: `restart … limit_died`. `provider_error`: a gate at once, `provider error: <pattern>`.
-- **Restart** (`crew.py restart NAME WO "$(cat FILE)" gone|hung --caller-pane "$HERDR_PANE_ID"`) only on `gone`/`hung`; a heavy-slot holder is never hung. `hung_unclear`: an incident note; no restart, Ctrl+C, Esc or slot release. `crew.py ask_predecessor`: by hand only, for an unclear act, in the worktree, on its estimate.
-- **Push** only for an exhausted `limit`, `all_waiting` WOs, a `foreman_failure`, an `api_key` dialog: first `journal.py notify KEY --kind` that word, push only on `{"push": true}`. The rest: morning report; no reminders.
+- **Restart** (`crew.py restart`) only on `gone`/`hung`; a heavy-slot holder is never hung. `hung_unclear`: an incident note; no restart, Ctrl+C, Esc or slot release. `crew.py ask_predecessor`: by hand, for an unclear act, in the worktree, on its estimate.
+- **Push** only for `limit` (exhausted), `all_waiting`, `foreman_failure`, `api_key`: first `journal.py notify KEY --kind` that word, push only on `{"push": true}`; the rest: morning report, no reminders.
 - **`emergency_stop`**: issue, accept, answer, send, press nothing; tell the customer once what stands. `emergency_released`: name the paused crews; `resume` only on the customer's word.
-- **Incident**: `journal.py act BEAD answer "[incident] <what happened>"`.
+- **Incident**: `journal.py act BEAD answer "[incident] …"`.
 
 ## Context
 
 - Below the soft threshold tell a crew nothing about context.
-- `context_soft`/`context_hard`/`compacted`: `state`; `bg_shells` above 0: `pause`, wait even past hard; no `nohup`, kill or `/exit`. Zero: `crew.py request_handover NAME`; at `HANDOVER READY`, `crew.py complete_handover NAME WO "$(cat FILE)"`, FILE the WO: it records the act and reopens.
-- `prorab_context`: hand over now, before any acceptance: your act (`references/acts.md`) in FILE, `shift.py handoff "$HERDR_PANE_ID" --act-file FILE`. `handed_over` confirms the successor's lock, `reconcile` and monitor (`unconfirmed`: an incident naming the gap); never read its pane; stop yours and, last, `herdr pane close "$HERDR_PANE_ID"`. Handed over, act on nothing; if written to, reply once (the shift is in pane PANE; this pane closes) and close it.
-
-## Rationalizations
-
-- "One keystroke" / "enables nothing": any key answers a consent prompt.
-- "A paperwork defect" / "I'll check C3 myself": a failing report is never accepted.
-- "Stop at 90 %" / "dollars left": `cap` and measured percentages decide.
+- `context_soft`/`context_hard`/`compacted`: `state`; `bg_shells` above 0: `pause`, wait even past hard; no `nohup`, kill or `/exit`. Zero: `crew.py request_handover NAME`; at `HANDOVER READY`, `crew.py complete_handover NAME WO "$(cat FILE)"`, FILE the WO.
+- `prorab_context`: hand over now, before any acceptance: your act (`references/acts.md`) in FILE, `shift.py handoff "$HERDR_PANE_ID" --act-file FILE`. `handed_over` confirms the successor's lock, `reconcile` and monitor (`unconfirmed`: an incident naming the gap); never read its pane; stop yours, last `herdr pane close "$HERDR_PANE_ID"`. Handed over, act on nothing; written to, reply once (the shift is in pane PANE; this pane closes), close it.

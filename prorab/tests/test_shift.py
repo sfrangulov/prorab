@@ -234,6 +234,14 @@ class TestBegin(ShiftBase):
 
 
 class TestReport(ShiftBase):
+    def test_report_never_copies_approval_words(self):
+        self.start_shift()
+        n, s = self.accepted_work_order("Importer")
+        journal.add_act(n, "answer", '[customer decision] approve: raise the estimate to $25; '
+                                     'words: "WORDS-MARKER"')
+        text = self.report_text()
+        self.assertNotIn("WORDS-MARKER", text)
+
     def test_report_sections(self):
         self.start_shift()
         self.accepted_work_order("Importer")

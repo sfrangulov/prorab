@@ -70,7 +70,9 @@ class Stub:
                      "seven_day": {"usd_per_pp": None, "source": "unknown"}}
         self.week_burn = burn()
         self.calls = {"agents": 0, "kv_all": 0, "visible": [], "limit_panes": None,
-                      "spend": [], "rates": [], "week_burn": [], "pause": []}
+                      "spend": [], "rates": [], "week_burn": [], "pause": [],
+                      "site_trust": []}
+        self.trust = False   # what `site_trust` answers: a value, or a dict by site path
         self.pause_error = {}   # crew name -> exception raised once by the pause
 
     def _agents(self):
@@ -109,6 +111,10 @@ class Stub:
         self.calls["pause"].append(name)
         return "accepted"
 
+    def _site_trust(self, site):
+        self.calls["site_trust"].append(site)
+        return self.trust.get(site, False) if isinstance(self.trust, dict) else self.trust
+
     def _over_budget(self, week, spend=None, kv=None):
         if self.over:  # a canned answer
             return list(self.over)
@@ -136,6 +142,7 @@ class Stub:
             "own_context": lambda d, listed=None: self.own,
             "crews": lambda kv=None: [],
             "pause": self._pause,
+            "site_trust": self._site_trust,
         }
 
 
@@ -1166,7 +1173,7 @@ class TestProcessBudget(FakeBase):
     def setUp(self):
         super().setUp()
         saved = {k: os.environ.get(k) for k in ("HOME", "PRORAB_BEADS_DIR", "PRORAB_LOG_DIR",
-                                                 "PRORAB_CACHE", "HERDR_PANE_ID", "BD_LOG")}
+                                                 "PRORAB_CACHE", "HERDR_PANE_ID", "BD_LOG", "KV_JSON")}
 
         def restore():
             for k, v in saved.items():
@@ -1184,9 +1191,13 @@ class TestProcessBudget(FakeBase):
         self.bd_log = os.path.join(base, "bd.log")
         bd = os.path.join(bindir, "bd")
         with open(bd, "w", encoding="utf-8") as fh:
-            fh.write("#!/bin/sh\necho \"$*\" >> \"$BD_LOG\"\necho '{}'\n")
+            fh.write("#!/bin/sh\necho \"$*\" >> \"$BD_LOG\"\n"
+                     "case \"$1 $2\" in 'kv list') cat \"$KV_JSON\";; *) echo '{}';; esac\n")
         os.chmod(bd, 0o755)
-        os.environ.update(HOME=self.home, PRORAB_BEADS_DIR=os.path.join(base, "beads", ".beads"),
+        self.kv_json = os.path.join(base, "kv.json")
+        with open(self.kv_json, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        os.environ.update(KV_JSON=self.kv_json, HOME=self.home, PRORAB_BEADS_DIR=os.path.join(base, "beads", ".beads"),
                           PRORAB_LOG_DIR=os.path.join(base, "logs"),
                           PRORAB_CACHE=os.path.join(base, "cache"), BD_LOG=self.bd_log,
                           PATH=bindir + os.pathsep + os.environ["PATH"])
@@ -1248,6 +1259,25 @@ class TestProcessBudget(FakeBase):
         self.assertIsNone(self.mem["last_reading"]["seven_day"])
 
 
+    def test_process_budget_with_timers_and_a_trust_watch(self):
+        site = "/home/user/projects/demo-app"
+        with open(os.path.join(self.home, ".claude.json"), "w", encoding="utf-8") as fh:
+            json.dump({"projects": {site: {"hasTrustDialogAccepted": True}}}, fh)
+        kv = {"prorab:active": "w:p0",
+              "due.check-tests": json.dumps({"at": time.time() + 3600, "text": "t", "set_at": 0}),
+              "consent.wo-1.trust": json.dumps(
+                  {"kind": "trust", "gate": "g-1", "bead": "wo-1", "pane": "w:p77", "name": "a9",
+                   "site": site, "since": 1.0, "watch": True, "no_watch": None})}
+        with open(self.kv_json, "w", encoding="utf-8") as fh:
+            json.dump(kv, fh)
+        self._fresh_sensor()
+        self._agents("working")
+        monitor.poll(list(self.names), self.d, self.mem, time.time())
+        before = self._procs()
+        events = monitor.poll(list(self.names), self.d, self.mem, time.time())
+        self.assertEqual(self._procs() - before, 2)   # agent list + kv list; the trust is a file read
+        self.assertEqual(events, [])   # the watch fired on the first poll (the pane is empty)
+
     def test_emergency_check_starts_no_process(self):
         self._fresh_sensor()
         self._agents("working")
@@ -1283,6 +1313,245 @@ class TestProcessBudget(FakeBase):
         before = self._procs()
         self.assertEqual(poll(), ["emergency_released b1,b2,b3"])
         self.assertEqual(self._procs() - before, 2)
+
+
+LOCK = "w:p1"
+SITE = "/home/user/projects/demo-app"
+
+
+def add_watch(stub, kind="trust", wo="wo-1", pane="w:p9", name="a1", site=SITE,
+              since=1000.0, watch=True, no_watch=None):
+    stub.kv["consent.%s.%s" % (wo, kind)] = json.dumps(
+        {"kind": kind, "gate": "g-1", "bead": wo, "pane": pane, "name": name, "site": site,
+         "since": since, "watch": watch, "no_watch": no_watch})
+
+
+class TimerBase(PollBase):
+    def setUp(self):
+        super().setUp()
+        self.s.kv["prorab:active"] = LOCK
+        self.s.crews = {}
+        self.T = self.now + 600
+
+    def set_due(self, label="check-tests", at=None, text="the unit suite of wo-12"):
+        self.s.kv["due." + label] = json.dumps(
+            {"at": self.T if at is None else at, "text": text, "set_at": self.now})
+
+    def poll(self, now=None, names=()):
+        return super().poll(now, names=names)
+
+
+class TestDue(TimerBase):
+    def test_due_fires_once_at_its_time(self):
+        self.set_due()
+        self.assertEqual(self.poll(self.T - 1), [])
+        self.assertEqual(self.poll(self.T), ["due check-tests the unit suite of wo-12"])
+        self.assertEqual(self.poll(self.T + 90), [])
+
+    def test_due_line_carries_the_text(self):
+        self.set_due(text="x" * 120 + "\nsecond line")
+        self.assertEqual(self.poll(self.T), ["due check-tests " + "x" * 80])
+        self.set_due("other", text="")
+        self.assertEqual(self.poll(self.T + 1), ["due other"])
+
+    def test_due_fires_again_for_a_new_foreman(self):
+        self.set_due()
+        self.assertEqual(len(self.poll(self.T)), 1)
+        self.s.kv["prorab:active"] = "w:p7"
+        self.assertEqual(self.poll(self.T + 90), ["due check-tests the unit suite of wo-12"])
+        self.assertEqual(self.poll(self.T + 180), [])
+
+    def test_due_cleared_or_moved(self):
+        self.set_due()
+        self.poll(self.T)
+        del self.s.kv["due.check-tests"]
+        self.assertEqual(self.poll(self.T + 10), [])
+        self.assertNotIn("check-tests", self.mem["due"])
+        self.set_due(at=self.T + 600)
+        self.assertEqual(self.poll(self.T + 500), [])
+        self.assertEqual(len(self.poll(self.T + 600)), 1)
+
+    def test_due_not_silenced_by_override_or_stop(self):
+        self.set_due()
+        self.s.override = {"goal": "g"}
+        self.assertEqual(len(self.poll(self.T)), 1)
+        self.set_due("second", at=self.T + 100)
+        with open(self.d["emergency"]["stop_path"], "w"):
+            pass
+        self.assertEqual(self.poll(self.T + 100),
+                         ["emergency_stop -", "due second the unit suite of wo-12"])
+        self.assertEqual(self.poll(self.T + 200), [])   # fired once: the mark was kept
+
+    def test_due_unreadable_record_is_a_failing_source(self):
+        self.s.kv["due.x"] = "garbage"
+        self.set_due()
+        self.assertEqual(self.poll(self.T), ["due check-tests the unit suite of wo-12"])
+        self.assertTrue(any(e.startswith("due.x") for e in self.mem["poll_errors"]))
+        out = []
+        for i in range(self.d["monitor"]["error_polls"] - 1):
+            out = self.poll(self.T + 10 + i)
+        self.assertEqual(out, ["error due.x"])
+
+    def test_next_due_is_the_earliest_unfired(self):
+        self.set_due("a", at=self.T)
+        self.set_due("b", at=self.T + 50)
+        self.poll(self.now)
+        self.assertEqual(self.mem["next_due"], self.T)
+        self.poll(self.T)
+        self.assertEqual(self.mem["next_due"], self.T + 50)
+        self.poll(self.T + 50)
+        self.assertIsNone(self.mem["next_due"])
+
+    def test_event_order_due_and_consent_done(self):
+        self.s.crews = {"a1": st("idle", pane="w:p9")}
+        self.set_due()
+        self.s.over = ["usd"]
+        self.s.own = ctx(95.0, hard=True)
+        add_watch(self.s, "mcp")
+        out = self.poll(self.T, names=("a1",))
+        self.assertEqual([e.split()[0] for e in out],
+                         ["budget", "due", "prorab_context", "consent_done", "settled"])
+        order = monitor.EVENT_ORDER
+        self.assertEqual(order.index("due"), order.index("budget") + 1)
+        self.assertEqual(order.index("consent_done"), order.index("settled") - 1)
+
+
+class TestConsentDone(TimerBase):
+    def test_consent_done_trust(self):
+        add_watch(self.s, "trust")
+        self.s.trust = False
+        self.assertEqual(self.poll(), [])
+        self.s.trust = True
+        self.s.crews["x"] = st("idle", pane="w:p9", bg=1)   # the customer's claude still runs
+        self.assertEqual(self.poll(), [])
+        del self.s.crews["x"]
+        self.assertEqual(self.poll(), ["consent_done wo-1 trust"])
+        self.assertEqual(self.poll(), [])
+
+    def test_consent_done_trust_unknown_is_not_yet(self):
+        add_watch(self.s, "trust")
+        self.s.trust = None
+        self.assertEqual(self.poll(), [])
+
+    def test_trust_read_only_while_a_trust_watch_is_open(self):
+        self.s.trust = True
+        self.poll()
+        self.s.crews["a1"] = st("idle", pane="w:p9")
+        add_watch(self.s, "mcp")
+        self.poll(names=("a1",))
+        self.assertEqual(self.s.calls["site_trust"], [])
+        del self.s.crews["a1"]
+        add_watch(self.s, "trust", wo="wo-1")
+        add_watch(self.s, "trust", wo="wo-2")
+        self.poll()
+        self.assertEqual(self.s.calls["site_trust"], [SITE])
+
+    def test_consent_done_dialog(self):
+        add_watch(self.s, "mcp")
+        self.s.crews["a1"] = st("blocked", pane="w:p9")
+        self.assertEqual(self.poll(names=("a1",)), ["settled a1 blocked"])
+        self.s.crews["a1"] = st("idle", pane="w:p9")
+        self.assertEqual(self.poll(names=("a1",)), ["consent_done wo-1 mcp", "settled a1 idle"])
+
+    def test_consent_done_dialog_needs_the_same_agent_and_a_known_status(self):
+        add_watch(self.s, "mcp")
+        self.assertEqual(self.poll(), [])                       # a1 left the list
+        self.s.crews["other"] = st("idle", pane="w:p9")
+        self.assertEqual([e for e in self.poll(names=("other",)) if e.startswith("consent")], [])
+        del self.s.crews["other"]
+        self.s.crews["a1"] = st("unknown", pane="w:p9")
+        self.assertEqual([e for e in self.poll(names=("a1",)) if e.startswith("consent")], [])
+        self.s.crews["a1"] = st("working", pane="w:p9")
+        self.assertEqual(self.poll(names=("a1",)), ["consent_done wo-1 mcp"])
+
+    def test_consent_done_dialog_screen_still_shows_the_prompt(self):
+        add_watch(self.s, "mcp")
+        self.s.crews["a1"] = st("working", pane="w:p9")
+        self.s.screens["w:p9"] = "New MCP server found in .mcp.json\n1. Use this\n2. Not now\n"
+        self.assertEqual(self.poll(names=("a1",)), [])
+
+    def test_api_key_watch_never_fires(self):
+        add_watch(self.s, "api_key")
+        self.s.crews["a1"] = st("idle", pane="w:p9", bg=1)
+        self.assertEqual(self.poll(names=("a1",)), [])
+        add_watch(self.s, "weird_kind")
+        self.assertEqual(self.poll(names=("a1",)), [])
+
+    def test_watchless_record_never_fires(self):
+        self.s.crews["a1"] = st("idle", pane="w:p9", bg=1)
+        add_watch(self.s, "mcp", watch=False, no_watch="repeat")
+        add_watch(self.s, "bypass_warning", watch=False, no_watch="no_pane", pane=None)
+        self.assertEqual(self.poll(names=("a1",)), [])
+
+    def test_consent_done_presses_and_writes_nothing(self):
+        import herdr_cli
+
+        def boom(*a, **kw):
+            raise AssertionError("the monitor must not write or press: %r" % (a,))
+        add_watch(self.s, "mcp")
+        self.s.crews["a1"] = st("idle", pane="w:p9", bg=1)
+        self.set_due()
+        with mock.patch.object(journal, "kv_set", boom), mock.patch.object(journal, "kv_clear", boom), \
+                mock.patch.object(herdr_cli, "run", boom), mock.patch.object(herdr_cli, "send_keys", boom):
+            out = self.poll(self.T, names=("a1",))
+        self.assertEqual([e.split()[0] for e in out], ["due", "consent_done"])
+
+    def test_trust_watch_parent_folder_never_counts(self):
+        import crew
+        home = os.path.join(self.tmp.name, "home")
+        os.makedirs(home)
+        trust_file = os.path.join(home, ".claude.json")
+        d = json.loads(json.dumps(self.d))
+        d["crew"]["trust_path"] = trust_file
+        add_watch(self.s, "trust")
+        deps = self.s.deps()
+        deps["site_trust"] = lambda path: crew.site_trust(path, retry=False)
+        with mock.patch.object(crew, "_defaults") as dd:
+            dd.load.return_value = d
+            with open(trust_file, "w", encoding="utf-8") as fh:
+                json.dump({"projects": {"/home/user/projects": {"hasTrustDialogAccepted": True}}}, fh)
+            self.assertEqual(monitor.poll([], self.d, self.mem, self.now, deps=deps), [])
+            with open(trust_file, "w", encoding="utf-8") as fh:
+                json.dump({"projects": {SITE: {"hasTrustDialogAccepted": True}}}, fh)
+            self.assertEqual(monitor.poll([], self.d, self.mem, self.now + 1, deps=deps),
+                             ["consent_done wo-1 trust"])
+
+    def test_consent_done_once_per_watch_and_foreman(self):
+        add_watch(self.s, "mcp", since=1000.0)
+        self.s.crews["a1"] = st("idle", pane="w:p9", bg=1)
+        self.assertEqual(self.poll(names=("a1",)), ["consent_done wo-1 mcp"])
+        self.assertEqual(self.poll(names=("a1",)), [])
+        add_watch(self.s, "mcp", since=2000.0)
+        self.assertEqual(self.poll(names=("a1",)), ["consent_done wo-1 mcp"])
+        self.s.kv["prorab:active"] = "w:p7"
+        self.assertEqual(self.poll(names=("a1",)), ["consent_done wo-1 mcp"])
+        self.assertEqual(self.poll(names=("a1",)), [])
+        del self.s.kv["consent.wo-1.mcp"]
+        self.poll(names=("a1",))
+        self.assertEqual(self.mem["consent_done"], {})
+
+    def test_consent_done_waits_for_stop_and_exiting(self):
+        add_watch(self.s, "mcp")
+        self.s.crews["a1"] = st("idle", pane="w:p9", bg=1)
+        stop = self.d["emergency"]["stop_path"]
+        with open(stop, "w"):
+            pass
+        self.assertEqual(self.poll(names=("a1",)), ["emergency_stop a1"])
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+        os.remove(stop)
+        out = self.poll(self.now + 180, names=("a1",))
+        self.assertEqual(out, ["emergency_released a1", "consent_done wo-1 mcp"])
+        add_watch(self.s, "bypass_warning", wo="wo-2")
+        t = self.now + 400
+        self.s.kv["crew.a1.exiting"] = str(t - 30)
+        self.assertEqual(self.poll(t, names=("a1",)), [])
+        later = t + self.d["crew"]["exit_window_s"]
+        self.assertEqual(self.poll(later, names=("a1",)), ["consent_done wo-2 bypass_warning"])
+
+    def test_unreadable_watch_record_is_a_failing_source(self):
+        self.s.kv["consent.wo-1.mcp"] = "garbage"
+        self.poll()
+        self.assertTrue(any(e.startswith("consent.wo-1.mcp") for e in self.mem["poll_errors"]))
 
 
 class TestMonitorMain(unittest.TestCase):
@@ -1437,6 +1706,27 @@ class TestMonitorMain(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             monitor.main(["--heartbeat", "1000000", "--interval", "7"], deps=deps)
         self.assertEqual(sleeps, [7, 7, 7])
+
+    def test_main_sleep_ends_at_the_next_timer(self):
+        deps = self.s.deps()
+        deps["crews"] = lambda kv=None: []
+        self.s.crews = {}
+        clock = {"t": 1_000_000.0}
+        sleeps = []
+
+        def fake_sleep(sec):
+            sleeps.append(sec)
+            clock["t"] += sec
+        self.s.kv["due.check-tests"] = json.dumps(
+            {"at": clock["t"] + 5, "text": "the unit suite", "set_at": clock["t"]})
+        buf = io.StringIO()
+        with mock.patch.object(monitor.time, "sleep", fake_sleep), \
+                mock.patch.object(monitor.time, "time", lambda: clock["t"]), \
+                redirect_stdout(buf):
+            monitor.main(["--heartbeat", "1000000"], deps=deps)
+        self.assertEqual(len(sleeps), 1)
+        self.assertLessEqual(sleeps[0], 5)
+        self.assertEqual(buf.getvalue().strip(), "EVENT due check-tests the unit suite")
 
     def test_restart_does_not_repeat_persisting_condition(self):
         self.s.crews["b1"] = st("done")

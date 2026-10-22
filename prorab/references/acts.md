@@ -46,7 +46,7 @@ Work orders: <id - title - state (issued, waiting for acceptance, a clearance or
 Crews and panes: <crew name - pane - work order - session id - status>
 Spend against estimates: <each work order's dollars of its estimate; research items; the shift's dollars of the budget and pp of the week>
 Limits: <5h window % and its reset; week % or unknown; the source; the current rate and how it was obtained>
-Expected events: <stop points due, heavy runs in progress, limit resets, gates the customer has to close>
+Expected events: <stop points due, heavy runs in progress, limit resets, gates the customer has to close, the timers of promised times (journal.py due list)>
 Night shift: <on or off; morning time; 5h thresholds in force; caffeinate running>
 Open questions: <for the customer, or none>
 ```
@@ -65,6 +65,14 @@ The foreman writes this `answer` act only after the customer's explicit words dr
 
 ```
 [customer decision] drop
+```
+
+## Customer approval
+
+The foreman writes this `answer` act when the customer answers its recommendation with words that hand the decision over, in any language. Record it on the work order or stage the recommendation concerns (`journal.py act BEAD answer TEXT`); a recommendation that concerns no bead (the shift's budget, a night shift) goes to kv `approval.<YYYYmmdd-HHMM>` with the same text (`journal.py kv set`). It approves exactly the figure or option you last stated - an estimate, a budget figure, a choice - and nothing beyond it; it lifts no stop: it is the customer setting that figure in words, the stop then applies at it, and the command 'ignore limits and finish' stays the only lift. It is never an open-ended "no limit" (that stays the command 'ignore limits and finish'), never a safety rule, never machine protection. The customer's words stay in the `words:` field of this act only: the morning report, handover acts, gates, push notifications and work orders say 'approved by delegation: <the recommendation>' in English and never copy them.
+
+```
+[customer decision] approve: <the recommendation as you last stated it, with its figure, in English>; words: "<the customer's words, verbatim, in the language they wrote>"
 ```
 
 ## Handover request

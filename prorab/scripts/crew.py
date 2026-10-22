@@ -201,9 +201,12 @@ def deliver(name, text, work_order=None):
     result = herdr_cli.send(name, text)
     if result == "stalled":
         result = herdr_cli.recover_stalled(name, text)
-    if result == "blocked":
+    if result in ("blocked", "stalled", "unconfirmed"):
+        # a consent prompt may be why the line did not land: name its kind (nothing is
+        # pressed, nothing is re-sent)
         kind = herdr_cli.consent_dialog(herdr_cli.agent_visible(name))
-        return "consent:%s" % kind if kind else "blocked"
+        if kind:
+            return "consent:%s" % kind
     return result
 
 

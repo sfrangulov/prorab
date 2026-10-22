@@ -492,6 +492,7 @@ class TestSendState(CrewBase):
     def test_send_work_order_not_accepted_stays_issuing(self):
         self.j.issue_set("N1", "issuing", name="a1", pane="w:p9")
         self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
+        self.route("agent read a1 --source visible", "plain screen\n")
         self.assertEqual(crew.send_work_order("a1", "t", "N1"), "unconfirmed")
         self.assertEqual(self.j.issue("N1")["state"], "issuing")
 
@@ -501,6 +502,30 @@ class TestSendState(CrewBase):
         self.assertEqual(crew.send_work_order("a1", "t", "N1"), "consent:api_key")
         self.route("agent read a1 --source visible", "plain screen\n")
         self.assertEqual(crew.deliver("a1", "t", "N1"), "blocked")
+
+    def test_stalled_then_consent_returns_kind(self):
+        self.route("agent prompt a1", err("agent_prompt_stalled"), exit_code=1)
+        self.route("agent get a1", ok({"agent": {"agent_status": "working"}}))  # recover: stays stalled
+        self.route("agent read a1 --source visible", fixture("consent", "trust.txt"))
+        self.assertEqual(crew.deliver("a1", "t", "N1"), "consent:trust")
+        calls = self.calls()
+        self.assertEqual([c for c in calls if "send-keys" in c], [])
+        self.assertEqual(len([c for c in calls if c.startswith("agent prompt")]), 1)
+
+    def test_unconfirmed_then_consent_returns_kind(self):
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
+        self.route("agent read a1 --source visible", fixture("consent", "mcp.txt"))
+        self.assertEqual(crew.deliver("a1", "t", "N1"), "consent:mcp")
+        self.assertEqual([c for c in self.calls() if "send-keys" in c], [])
+
+    def test_unconfirmed_without_consent_stays_unconfirmed(self):
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
+        self.route("agent read a1 --source visible", "plain screen\n")
+        self.assertEqual(crew.deliver("a1", "t", "N1"), "unconfirmed")
+        self.route("agent prompt a1", err("agent_prompt_stalled"), exit_code=1)
+        self.route("agent get a1", ok({"agent": {"agent_status": "working"}}))
+        self.assertEqual(crew.deliver("a1", "t", "N1"), "stalled")
+        self.assertEqual([c for c in self.calls() if "send-keys" in c], [])
 
     def test_state_and_summary(self):
         self.write_transcript("/work", "sess-1", "done")

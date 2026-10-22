@@ -73,6 +73,13 @@ class TestSettings(HooksBase):
         self.assertEqual([f for f in os.listdir(os.path.dirname(path))],
                          [os.path.basename(path)])
 
+    def test_failed_settings_write_leaves_no_temp_file(self):
+        folder = os.path.dirname(self.d["hooks"]["settings_path"])
+        with mock.patch.object(hooks.json, "dump", side_effect=ValueError("no")):
+            with self.assertRaises(ValueError):
+                hooks.write_settings(self.d)
+        self.assertEqual(os.listdir(folder), [])
+
     def test_settings_rewrite_is_atomic_and_idempotent(self):
         first = hooks.write_settings(self.d)
         with open(first, encoding="utf-8") as fh:
@@ -250,6 +257,42 @@ class TestGuard(HooksBase):
         with open(os.path.join(repo, ".git", "HEAD"), "w") as fh:
             fh.write("0123456789abcdef0123456789abcdef01234567\n")
         self.assertEqual(self.decide("git merge x", cwd=repo), (0, ""))
+
+    def test_guard_internal_error_denies(self):
+        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}})
+        err = "prorab guard: internal error; ask the foreman"
+        with mock.patch.object(_defaults, "load", side_effect=OSError("garbled")):
+            self.assertEqual(hooks.guard_decision(raw), (2, err))
+            stderr = io.StringIO()
+            with mock.patch("sys.stderr", stderr):
+                self.assertEqual(hooks.guard(io.StringIO(raw)), 2)
+            self.assertEqual(stderr.getvalue().strip(), err)
+
+    def test_guard_removed_cwd_denies(self):
+        gone = os.path.join(self.tmp.name, "gone")
+        os.makedirs(gone)
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(gone)
+        os.rmdir(gone)
+        raw = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git merge x"}})
+        self.assertEqual(hooks.guard_decision(raw, self.d)[0], 2)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            self.assertEqual(hooks.guard(io.StringIO(raw)), 2)
+        self.assertTrue(stderr.getvalue().startswith("prorab guard:"))
+
+    def test_guard_unreadable_stdin_denies(self):
+        class Broken:
+            def read(self):
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            self.assertEqual(hooks.guard(Broken()), 2)
+        self.assertIn("prorab guard:", stderr.getvalue())
+
+    def test_guard_blocks_the_braced_home_form(self):
+        self.assertEqual(self.decide("ls ${HOME}/projects/prorab/.beads")[0], 2)
 
     def test_guard_cli_exit_codes_and_message(self):
         env = dict(os.environ)

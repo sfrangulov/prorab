@@ -151,7 +151,15 @@ def checked_out_branch(start):
 
 
 def guard_decision(raw, d=None):
-    """(exit code, message) for the PreToolUse input `raw` (the JSON text)."""
+    """(exit code, message) for the PreToolUse input `raw` (the JSON text). Any unexpected
+    error denies: an exit code other than 2 would let the call run."""
+    try:
+        return _decide(raw, d)
+    except Exception:
+        return 2, "prorab guard: internal error; ask the foreman"
+
+
+def _decide(raw, d):
     d = d or _defaults.load()
     unreadable = (2, "prorab guard: unreadable hook input")
     try:
@@ -190,7 +198,11 @@ def guard_decision(raw, d=None):
 
 
 def guard(stdin=None):
-    code, message = guard_decision((stdin or sys.stdin).read())
+    try:
+        raw = (stdin or sys.stdin).read()
+    except Exception:
+        raw = None   # unreadable input is decided as such
+    code, message = guard_decision(raw)
     if message:
         print(message, file=sys.stderr)
     return code

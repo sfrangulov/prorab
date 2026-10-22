@@ -480,6 +480,23 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(buf.getvalue())["mode"], "day")
 
+    def test_cli_plan_without_now(self):
+        # the live run: `scheduler.py plan` read `a.now`, which only `cap` defined
+        seen = []
+        patches = {"journal": types.SimpleNamespace(ensure_db=lambda: None),
+                   "gather_limits": lambda d, now: {},
+                   "machine_load": lambda: None,
+                   "build_plan": lambda j, d, now, lim, log, load: seen.append(now) or {"new": 0}}
+        for k, v in patches.items():
+            self.addCleanup(setattr, scheduler, k, getattr(scheduler, k))
+            setattr(scheduler, k, v)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = scheduler.main(["plan"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(buf.getvalue()), {"new": 0})
+        self.assertAlmostEqual(seen[0], time.time(), delta=60)
+
 
 if __name__ == "__main__":
     unittest.main()

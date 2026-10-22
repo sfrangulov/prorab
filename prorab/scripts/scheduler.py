@@ -281,7 +281,7 @@ def gather_limits(d, now, pane_texts=None):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("plan")
+    sub.add_parser("plan").add_argument("--now", type=float)
     p = sub.add_parser("cap")
     p.add_argument("--now", type=float)
     p.add_argument("--resets-at", type=float)

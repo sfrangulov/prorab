@@ -166,9 +166,9 @@ class TestPreflight(ShiftBase):
 
     def test_preflight_names_budget_and_rate(self):
         notes = "\n".join(shift.preflight(self.d))
-        self.assertIn("5.00 $/pp (default)", notes)
-        self.assertIn("week rate: unknown", notes)
-        self.assertIn("$350, +10 pp of the week", notes)
+        self.assertIn("3.50 $/pp (default)", notes)
+        self.assertIn("week rate: 10.00 $/pp (default)", notes)
+        self.assertIn("$100, +10 pp of the week", notes)
 
     def test_preflight_budget_follows_the_journal(self):
         journal.set_budget(usd=120, week_pp=4)
@@ -200,7 +200,7 @@ class TestBegin(ShiftBase):
         with open(os.path.join(self.cache, "slots", "heavy.count"), encoding="utf-8") as fh:
             self.assertEqual(fh.read().strip(), "2")
         self.assertEqual(res["machine"]["heavy_slots"], 2)
-        self.assertEqual(res["budget"], {"usd": 350.0, "week_pp": 10.0})
+        self.assertEqual(res["budget"], {"usd": 100.0, "week_pp": 10.0})
         self.assertIn("five_hour", res["rates"])
         self.assertIn("stop", res["cap"])
         self.assertTrue(res["problems"])
@@ -265,12 +265,13 @@ class TestReport(ShiftBase):
         self.assertIn("$12.00", text)
         self.assertIn("$10.00", text)
         self.assertIn("over", text.lower())
-        self.assertIn("2.40 pp of the window", text)
-        self.assertIn("$350.00", text)  # the shift budget
+        self.assertIn("3.43 pp of the window", text)
+        self.assertIn("$100.00", text)  # the shift budget
         self.assertIn("Machine spend over the shift: $12.00", text)
         self.assertIn("tokens 1500, sessions 2, agent runs 3", text)
-        self.assertIn("5.00 $/pp (default)", text)
-        self.assertIn("week rate: unknown", text)
+        self.assertIn("3.50 $/pp (default)", text)
+        self.assertIn("week rate: 10.00 $/pp (default)", text)
+        self.assertIn("1.20 pp of the week", text)
 
     def test_report_budget_lists_research_and_foreman(self):
         self.start_shift(foreman="fs1")
@@ -551,9 +552,9 @@ class TestHandoff(ShiftBase):
         self.assertEqual(len(acts), 1)
         self.assertIn("Crews: c1 in w:p3.", acts[0])
         self.assertIn("Spend:", acts[0])
-        self.assertIn("$3.00 of $350.00 budget", acts[0])
-        self.assertIn("window rate: 5.00 $/pp (default)", acts[0])
-        self.assertIn("week rate: unknown", acts[0])
+        self.assertIn("$3.00 of $100.00 budget", acts[0])
+        self.assertIn("window rate: 3.50 $/pp (default)", acts[0])
+        self.assertIn("week rate: 10.00 $/pp (default)", acts[0])
 
 
 class TestReconcile(ShiftBase):

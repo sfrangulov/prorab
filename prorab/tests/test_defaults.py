@@ -75,11 +75,11 @@ class TestDefaults(unittest.TestCase):
 
         self.assertEqual(
             d["budget"],
-            {"usd": 350, "week_pp": 10},
+            {"usd": 100, "week_pp": 10},
         )
         self.assertEqual(
             d["machine"],
-            {"parallel_ceiling": 6, "heavy_slots": 2, "heavy_runs_per_stage": 20},
+            {"parallel_ceiling": 6, "heavy_slots": 2, "heavy_runs_per_stage": 60},
         )
         self.assertEqual(
             d["cost"],
@@ -92,7 +92,7 @@ class TestDefaults(unittest.TestCase):
         )
         self.assertEqual(
             d["rate"],
-            {"default_window_usd_per_pp": 5.0, "default_week_usd_per_pp": None,
+            {"default_window_usd_per_pp": 3.5, "default_week_usd_per_pp": 10.0,
              "min_rise_pp": 1, "window_horizon_s": 18000, "every_s": 600},
         )
         self.assertEqual(
@@ -108,7 +108,7 @@ class TestDefaults(unittest.TestCase):
             {"interval_s": 90, "heartbeat_s": 1200, "hung_s": 1800, "max_restarts": 2,
              "error_polls": 3, "interval_max_s": 300, "backoff_factor": 2,
              "hung_scan_max_files": 20000, "limit_panes": 2,
-             "spend_every_s": 300},
+             "spend_every_s": 300, "reset_grace_s": 120},
         )
         self.assertEqual(d["timeouts"], {"bd_s": 30, "git_s": 60, "herdr_s": 60})
         self.assertNotIn("polish_cmd", d)

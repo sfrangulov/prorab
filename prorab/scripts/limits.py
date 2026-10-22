@@ -315,7 +315,8 @@ def _counted(readings, window, d, now):
 
 def estimate_rate(readings, spend_between, d, now, window="five_hour"):
     """Dollars per percentage point of `window`: the sum of dollars over the sum of pp of the
-    counted intervals; the default (five_hour) or None (seven_day) without an interval."""
+    counted intervals; without an interval, the window's default (source "default") or, when
+    that default is null, None with the source "unknown"."""
     ivs = _counted(readings, window, d, now)
     usd = sum(spend_between(t0, t1) for t0, t1, _ in ivs)
     pp = sum(rise for _, _, rise in ivs)

@@ -138,7 +138,7 @@ class TestJournal(JournalBase):
             journal.add_act(n, "bogus", "x")
 
     def test_budget_override(self):
-        self.assertEqual(journal.budget(), {"usd": 350, "week_pp": 10})
+        self.assertEqual(journal.budget(), {"usd": 100, "week_pp": 10})
         journal.set_budget(usd=500, week_pp=20)
         self.assertEqual(journal.budget(), {"usd": 500, "week_pp": 20})
 
@@ -461,8 +461,8 @@ class TestJournalDollars(JournalBase):
         n = journal.create_work_order("o", "T", "b", {"usd": 12.5, "heavy_runs_per_stage": 7})
         self.assertEqual(journal.estimate(n), {"usd": 12.5, "heavy_runs_per_stage": 7})
         m = new_work_order()
-        self.assertEqual(journal.estimate(m), {"usd": 10.0, "heavy_runs_per_stage": 20})
-        self.assertEqual(journal.estimate("wo-none"), {"usd": None, "heavy_runs_per_stage": 20})
+        self.assertEqual(journal.estimate(m), {"usd": 10.0, "heavy_runs_per_stage": 60})
+        self.assertEqual(journal.estimate("wo-none"), {"usd": None, "heavy_runs_per_stage": 60})
         for bad in ({}, {"usd": 0}, {"usd": -1}, {"usd": 5, "tokens": 3},
                     {"usd": 5, "heavy_runs_per_stage": 0}, {"heavy_runs_per_stage": 3}):
             with self.assertRaises(ValueError, msg=bad):
@@ -523,7 +523,7 @@ class TestJournalDollars(JournalBase):
                  "research": {"k": {"over": True}, "j": {"over": False}}}
         self.assertEqual(journal.over_budget(35.5, spend),
                          ["usd", "week_pp", "estimate:wo-1", "research:k"])
-        spend = {"usd": 350.0, "work_orders": {}, "research": {}}
+        spend = {"usd": 100.0, "work_orders": {}, "research": {}}
         self.assertEqual(journal.over_budget(35.0, spend), [])
         self.assertEqual(journal.over_budget(35.5), ["week_pp"])
 
@@ -554,7 +554,7 @@ class TestJournalDollars(JournalBase):
         self.assertIn("week rate: unknown", text)
         self.assertIn("$31.00 of $30.00", text)
         self.assertIn("6.20 pp of the window", text)
-        self.assertIn("$120.00 of $350.00", text)
+        self.assertIn("$120.00 of $100.00", text)
         rates["seven_day"] = {"usd_per_pp": 12.0, "source": "estimated", "intervals": 3}
         text = journal.spend_block(spend, rates, n)
         self.assertIn("12.00 $/pp (estimated over 3 intervals)", text)

@@ -451,9 +451,17 @@ def _poll(crews, d, mem, now, dp):
             ev["limit"].append("limit %s %s %s %s" % (_fmt(five), _fmt(week), source, cap["mode"]))
         mem["limit"] = cur
 
-    # blind: the source is unknown twice in a row
+    # blind: the source is unknown twice in a row, but not right after a 5h reset: then the
+    # fresh sensor files lack five_hour for a couple of minutes while the older ones are stale
+    if resets_at is not None:
+        mem["last_resets_at"] = resets_at
+    last_reset = mem.get("last_resets_at")
+    in_grace = (last_reset is not None
+                and 0 <= now - last_reset <= d["monitor"]["reset_grace_s"])
     if not have_lim:
         pass
+    elif source == "unknown" and in_grace:
+        mem["unknown_streak"] = 0
     elif source == "unknown":
         mem["unknown_streak"] = mem.get("unknown_streak", 0) + 1
         if (mem["unknown_streak"] >= 2 and not mem.get("blind_fired")

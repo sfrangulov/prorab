@@ -356,6 +356,9 @@ class TestRate(unittest.TestCase):
 
     def setUp(self):
         self.d = _defaults.load()
+        # a defaults dict whose week default is null: the unknown-week path
+        self.d_null = _defaults.load()
+        self.d_null["rate"]["default_week_usd_per_pp"] = None
         self.t = 1761000000
 
     def five(self, minutes, pct, resets=None):
@@ -393,8 +396,10 @@ class TestRate(unittest.TestCase):
         rs = [_sensor_reading(self.t, 10, self.R, source="statusline"),
               _sensor_reading(self.t + 1200, 20, self.R, source="statusline")]
         rates = limits.estimate_rate(rs, lambda a, b: 1.0, self.d, self.t + 1300)
-        self.assertEqual((rates["usd_per_pp"], rates["source"]), (5.0, "default"))
+        self.assertEqual((rates["usd_per_pp"], rates["source"]), (3.5, "default"))
         wk = limits.estimate_rate(rs, lambda a, b: 1.0, self.d, self.t + 1300, "seven_day")
+        self.assertEqual((wk["usd_per_pp"], wk["source"]), (10.0, "default"))
+        wk = limits.estimate_rate(rs, lambda a, b: 1.0, self.d_null, self.t + 1300, "seven_day")
         self.assertEqual((wk["usd_per_pp"], wk["source"]), (None, "unknown"))
 
     def test_estimate_rate_sum_over_sum(self):
@@ -408,10 +413,12 @@ class TestRate(unittest.TestCase):
     def test_rate_zero_spend_falls_back_to_default(self):
         rs = [self.five(0, 10), self.five(20, 12)]
         r = limits.estimate_rate(rs, lambda a, b: 0.0, self.d, self.t + 1500)
-        self.assertEqual((r["usd_per_pp"], r["source"], r["intervals"]), (5.0, "default", 0))
-        self.assertEqual(limits.to_pp(10.0, r), 2.0)
+        self.assertEqual((r["usd_per_pp"], r["source"], r["intervals"]), (3.5, "default", 0))
+        self.assertEqual(limits.to_pp(7.0, r), 2.0)
         wk = [self.week(0, 10, 1761500000), self.week(20, 12, 1761500000)]
         r = limits.estimate_rate(wk, lambda a, b: 0.0, self.d, self.t + 1500, "seven_day")
+        self.assertEqual((r["usd_per_pp"], r["source"]), (10.0, "default"))
+        r = limits.estimate_rate(wk, lambda a, b: 0.0, self.d_null, self.t + 1500, "seven_day")
         self.assertEqual((r["usd_per_pp"], r["source"]), (None, "unknown"))
 
     def test_rate_window_horizon(self):
@@ -428,6 +435,8 @@ class TestRate(unittest.TestCase):
         self.assertEqual((r["intervals"], r["usd_per_pp"], r["source"]), (1, 2.0, "estimated"))
         rs += [self.week(60, 1, w2)]
         r = limits.estimate_rate(rs, lambda a, b: 4.0, self.d, self.t + 4000, "seven_day")
+        self.assertEqual((r["intervals"], r["usd_per_pp"], r["source"]), (0, 10.0, "default"))
+        r = limits.estimate_rate(rs, lambda a, b: 4.0, self.d_null, self.t + 4000, "seven_day")
         self.assertEqual((r["intervals"], r["usd_per_pp"], r["source"]), (0, None, "unknown"))
 
     def test_rate_week_needs_week_reset_time(self):
@@ -436,7 +445,12 @@ class TestRate(unittest.TestCase):
 
     def test_rate_defaults(self):
         r = limits.rates([], self.d, self.t)
-        self.assertEqual((r["five_hour"]["usd_per_pp"], r["five_hour"]["source"]), (5.0, "default"))
+        self.assertEqual((r["five_hour"]["usd_per_pp"], r["five_hour"]["source"]), (3.5, "default"))
+        self.assertEqual((r["seven_day"]["usd_per_pp"], r["seven_day"]["source"]), (10.0, "default"))
+
+    def test_rate_week_default_null_is_unknown(self):
+        r = limits.rates([], self.d_null, self.t)
+        self.assertEqual((r["five_hour"]["usd_per_pp"], r["five_hour"]["source"]), (3.5, "default"))
         self.assertEqual((r["seven_day"]["usd_per_pp"], r["seven_day"]["source"]), (None, "unknown"))
 
     def test_to_pp(self):

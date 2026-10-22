@@ -692,7 +692,7 @@ class TestHandover(CrewBase):
         act = self.j.act_log[0][2]
         self.assertIn("Spend:", act)
         self.assertIn("work order N1: $6.10 of $10.00 estimated", act)
-        self.assertIn("1.22 pp of the window", act)  # default rate 5 $/pp
+        self.assertIn("1.74 pp of the window", act)  # default rate 3.5 $/pp
         self.assertEqual(self.j.set_spent_log[0][0], "N1")
         self.assertAlmostEqual(self.j.set_spent_log[0][1], 6.1)
         self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
@@ -1351,10 +1351,17 @@ class TestWorkOrderSpend(CrewBase):
         self.assertAlmostEqual(r["usd"], 6.1)
         self.assertEqual((r["estimate_usd"], r["heavy_runs_per_stage"]), (0.01, 7))
         self.assertTrue(r["over"])
-        self.assertAlmostEqual(r["pp_window"], 6.1 / 5)
-        self.assertIsNone(r["pp_week"])
+        self.assertAlmostEqual(r["pp_window"], 6.1 / 3.5)
+        self.assertAlmostEqual(r["pp_week"], 6.1 / 10.0)
         self.assertEqual(r["rates"]["five_hour"]["source"], "default")
-        self.assertEqual(r["rates"]["seven_day"]["usd_per_pp"], None)
+        self.assertEqual(r["rates"]["seven_day"]["usd_per_pp"], 10.0)
+
+    def test_work_order_spend_unknown_week_rate(self):
+        d = _defaults.load()
+        d["rate"]["default_week_usd_per_pp"] = None  # the unknown-week path
+        r = crew.work_order_spend("N1", d)
+        self.assertIsNone(r["pp_week"])
+        self.assertEqual(r["rates"]["seven_day"]["source"], "unknown")
 
     def test_not_over_within_the_estimate(self):
         self.j.estimates["N1"] = {"usd": 50.0}
@@ -1376,8 +1383,8 @@ class TestWorkOrderSpend(CrewBase):
         self.assertEqual(stage, "N1.1")
         self.assertTrue(act.startswith("Stage accepted.\n\nSpend:\n"))
         self.assertIn("- work order N1: $6.10 of $5.00 estimated", act)
-        self.assertIn("- shift: $361.20 of $350.00 budget", act)
-        self.assertIn("- window rate: 5.00 $/pp (default)", act)
+        self.assertIn("- shift: $361.20 of $100.00 budget", act)
+        self.assertIn("- window rate: 3.50 $/pp (default)", act)
 
     def test_cli_accept_reads_the_act_file(self):
         self.j.estimates["N1"] = {"usd": 50.0}

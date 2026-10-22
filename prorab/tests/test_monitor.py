@@ -182,6 +182,17 @@ class TestMonitorPoll(PollBase):
         self.poll()
         self.assertEqual(self.poll(), [])
 
+    def test_no_blind_right_after_reset(self):
+        T = self.now + 600
+        self.s.limits = lim(10.0, 10.0, resets_at=T)
+        self.poll(T - 100)  # the 5h reset time is known
+        self.s.limits = lim(source="unknown")
+        self.assertEqual(self.poll(T + 30), [])
+        self.assertEqual(self.poll(T + 90), [])  # a second unknown poll, still in the grace
+        self.assertEqual(self.poll(T + 200), [])  # the grace is over: the streak starts here
+        self.assertEqual(self.poll(T + 210), ["blind"])
+        self.assertEqual(self.mem["last_resets_at"], T)  # persisted with the rest of mem
+
     def test_limit_event_thresholds(self):
         self.s.limits = lim(59.9, 10.0)
         self.assertEqual(self.poll(), [])
@@ -232,12 +243,12 @@ class TestMonitorPoll(PollBase):
 
     def test_budget_event_in_dollars(self):
         self.s.spend["usd"] = 361.2
-        self.assertEqual(self.poll(), ["budget usd=361.20/350.00"])
+        self.assertEqual(self.poll(), ["budget usd=361.20/100.00"])
         self.assertEqual(self.poll(self.now + 90), [])
         self.s.spend["work_orders"] = {"N7": {"usd_shift": 40.0, "usd_total": 40.0,
                                               "estimate_usd": 30.0, "over": True}}
         self.assertEqual(self.poll(self.now + 400),
-                         ["budget usd=361.20/350.00,estimate:N7=40.00/30.00"])
+                         ["budget usd=361.20/100.00,estimate:N7=40.00/30.00"])
 
     def test_week_pp_in_the_budget_event(self):
         self.s.kv["shift.week_start"] = "20"
@@ -259,7 +270,7 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.mem["last_reading"]["spend_usd"], 361.2)
         self.assertEqual(self.mem["spend"]["value"]["usd"], 361.2)
         self.s.override = None
-        self.assertEqual(self.poll(self.now + 90), ["budget usd=361.20/350.00"])
+        self.assertEqual(self.poll(self.now + 90), ["budget usd=361.20/100.00"])
 
     def test_spend_every_s(self):
         for t in (0, 90, 180, 270, 299, 300, 390):

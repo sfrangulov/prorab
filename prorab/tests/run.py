@@ -245,6 +245,10 @@ def main(argv=None):
     if args.fast:
         env["PRORAB_FAST"] = "1"
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))  # same path as Ctrl-C
+    # A runner started in the background of a non-interactive shell (`run.py ... &`, a CI
+    # step) inherits SIGINT as ignored, and Python then keeps it ignored: the interrupt path
+    # below would never run and the groups would be left behind. Always handle it.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     t0 = time.monotonic()
     groups = [Group(n, m, log_dir) for n, m in group_modules(modules)]
     done = run_groups(groups, args.root, env, max(1, args.jobs), args.bound, args.stall)

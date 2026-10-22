@@ -87,6 +87,14 @@ class TestRunner(unittest.TestCase):
         self.assertIn("ok", p.stdout)
         self.assertIn("wall time", p.stdout)
 
+    @staticmethod
+    def _kill_sleeper(pidfile):
+        try:
+            with open(pidfile) as fh:
+                os.kill(int(fh.read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+
     def _interrupted_runner_leaves_nothing(self, sig):
         pidfile = os.path.join(self.tmp.name, "child.pid")
         make_package(self.root, {"test_hang": (
@@ -95,10 +103,15 @@ class TestRunner(unittest.TestCase):
             "        open(%r, 'w').write(str(os.getpid()))\n"
             "        time.sleep(60)\n" % pidfile)})
         env = {k: v for k, v in os.environ.items() if k != "PRORAB_FAST"}
+        # Start the runner with SIGINT ignored, as a background job of a non-interactive shell
+        # does: the runner must restore the handler itself (it did not, and the test failed
+        # whenever the suite itself ran in the background).
         p = subprocess.Popen([sys.executable, RUN, "--root", self.root, "--log-dir", self.logs,
                               "synth.test_hang"], stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, env=env)
+                             stderr=subprocess.DEVNULL, env=env,
+                             preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
         self.addCleanup(p.kill)
+        self.addCleanup(self._kill_sleeper, pidfile)  # a failing test leaves nothing behind
         deadline = time.monotonic() + 20
         while not os.path.exists(pidfile) and time.monotonic() < deadline:
             time.sleep(0.1)

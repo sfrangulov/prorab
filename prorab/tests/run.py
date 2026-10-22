@@ -151,6 +151,15 @@ class Group:
         self.proc.wait()
         self._finish(why, now)
 
+    def abort(self):
+        """Kill the group's process group (the child and anything it started)."""
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        self.proc.wait()
+        self.log.close()
+
     def _finish(self, status, now):
         self.status = status
         self.elapsed = now - self.started
@@ -175,18 +184,23 @@ def parse_log(path):
 
 def run_groups(groups, root, env, jobs, bound_s, stall_s, out=sys.stdout):
     pending, running, done = list(groups), [], []
-    while pending or running:
-        while pending and len(running) < jobs:
-            g = pending.pop(0)
-            g.start(root, env)
-            running.append(g)
-            print("start %s: %s" % (g.name, " ".join(g.modules)), file=out, flush=True)
-        for g in list(running):
-            if g.poll(bound_s, stall_s):
-                running.remove(g)
-                done.append(g)
-                print("end %s: %s in %.0f s" % (g.name, g.status, g.elapsed), file=out, flush=True)
-        time.sleep(POLL_S)
+    try:
+        while pending or running:
+            while pending and len(running) < jobs:
+                g = pending.pop(0)
+                g.start(root, env)
+                running.append(g)
+                print("start %s: %s" % (g.name, " ".join(g.modules)), file=out, flush=True)
+            for g in list(running):
+                if g.poll(bound_s, stall_s):
+                    running.remove(g)
+                    done.append(g)
+                    print("end %s: %s in %.0f s" % (g.name, g.status, g.elapsed),
+                          file=out, flush=True)
+            time.sleep(POLL_S)
+    finally:
+        for g in running:  # interrupted (Ctrl-C, SIGTERM, an exception): leave nothing behind
+            g.abort()
     return done
 
 
@@ -230,6 +244,7 @@ def main(argv=None):
     env = dict(os.environ)
     if args.fast:
         env["PRORAB_FAST"] = "1"
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))  # same path as Ctrl-C
     t0 = time.monotonic()
     groups = [Group(n, m, log_dir) for n, m in group_modules(modules)]
     done = run_groups(groups, args.root, env, max(1, args.jobs), args.bound, args.stall)

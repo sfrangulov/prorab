@@ -1,6 +1,7 @@
 """The bounded parallel runner, against synthetic test packages in temp directories.
 These tests never run the real suite (no recursion)."""
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -85,6 +86,45 @@ class TestRunner(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout)
         self.assertIn("ok", p.stdout)
         self.assertIn("wall time", p.stdout)
+
+    def _interrupted_runner_leaves_nothing(self, sig):
+        pidfile = os.path.join(self.tmp.name, "child.pid")
+        make_package(self.root, {"test_hang": (
+            "    def test_hang(self):\n"
+            "        import os\n"
+            "        open(%r, 'w').write(str(os.getpid()))\n"
+            "        time.sleep(60)\n" % pidfile)})
+        env = {k: v for k, v in os.environ.items() if k != "PRORAB_FAST"}
+        p = subprocess.Popen([sys.executable, RUN, "--root", self.root, "--log-dir", self.logs,
+                              "synth.test_hang"], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, env=env)
+        self.addCleanup(p.kill)
+        deadline = time.monotonic() + 20
+        while not os.path.exists(pidfile) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(pidfile), "the test never started")
+        time.sleep(0.3)
+        with open(pidfile) as fh:
+            child = int(fh.read())
+        p.send_signal(sig)
+        p.wait(timeout=10)
+        gone = False
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                gone = True
+                break
+            time.sleep(0.1)
+        if not gone:
+            os.kill(child, signal.SIGKILL)
+        self.assertTrue(gone, "the sleeping test process survived the runner")
+
+    def test_sigterm_kills_the_groups(self):
+        self._interrupted_runner_leaves_nothing(signal.SIGTERM)
+
+    def test_sigint_kills_the_groups(self):
+        self._interrupted_runner_leaves_nothing(signal.SIGINT)
 
     def test_bd_module_runs_as_its_own_group_in_parallel(self):
         make_package(self.root, {"test_journal": PASSING, "test_other": PASSING})

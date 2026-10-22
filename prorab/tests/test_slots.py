@@ -18,7 +18,8 @@ import slots  # noqa: E402
 
 HOLD = ("import os, sys, time\n"
         "open(sys.argv[1] + '.started', 'w').close()\n"
-        "while not os.path.exists(sys.argv[1]):\n"
+        "deadline = time.time() + 30\n"  # never outlives a failed test
+        "while not os.path.exists(sys.argv[1]) and time.time() < deadline:\n"
         "    time.sleep(0.02)\n")
 
 

@@ -20,7 +20,7 @@ Rules here, mechanics in scripts (`<file> …` is `python3 scripts/<file> …` f
 3. `shift.py reconcile` before any issuing.
 4. `sensor.py status`; not installed: offer it once, naming its gain (exact percentage and reset, so a measured rate), edit (`statusLine` in `~/.claude/settings.json`, backed up), install `sensor.py install --yes`, removal `sensor.py uninstall`; only an explicit yes installs. Till then limits come from status lines and limit messages, rates stay defaults.
 5. `monitor.py` in the background, never two; handle each event by its section, then restart it. `blind`, `blind_week`: tell the customer once.
-6. `shift.py preflight [--night]`, `shift.py begin [--night]`, at night `shift.py caffeinate PID` (this Claude Code); tell morning, thresholds, budget, rate.
+6. `shift.py preflight [--night]`, `shift.py begin [--night]` (not on a takeover: it resets the spend), at night `shift.py caffeinate PID` (this Claude Code); tell morning, thresholds, budget, rate.
 
 ## The cycle
 

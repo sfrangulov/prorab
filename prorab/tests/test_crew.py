@@ -882,6 +882,25 @@ class TestAnswer(CrewBase):
         self.assertEqual(self.j.act_log[0][:2], ("N1", "answer"))
         self.assertTrue(self.j.act_log[0][2].startswith("choice for crew a1: 2. "))
 
+    def test_answer_recorded_on_the_current_open_stage(self):
+        # R56: the spec's stage bead; the first open stage in order is the current one
+        self.j.stages["N1"] = ["N1.2", "N1.3"]
+        self.route("agent read a1 --source visible", DIALOG)
+        crew.answer("a1", choice=2)
+        self.route("agent read a1 --source visible", "just a prompt\n")
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        crew.answer("a1", text="go on")
+        self.assertEqual([(b, k) for b, k, _ in self.j.act_log],
+                         [("N1.2", "answer"), ("N1.2", "answer")])
+        self.assertEqual(self.j.act_log[1][2], "answer to crew a1: go on")
+
+    def test_answer_without_open_stage_recorded_on_the_work_order(self):
+        self.j.stages["N1"] = []
+        self.route("agent read a1 --source visible", "just a prompt\n")
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        crew.answer("a1", text="go on")
+        self.assertEqual(self.j.act_log, [("N1", "answer", "answer to crew a1: go on")])
+
     def test_answer_moves_up_from_highlighted_option(self):
         shifted = DIALOG.replace("❯ 1.", "  1.").replace("  3. Option C", "❯ 3. Option C")
         self.route("agent read a1 --source visible", shifted)

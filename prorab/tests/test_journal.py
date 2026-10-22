@@ -342,6 +342,14 @@ class TestJournal(JournalBase):
         run("override", "clear")
         self.assertEqual(run("override", "get")[1], {"override": None})
 
+    def test_open_stages_in_creation_order(self):
+        # bd lists children newest first; the first open stage is the current one (R56)
+        n = new_work_order("A")
+        stages = [journal.create_stage(n, "S%d" % i, "b") for i in range(1, 4)]
+        self.assertEqual(journal.open_stages(n), stages)
+        journal.bd(["close", stages[0]])
+        self.assertEqual(journal.open_stages(n), stages[1:])
+
     def test_graph_open_stages_and_ready_work_orders(self):
         a = new_work_order("A")
         b = new_work_order("B")

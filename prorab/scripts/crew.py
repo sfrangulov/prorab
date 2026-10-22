@@ -705,6 +705,14 @@ def _record(work_order, text):
         journal.add_act(work_order, "answer", text)
 
 
+def _record_answer(work_order, text):
+    """An answer to a crew goes on the stage bead (R56): the work order's current open stage,
+    the first in creation order; on the work order itself only when no stage is open."""
+    if work_order:
+        stages = journal.open_stages(work_order)
+        journal.add_act(stages[0] if stages else work_order, "answer", text)
+
+
 def _status(name):
     a = herdr_cli.agent(name)
     return a.get("agent_status") if a else "gone"
@@ -713,7 +721,8 @@ def _status(name):
 def answer(name, choice=None, text=None):
     """Answer a choice dialog, or send text. A consent prompt returns "consent:<kind>" and a
     limit screen "limit_screen": nothing is sent (`wait_limit` is the only way to act on a
-    limit screen). Without a dialog the text goes through `deliver`."""
+    limit screen). Without a dialog the text goes through `deliver`. The answer is recorded
+    as an `answer` act on the current open stage (`_record_answer`)."""
     work_order = journal.kv_get(_kv(name, "work_order"))
     visible = herdr_cli.agent_visible(name)
     kind = herdr_cli.consent_dialog(visible)
@@ -726,7 +735,7 @@ def answer(name, choice=None, text=None):
         if text is None:
             raise ValueError("no dialog is open: text is required")
         result = deliver(name, text, work_order)
-        _record(work_order, "answer to crew %s: %s" % (name, text))
+        _record_answer(work_order, "answer to crew %s: %s" % (name, text))
         return result
     labels, current = dialog
     if choice is not None:
@@ -744,14 +753,14 @@ def answer(name, choice=None, text=None):
     keys = ["down"] * delta if delta > 0 else ["up"] * -delta
     if choice is not None:
         herdr_cli.send_keys(name, keys + ["enter"])
-        _record(work_order, "choice for crew %s: %d. %s" % (name, choice, labels[target]))
+        _record_answer(work_order, "choice for crew %s: %d. %s" % (name, choice, labels[target]))
     else:
         if keys:
             herdr_cli.send_keys(name, keys)
         pane = (herdr_cli.agent(name) or {}).get("pane_id") or journal.kv_get(_kv(name, "pane"))
         herdr_cli.run(["pane", "send-text", pane, text])
         herdr_cli.send_keys(name, ["enter"])
-        _record(work_order, "answer to crew %s (free text): %s" % (name, text))
+        _record_answer(work_order, "answer to crew %s (free text): %s" % (name, text))
     return _status(name)
 
 

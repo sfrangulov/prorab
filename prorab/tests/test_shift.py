@@ -372,6 +372,8 @@ class TestReport(ShiftBase):
         journal.add_act(n, "answer", "%s the reviewer crew died twice" % shift.INCIDENT_TAG)
         journal.add_act(n, "answer", "crew waits for the limit reset until 03:00")
         journal.add_act(n, "answer", "plain answer to a crew")
+        journal.add_act(s, "answer", "plain answer on the stage")  # where crew.answer writes
+        journal.add_act(s, "answer", "%s the crew asked twice on the stage" % shift.INCIDENT_TAG)
         journal.wait_customer(s, "handover loop")
         self.write_log([{"ts": T0 + 60, "events": ["hung_unclear c1 scan_capped",
                                                     "provider_error c2 model_not_found"]}])
@@ -382,6 +384,7 @@ class TestReport(ShiftBase):
         self.assertIn("handover loop", incidents)
         self.assertIn("hung_unclear c1 scan_capped", incidents)
         self.assertIn("provider_error c2 model_not_found", incidents)
+        self.assertIn("- %s: the crew asked twice on the stage" % s, incidents)
         self.assertNotIn("plain answer", incidents)
 
     def test_report_names_consent_kind_and_push(self):

@@ -367,10 +367,17 @@ def graph():
     return out
 
 
+def _creation_order(item):
+    """Sort key: bd's `created_at` (whole seconds), then the number after the id's last dot."""
+    tail = item["id"].rsplit(".", 1)[-1]
+    return (item.get("created_at") or "", int(tail) if tail.isdigit() else 0, item["id"])
+
+
 def open_stages(work_order):
-    """Ids of the work order's stages that are not closed."""
-    return [c["id"] for c in bd(["list", "--parent", work_order, "--all", "--limit", "0"])
-            if c.get("status") != "closed"]
+    """Ids of the work order's stages that are not closed, in creation order (bd lists the
+    newest first); the first one is the current stage."""
+    items = bd(["list", "--parent", work_order, "--all", "--limit", "0"])
+    return [c["id"] for c in sorted(items, key=_creation_order) if c.get("status") != "closed"]
 
 
 def working_work_orders():

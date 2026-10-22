@@ -8,6 +8,7 @@ The foreman writes every work order from the template below, for a crew that kno
 4. When a stage begins: `journal.py stage-start STAGE`; its heavy runs are counted from that time.
 5. Issue: append the site passport's text (`journal.py passport SITE`) below the filled template — and, without the superpowers plugin, the fallback procedure of `superpowers.md` — and send it with `crew.py send_work_order NAME TEXT --work-order ID`. The text goes into `~/.cache/prorab/work-orders/<id>.md`; the crew gets one line naming the file.
 6. At every stop point: `crew.py check_report NAME WORK_ORDER --stage STAGE`, always with `--stage`, before `crew.py accept` (`acts.md`, Acceptance act). Without `--stage`, or for a stage with no start time, the report is rejected as "heavy runs not verifiable".
+7. When the check fails, send the problems back, one per line in a file: `crew.py report_fix NAME WORK_ORDER STAGE --problems-file FILE`. It counts the rounds against `cycles.report_fix` in `defaults.json`; once they are used up it sends nothing and raises a gate instead, and the stage waits for the customer.
 
 ## Template
 
@@ -37,6 +38,8 @@ Every stage ends at its stop point: commit, leave no background command running,
 - Work only in this worktree, on the branch `prorab/<id>`, and commit there. Never push, open a pull request, release, or merge into main or any other branch.
 - Change only the work order's files: the union of the stages' Files (a path ending in `/` covers everything below it). A change outside them fails the report check; ask the foreman first if you need another file.
 - Do not touch installed things: installed skills and plugins, user configs (`~/.claude`, shell profiles), global packages; no `sudo`.
+- Never answer a trust prompt or any other consent prompt, and never press "Upgrade": stop and tell the foreman.
+- This work order has one crew and one session at a time: start no other Claude session for it (a `claude -p` run inside this worktree counts in the estimate), and take no second work order.
 - Safety rules: no `nohup` or detached runs; do not read credential stores, and put no secrets into files or messages; mass runs, heavy downloads and anything the machine's endpoint security agents would notice only with a clearance (section Clearances). Keep the site's beads as the site's `CLAUDE.md` says; the foreman's journal is not yours to write.
 - Heavy commands (LibreOffice, test suites, builds) run from inside this worktree through `<absolute path>/prorab/scripts/slots.py run --kind heavy -- <command>`. Each run counts against the heavy-run limit of the stage; at the limit, stop and ask.
 - Small independent tasks inside this work order go to your own subagents (`dispatching-parallel-agents`, `subagent-driven-development`); their spend counts in the estimate.

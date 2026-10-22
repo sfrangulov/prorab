@@ -76,6 +76,23 @@ def block(name, heading):
     return blocks[0]
 
 
+def limits_restated(text, cycles):
+    """Lines that state a cycle limit as a number: a line naming `cycles.<kind>` that also
+    holds the limit's value, or the value a few words before approval, review, fix, round,
+    iteration or attempt. A leading list marker ("3.") is not a number of the text."""
+    hits = []
+    for line in text.splitlines():
+        body = re.sub(r"^\s*(?:[-*+]|\d+\.)\s+", "", line)
+        for kind, n in cycles.items():
+            near = (r"\b%d\b\W+(?:\w+\W+){0,3}?"
+                    r"(?:approval|review|report.fix|fix|round|iteration|attempt)" % n)
+            if ("cycles.%s" % kind in body and re.search(r"\b%d\b" % n, body)) \
+                    or re.search(near, body, re.I):
+                hits.append(line)
+                break
+    return hits
+
+
 def git(cwd, *args):
     p = subprocess.run(["git", "-C", cwd] + list(args), capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
@@ -163,10 +180,26 @@ class TestWorkOrder(unittest.TestCase):
                       "<absolute path>/prorab/scripts/slots.py run --kind heavy -- <command>",
                       "subagents", "plain text", "choice dialog"):
             self.assertIn(field, t)
+        constraints = t.split("## Constraints")[1].split("\n## ")[0]
+        # safety rules: no consent prompt is answered, "Upgrade" is never pressed (P7, G);
+        # one crew and one session per work order (P16)
+        self.assertRegex(constraints, r"Never answer a trust prompt or any other consent prompt")
+        self.assertIn('never press "Upgrade"', constraints)
+        self.assertIn("one crew and one session", constraints)
+        self.assertIn("take no second work order", constraints)
         self.assertRegex(t, r"(?m)^- C1: ")
         # the foreman's work order body is where check_report finds the criteria: the
         # template itself contributes no criterion id outside the criteria list
         self.assertEqual(crew.criteria_ids(t), ["C1", "C2"])
+
+    def test_report_fix_loop(self):
+        # the foreman's acceptance steps say what to do when the report check fails
+        self.assertIn("crew.py report_fix NAME WORK_ORDER STAGE --problems-file FILE", self.text)
+        line = next(ln for ln in self.text.splitlines() if "crew.py report_fix" in ln)
+        self.assertIn("`cycles.report_fix` in `defaults.json`", line)
+        self.assertIn("gate", line)
+        self.assertEqual(limits_restated(self.text, _defaults.load()["cycles"]), [])
+        self.assertIn("cycles.report_fix", read("superpowers.md"))
 
     def test_report_format_matches_check_report(self):
         t = self.template
@@ -214,6 +247,16 @@ class TestWorkOrder(unittest.TestCase):
 
 
 class TestSuperpowersAndPassport(unittest.TestCase):
+    def test_limits_restated_matcher(self):
+        cycles = {"approval": 6, "review": 10, "report_fix": 3}
+        for line in ("at most 6 approval iterations", "10 review rounds per stage",
+                     "the limit `cycles.report_fix` (3)", "after 3 failed attempts"):
+            self.assertEqual(limits_restated(line, cycles), [line], line)
+        for line in ("6. Step six of a list", "3. **Implementation.** Commit each task",
+                     "the limit is `cycles.approval` in `defaults.json`", "stage 2: 40 heavy runs",
+                     "C3 | deferred"):
+            self.assertEqual(limits_restated(line, cycles), [], line)
+
     def test_superpowers_process(self):
         text = read("superpowers.md")
         for skill in ("brainstorming", "writing-plans", "executing-plans",
@@ -230,9 +273,10 @@ class TestSuperpowersAndPassport(unittest.TestCase):
             self.assertIn(phrase, text)
         rework = block("superpowers.md", "Approval")
         self.assertIn("Rework:", rework)
-        cycles = _defaults.load()["cycles"]
-        for kind in ("approval", "review"):  # limits by reference only, never restated
-            self.assertNotRegex(text, r"\b%d\b" % cycles[kind])
+        # limits by reference only, never restated
+        self.assertEqual(limits_restated(text, _defaults.load()["cycles"]), [])
+        # an answer is recorded on the stage bead (spec, R56)
+        self.assertIn("records it as an `answer` act on the stage bead", text)
         fallback = split_sections(text)["Fallback procedure"]
         steps = ("Plan", "Test", "Implementation", "Verification", "Review")
         positions = [fallback.find("**%s.**" % s) for s in steps]

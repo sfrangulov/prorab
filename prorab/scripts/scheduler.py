@@ -229,6 +229,11 @@ def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None):
     allowed = allowed_parallel(len(order), burn_rate(burn_points(entries), d), used, cap_pct,
                                lim.get("five_hour_resets_in_s"), active, load1, ncpu,
                                dict(d, machine=j.machine()))
+    hold = None
+    nnm = cap["no_new_mass"]
+    if not ov and nnm is not None and ((unknown and nnm == 0) or (not unknown and used >= nnm)):
+        hold = "no_new_mass"  # from this threshold on nothing new is issued
+        allowed = min(allowed, active)
     if spend is None:
         spend = j.shift_spend(d, now)
     if rates is None:
@@ -247,7 +252,7 @@ def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None):
                                   bool(ov)))
     return {"order": order, "allowed": allowed, "active": active,
             "new": max(0, allowed - active), "cap": cap, "override": ov,
-            "limits_unknown": unknown,
+            "hold": hold, "limits_unknown": unknown,
             "budget": {"usd": b["usd"], "spent_usd": spend["usd"], "left_usd": left,
                        "week_pp": b["week_pp"], "week_rise_pp": rise},
             "rates": rates, "fits": plan_fits}

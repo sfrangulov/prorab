@@ -255,6 +255,62 @@ class TestScheduler(unittest.TestCase):
         day = scheduler.build_plan(self._journal(override=ov), D, at(14), lim, none, (0.5, 8))
         self.assertEqual(day["allowed"], 3)
 
+    def _hold_plan(self, five_hour, *, night=True, week=20.0, override=None, now=None):
+        none = os.path.join(self.tmp.name, "none")
+        if night:
+            now = now or at(23)
+            lim = {"five_hour": five_hour, "seven_day": week,
+                   "five_hour_resets_at": at(10, day=22), "five_hour_resets_in_s": 11 * 3600}
+            kv = {"shift.night": "1"}
+        else:
+            now = now or at(14)
+            lim = {"five_hour": five_hour, "seven_day": week,
+                   "five_hour_resets_at": now + 3600, "five_hour_resets_in_s": 3600}
+            kv = {}
+        return scheduler.build_plan(self._journal(kv=kv, override=override), D, now, lim,
+                                    none, (0.5, 8))
+
+    def test_plan_holds_at_no_new_mass(self):
+        plan = self._hold_plan(78.0)  # the window covers the morning: 70 / 80
+        self.assertEqual(plan["cap"]["mode"], "night_morning_window")
+        self.assertEqual(plan["hold"], "no_new_mass")
+        self.assertEqual(plan["new"], 0)
+        plan = self._hold_plan(69.0)
+        self.assertIsNone(plan["hold"])
+        self.assertGreater(plan["new"], 0)
+
+    def test_plan_holds_by_day_at_the_threshold(self):
+        self.assertIsNone(self._hold_plan(59.9, night=False)["hold"])
+        plan = self._hold_plan(60.0, night=False)
+        self.assertEqual(plan["hold"], "no_new_mass")
+        self.assertEqual(plan["new"], 0)
+
+    def test_plan_holds_at_night_with_unknown_week(self):
+        none = os.path.join(self.tmp.name, "none")
+        lim = {"five_hour": None, "seven_day": None, "five_hour_resets_at": None,
+               "five_hour_resets_in_s": None}
+        plan = scheduler.build_plan(self._journal(kv={"shift.night": "1"}), D, at(23), lim,
+                                    none, (0.5, 8))
+        self.assertEqual(plan["cap"]["no_new_mass"], 0)
+        self.assertEqual(plan["hold"], "no_new_mass")
+        self.assertEqual(plan["new"], 0)
+
+    def test_plan_override_lifts_hold(self):
+        ov = {"goal": "g", "since": 1, "source": "customer's words"}
+        plan = self._hold_plan(78.0, override=ov)
+        self.assertIsNone(plan["hold"])
+        self.assertGreater(plan["new"], 0)
+
+    def test_plan_no_hold_before_morning_window(self):
+        # a window that resets before the morning has no separate no-new-mass threshold
+        now = at(23)
+        lim = {"five_hour": 90.0, "seven_day": 20.0, "five_hour_resets_at": at(3, day=22),
+               "five_hour_resets_in_s": 4 * 3600}
+        plan = scheduler.build_plan(self._journal(kv={"shift.night": "1"}), D, now, lim,
+                                    os.path.join(self.tmp.name, "none"), (0.5, 8))
+        self.assertIsNone(plan["cap"]["no_new_mass"])
+        self.assertIsNone(plan["hold"])
+
     def test_build_plan_unknown_usage_is_conservative(self):
         none = os.path.join(self.tmp.name, "none")
         now = at(14)

@@ -22,6 +22,31 @@ ENV_KEYS = ("HOME", "PATH", "BEADS_DIR", "PRORAB_BEADS_DIR", "FAKE_HERDR_DIR", "
 
 
 class JournalBase(unittest.TestCase):
+    """One `bd init` per test class (setUpClass), a fresh copy of that database per test."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._class_tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._class_tmp.cleanup)
+        saved = {k: os.environ.get(k) for k in ENV_KEYS}
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        cls.addClassCleanup(restore)
+        home = os.path.join(cls._class_tmp.name, "home")  # bd writes config under HOME
+        cls._class_pr = os.path.join(cls._class_tmp.name, "prorab")
+        os.makedirs(home)
+        os.makedirs(cls._class_pr)
+        os.environ["HOME"] = home
+        os.environ["PRORAB_BEADS_DIR"] = os.path.join(cls._class_pr, ".beads")
+        os.environ.pop("BEADS_DIR", None)
+        journal.ensure_db()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -46,7 +71,7 @@ class JournalBase(unittest.TestCase):
         os.environ["PATH"] = FAKES + os.pathsep + os.environ.get("PATH", "")
         os.environ["FAKE_HERDR_DIR"] = self.herdr_dir
         os.environ["HERDR_ENV"] = "1"
-        journal.ensure_db()
+        shutil.copytree(os.path.join(self._class_pr, ".beads"), os.path.join(self.pr, ".beads"))
 
     def set_panes(self, *pane_ids):
         body = {"id": "cli:x", "result": {"agents": [{"pane_id": p} for p in pane_ids]}}
@@ -61,6 +86,17 @@ def new_work_order(title="T", goal=None, usd=10, site="o"):
 
 
 class TestJournal(JournalBase):
+    def test_copied_db_is_independent(self):
+        journal.kv_set("copy.probe", "1")
+        bead = new_work_order("Probe")
+        self.assertEqual(journal.kv_get("copy.probe"), "1")
+        fresh = os.path.join(self.tmp.name, "fresh")
+        os.makedirs(fresh)
+        shutil.copytree(os.path.join(self._class_pr, ".beads"), os.path.join(fresh, ".beads"))
+        os.environ["PRORAB_BEADS_DIR"] = os.path.join(fresh, ".beads")
+        self.assertIsNone(journal.kv_get("copy.probe"))
+        self.assertNotIn(bead, [i["id"] for i in journal.ready()])
+
     def test_ensure_db_is_idempotent_and_local(self):
         journal.ensure_db()
         self.assertTrue(os.path.isdir(os.path.join(self.pr, ".beads")))

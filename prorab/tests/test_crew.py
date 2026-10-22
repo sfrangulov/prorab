@@ -1499,22 +1499,6 @@ class TestRestart(CrewBase):
         self.assertEqual(self.go(), {"status": "needs_consent", "kind": "mcp",
                                      "pane_id": "w:p9"})
         self.assertFalse([c for c in self.calls() if c.startswith("agent prompt")])
-
-
-def make_report(**kw):
-    parts = {
-        "Summary": "## Summary\nAdded the module.\n",
-        "Behaviour": ("## Behaviour\n| Criterion | Status | Reason |\n|---|---|---|\n"
-                      "| C1 | done | |\n| C2 | not applicable | no UI in this stage |\n"),
-        "Changed files": "## Changed files\n- `src/a.py` - new module\n",
-        "Verification": "## Verification\n- `python3 -m unittest` SKIP: 0\n",
-        "Residual risks": "## Residual risks\nNone.\n",
-    }
-    parts.update(kw.get("sections", {}))
-    text = "# Stage report\n\n" + "\n".join(v for v in parts.values() if v)
-    heavy = kw.get("heavy", "Heavy runs: 3\n")
-    return text + ("\n" + heavy if heavy else "") + kw.get("tail", "")
-
     # ---- a changed work order on resume (F7) ----
 
     CHANGED = "The work order changed since you last read it: read the file %s, then continue " \
@@ -1578,6 +1562,36 @@ def make_report(**kw):
     def test_changed_work_order_block_in_acts_md(self):
         self.assertEqual(crew._template("Changed work order"), self.CHANGED % "{path}")
 
+    def test_complete_handover_restart_records_the_fingerprint_on_accept_only(self):
+        with mock.patch.object(crew, "_cd_failure", return_value=None), \
+                mock.patch.object(crew, "_start_session", return_value=(None, "")), \
+                mock.patch.object(crew, "deliver", return_value="stalled"):
+            r = crew._restart_after_exit("a1", "N1", "Work order text", self.wt, "w:p9",
+                                         {"usd": 0}, 1, 0.01)
+        self.assertEqual(r["status"], "prompt_not_accepted")
+        self.assertNotIn("crew.a1.delivered", self.j.kv)
+        with mock.patch.object(crew, "_cd_failure", return_value=None), \
+                mock.patch.object(crew, "_start_session", return_value=(None, "")), \
+                mock.patch.object(crew, "deliver", return_value="accepted"):
+            r = crew._restart_after_exit("a1", "N1", "Work order text\n", self.wt, "w:p9",
+                                         {"usd": 0}, 1, 0.01)
+        self.assertEqual(r["status"], "restarted")
+        self.assertEqual(self.j.kv["crew.a1.delivered"], fingerprint("Work order text"))
+
+
+def make_report(**kw):
+    parts = {
+        "Summary": "## Summary\nAdded the module.\n",
+        "Behaviour": ("## Behaviour\n| Criterion | Status | Reason |\n|---|---|---|\n"
+                      "| C1 | done | |\n| C2 | not applicable | no UI in this stage |\n"),
+        "Changed files": "## Changed files\n- `src/a.py` - new module\n",
+        "Verification": "## Verification\n- `python3 -m unittest` SKIP: 0\n",
+        "Residual risks": "## Residual risks\nNone.\n",
+    }
+    parts.update(kw.get("sections", {}))
+    text = "# Stage report\n\n" + "\n".join(v for v in parts.values() if v)
+    heavy = kw.get("heavy", "Heavy runs: 3\n")
+    return text + ("\n" + heavy if heavy else "") + kw.get("tail", "")
 
 class TestCheckReport(CrewBase):
     def setUp(self):
@@ -2344,10 +2358,6 @@ class TestExitDialog(CrewBase):
         self.assertNotIn("crew.a1.exiting", self.j.kv)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestStopClosesPane(CrewBase):
     IDENT = {"terminal": "term-w:p9", "tab": "w:1"}
 
@@ -2417,9 +2427,30 @@ class TestStopClosesPane(CrewBase):
         self.assertEqual(r["status"], "stopped")
         self.assertFalse(r["pane_closed"])
 
+    def test_stop_leaves_the_pane_when_pane_get_fails(self):
+        self.route("agent list", ok({"agents": []}))
+        self.route("pane get w:p9", err("pane_not_found"), exit_code=1)
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "stopped")
+        self.assertFalse(r["pane_closed"])
+        self.assertNotIn("pane close w:p9", self.calls())
+
+    def test_stop_closes_nothing_while_the_agent_stays(self):
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.route("pane read w:p9 --source visible", "1 shell\n")
+        with mock.patch.object(crew, "_exit", return_value="bg_shells"):
+            r = crew.stop("a1", "N1", timeout_s=1, poll_s=0.01)
+        self.assertEqual(r, {"status": "bg_shells"})
+        self.assertNotIn("pane close w:p9", self.calls_or_empty())
+        self.assertIn("crew.a1.pane", self.j.kv)
+
     def test_stop_clears_the_delivered_fingerprint(self):
         self.route("agent list", ok({"agents": []}))
         self.route("pane get w:p9", ok({"pane": pane_info("w:p9")}))
         self.j.kv["crew.a1.delivered"] = "abc"
         crew.stop("a1", "N1")
         self.assertNotIn("crew.a1.delivered", self.j.kv)
+
+
+if __name__ == "__main__":
+    unittest.main()

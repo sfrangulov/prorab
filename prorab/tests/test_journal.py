@@ -208,6 +208,30 @@ class TestJournal(JournalBase):
         self.assertEqual(journal.bump_restarts(n), 2)
         self.assertEqual(journal.kv_get("restarts.%s" % n), "2")
 
+    def cli_restarts(self, *argv):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = journal.main(["restarts", *argv])
+        self.assertEqual(rc, 0)
+        return json.loads(buf.getvalue())
+
+    def test_restarts_cli_reads_without_bumping(self):
+        n = new_work_order()
+        self.assertEqual(self.cli_restarts(n), {"restarts": 0})
+        self.assertEqual(self.cli_restarts(n), {"restarts": 0})
+        self.assertIsNone(journal.kv_get("restarts.%s" % n))
+        journal.bump_restarts(n)
+        self.assertEqual(self.cli_restarts(n), {"restarts": 1})
+        self.assertEqual(self.cli_restarts(n), {"restarts": 1})
+
+    def test_restarts_cli_bump(self):
+        n = new_work_order()
+        self.assertEqual(self.cli_restarts(n, "--bump"), {"restarts": 1})
+        self.assertEqual(self.cli_restarts(n, "--bump"), {"restarts": 2})
+        self.assertEqual(journal.kv_get("restarts.%s" % n), "2")
+
     def test_crews_registry(self):
         self.assertEqual(journal.crews(), [])
         journal.register_crew("b1")

@@ -998,7 +998,7 @@ def main(argv=None):
     p = sub.add_parser("wait")
     p.add_argument("bead"); p.add_argument("reason")
     p = sub.add_parser("restarts")
-    p.add_argument("work_order")
+    p.add_argument("work_order"); p.add_argument("--bump", action="store_true")
     p = sub.add_parser("crews")
     p.add_argument("--add"); p.add_argument("--remove")
     p = sub.add_parser("iterations")
@@ -1121,7 +1121,8 @@ def main(argv=None):
     if a.cmd == "wait":
         return _emit({"gate": wait_customer(a.bead, a.reason)})
     if a.cmd == "restarts":
-        return _emit({"restarts": bump_restarts(a.work_order)})
+        n = bump_restarts(a.work_order) if a.bump else _kv_int("restarts.%s" % a.work_order)
+        return _emit({"restarts": n})
     if a.cmd == "crews":
         if a.add:
             register_crew(a.add)

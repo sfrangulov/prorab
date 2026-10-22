@@ -1,4 +1,5 @@
 import datetime
+import io
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ import sys
 import time
 import unittest
 import uuid
+from contextlib import redirect_stdout
 from unittest import mock
 
 SCRIPTS_DIR = os.path.join(
@@ -23,6 +25,7 @@ if shutil.which("bd") is None:
 
 import _defaults  # noqa: E402
 import journal  # noqa: E402
+import monitor  # noqa: E402
 import shift  # noqa: E402
 from prorab.tests.test_herdr_cli import err, ok  # noqa: E402
 from prorab.tests.test_journal import JournalBase, new_work_order  # noqa: E402
@@ -502,6 +505,16 @@ class TestHandoff(ShiftBase):
         self.route("agent start prorab-2", ok({"agent": agent_entry("prorab-2", "w:p9")}))
         self.route("agent prompt prorab-2", ok({"agent": {"agent_status": "working"}}))
 
+    def confirm(self, pane="w:p9", reconcile=True, monitor_file=True, at=None, pid=None):
+        """The new foreman's records: kv shift.reconciled and its monitor file."""
+        at = time.time() + 100 if at is None else at
+        if reconcile:
+            journal.kv_set("shift.reconciled", json.dumps({"pane": pane, "ts": at}))
+        if monitor_file:
+            with open(monitor.mark_path(pane), "w", encoding="utf-8") as fh:
+                json.dump({"pid": os.getpid() if pid is None else pid, "pane": pane,
+                           "started_at": at}, fh)
+
     def test_handoff_prorab_waits_for_lock(self):
         self.routes_for_handoff()
         journal.kv_set("prorab:active", "w:p1")
@@ -511,14 +524,69 @@ class TestHandoff(ShiftBase):
             sleeps.append(s)
             if len(sleeps) == 2:
                 journal.kv_set("prorab:active", "w:p9")
+                self.confirm()
         with mock.patch.object(shift.time, "sleep", sleeper):
             res = shift.handoff_prorab("w:p1", "state of the shift", timeout_s=600, poll_s=1)
         self.assertEqual(res["status"], "handed_over")
+        self.assertEqual(res["confirmed"], ["lock", "reconcile", "monitor"])
         self.assertEqual(res["new_pane"], "w:p9")
         self.assertEqual(len(sleeps), 2)
         self.assertIn("pane split w:p1 --direction right --no-focus --cwd %s"
                       % os.path.expanduser("~/projects/prorab"), self.calls())
         self.assertEqual(journal.kv_get("prorab:handoff"), "w:p9")  # the new foreman clears it
+
+    def test_handoff_waits_for_lock_reconcile_and_monitor(self):
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p1")
+        sleeps = []
+
+        def sleeper(s):
+            sleeps.append(s)
+            if len(sleeps) == 1:
+                journal.kv_set("prorab:active", "w:p9")  # the lock alone: still waiting
+            elif len(sleeps) == 2:
+                self.confirm(monitor_file=False)         # plus reconcile: still waiting
+            elif len(sleeps) == 3:
+                self.confirm()                           # all three
+        with mock.patch.object(shift.time, "sleep", sleeper):
+            res = shift.handoff_prorab("w:p1", "state", timeout_s=600, poll_s=1)
+        self.assertEqual(len(sleeps), 3)
+        self.assertEqual(res["status"], "handed_over")
+        self.assertEqual(res["confirmed"], ["lock", "reconcile", "monitor"])
+        self.assertNotIn("unconfirmed", res)
+
+    def test_handoff_lock_without_monitor_is_unconfirmed(self):
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p9")
+        self.confirm(monitor_file=False)
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
+        self.assertEqual(res["status"], "handed_over")
+        self.assertEqual(res["unconfirmed"], ["monitor"])
+        self.assertNotIn("confirmed", res)
+
+    def test_handoff_lock_alone_names_both_missing_facts(self):
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p9")
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
+        self.assertEqual(res["status"], "handed_over")
+        self.assertEqual(res["unconfirmed"], ["reconcile", "monitor"])
+
+    def test_handoff_old_records_do_not_count(self):
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p9")
+        self.confirm(at=time.time() - 3600)  # left by an earlier foreman in this pane
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
+        self.assertEqual(res["unconfirmed"], ["reconcile", "monitor"])
+
+    def test_handoff_records_of_another_pane_or_a_dead_pid_do_not_count(self):
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p9")
+        self.confirm(pane="w:p5", monitor_file=False)  # reconcile run by another pane
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.confirm(reconcile=False, pid=dead.pid)    # a mark whose process never ran for us
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
+        self.assertEqual(res["unconfirmed"], ["reconcile", "monitor"])
 
     def test_handoff_prorab_times_out_and_withdraws_the_handoff(self):
         self.routes_for_handoff()
@@ -617,6 +685,20 @@ class TestHandoff(ShiftBase):
 
 
 class TestReconcile(ShiftBase):
+    def test_reconcile_records_its_pane_and_time(self):
+        os.environ["HERDR_PANE_ID"] = "w:p9"
+        before = time.time()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(shift.main(["reconcile"]), 0)
+        rec = json.loads(journal.kv_get("shift.reconciled"))
+        self.assertEqual(rec["pane"], "w:p9")
+        self.assertTrue(before <= rec["ts"] <= time.time())
+
+    def test_reconcile_issues_alone_records_nothing(self):
+        shift.reconcile_issues([])
+        self.assertIsNone(journal.kv_get("shift.reconciled"))
+
     def test_reconcile_issues(self):
         a, b = new_work_order("A"), new_work_order("B")
         journal.issue_set(a, "issuing", name="c1", pane="w:p1", session_id="s1")

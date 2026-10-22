@@ -22,6 +22,7 @@ import crew  # noqa: E402
 import herdr_cli  # noqa: E402
 import journal  # noqa: E402
 import limits  # noqa: E402
+import monitor  # noqa: E402
 import scheduler  # noqa: E402
 import sensor  # noqa: E402
 import slots  # noqa: E402
@@ -197,11 +198,14 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
     except herdr_cli.HerdrError as e:
         delivery = "error: %s" % e
     deadline = time.monotonic() + timeout_s
+    alive = []  # the new monitor's pid, once seen alive
     while True:
         holder = journal.kv_get("prorab:active")
         if holder is not None and holder != caller_pane:
-            return {"status": "handed_over", "new_pane": pane, "bead": bead,
-                    "delivery": delivery}
+            missing = _unconfirmed(pane, now, alive)
+            if not missing:
+                return {"status": "handed_over", "confirmed": ["lock", "reconcile", "monitor"],
+                        "new_pane": pane, "bead": bead, "delivery": delivery}
         if time.monotonic() >= deadline:
             # the new foreman may take the lock between the read above and the withdrawal:
             # a consumed handoff or a changed holder after the withdrawal is a handover
@@ -210,8 +214,43 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
             holder = journal.kv_get("prorab:active")
             status = ("handed_over" if consumed or (holder is not None and holder != caller_pane)
                       else "timeout")
-            return {"status": status, "new_pane": pane, "bead": bead, "delivery": delivery}
+            res = {"status": status, "new_pane": pane, "bead": bead, "delivery": delivery}
+            if status == "handed_over":
+                res["unconfirmed"] = _unconfirmed(pane, now, alive)
+            return res
         time.sleep(poll_s)
+
+
+def _unconfirmed(pane, began, alive):
+    """The takeover facts still missing for the new foreman in `pane` (the lock is taken):
+    `reconcile` run after `began`, and its monitor started after `began` with its pid seen
+    alive at least once (`alive` remembers that between calls). Reads files and kv only."""
+    missing = []
+    try:
+        rec = json.loads(journal.kv_get("shift.reconciled") or "")
+        ok = rec["pane"] == pane and float(rec["ts"]) > began
+    except (ValueError, TypeError, KeyError):
+        ok = False
+    if not ok:
+        missing.append("reconcile")
+    try:
+        with open(monitor.mark_path(pane), encoding="utf-8") as fh:
+            mark = json.load(fh)
+        fresh = float(mark["started_at"]) > began
+        pid = int(mark["pid"])
+    except (OSError, ValueError, TypeError, KeyError):
+        fresh, pid = False, None
+    if fresh and pid not in alive:
+        try:
+            os.kill(pid, 0)
+            alive.append(pid)
+        except PermissionError:
+            alive.append(pid)  # exists, owned by another user
+        except OSError:
+            pass
+    if not (fresh and pid in alive):
+        missing.append("monitor")
+    return missing
 
 
 def reconcile_issues(agents_list=None):
@@ -616,6 +655,8 @@ def main(argv=None):
             result = handoff_prorab(a.caller_pane, fh.read(), a.timeout)
     elif a.cmd == "reconcile":
         result = reconcile_issues()
+        journal.kv_set("shift.reconciled", json.dumps(
+            {"pane": os.environ.get("HERDR_PANE_ID"), "ts": time.time()}))
     else:
         result = {"path": report(a.date, a.out_dir or _default_reports_dir())}
     print(json.dumps(result, ensure_ascii=False))

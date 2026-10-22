@@ -38,6 +38,34 @@ def state_path():
     return os.path.join(log_dir(), "monitor-state.json")
 
 
+def mark_path(pane):
+    """The file a running monitor leaves for its pane: ``monitor-<pane>.json``."""
+    safe = (pane or "").replace(":", "_").replace("/", "_")
+    return os.path.join(log_dir(), "monitor-%s.json" % safe)
+
+
+def write_mark(pane):
+    """Record this monitor (pid, pane, start time) for the foreman's handover check. A file
+    write only; returns the path, or None when there is no pane."""
+    if not pane:
+        return None
+    path = mark_path(pane)
+    os.makedirs(log_dir(), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"pid": os.getpid(), "pane": pane, "started_at": time.time()}, fh)
+    os.replace(tmp, path)
+    return path
+
+
+def remove_mark(path):
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def readings(since=None):
     """Limit readings from monitor.log (same reader as the scheduler's burn rate)."""
     return scheduler.readings(since=since)
@@ -585,6 +613,14 @@ def _poll(crews, d, mem, now, dp):
 # ---- main ---------------------------------------------------------------------------
 
 def main(argv=None, *, deps=None):
+    mark = write_mark(os.environ.get("HERDR_PANE_ID"))
+    try:
+        return _run(argv, deps)
+    finally:
+        remove_mark(mark)
+
+
+def _run(argv, deps):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--crew", action="append", default=[])
     ap.add_argument("--interval", type=float)

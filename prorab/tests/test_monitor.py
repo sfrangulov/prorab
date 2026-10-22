@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 SCRIPTS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
@@ -967,6 +968,31 @@ class TestMonitorMain(unittest.TestCase):
         with redirect_stdout(buf):
             rc = monitor.main(["--crew", "b1", *extra], deps=self.s.deps())
         return rc, buf.getvalue()
+
+    def test_monitor_writes_and_removes_its_mark(self):
+        os.environ["HERDR_PANE_ID"] = "w:p/9"
+        self.addCleanup(os.environ.pop, "HERDR_PANE_ID", None)
+        path = os.path.join(self.tmp.name, "monitor-w_p_9.json")
+        seen = []
+        deps = self.s.deps()
+        orig = deps["agents"]
+
+        def agents():
+            with open(path, encoding="utf-8") as fh:  # present while the monitor runs
+                seen.append(json.load(fh))
+            return orig()
+        deps["agents"] = agents
+        before = time.time()
+        with mock.patch("subprocess.run", side_effect=AssertionError("process")), \
+                mock.patch("subprocess.Popen", side_effect=AssertionError("process")):
+            with redirect_stdout(io.StringIO()):
+                rc = monitor.main(["--crew", "b1", "--interval", "0.01", "--heartbeat", "0.05"],
+                                  deps=deps)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen[0]["pid"], os.getpid())
+        self.assertEqual(seen[0]["pane"], "w:p/9")
+        self.assertGreaterEqual(seen[0]["started_at"], before)
+        self.assertFalse(os.path.exists(path))
 
     def test_heartbeat_exit(self):
         rc, out = self.run_main("--interval", "0.01", "--heartbeat", "0.05")

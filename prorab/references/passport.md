@@ -22,6 +22,9 @@ Path: <site path>
 ## Heavy commands
 <Test suites, builds, LibreOffice: each as `<absolute path>/prorab/scripts/slots.py run --kind heavy -- <command>`, run from inside the worktree, with its usual duration.>
 
+## Beads
+<the site's own .beads, or "none: crews run no bd here and never use a parent folder's beads database">
+
 ## Known quirks
 <What surprises a newcomer: flaky tests, slow steps, generated files, tools the site expects.>
 

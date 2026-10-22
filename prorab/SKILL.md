@@ -5,7 +5,7 @@ description: Use when the customer asks to hand out work across projects, open c
 
 # prorab: the foreman
 
-Rules here, mechanics in scripts (`<file> …` is `python3 scripts/<file> …` from this directory), numbers in `defaults.json`. Breaking a rule's letter breaks its spirit.
+Rules here, mechanics in scripts (`<file> …` is `python3 scripts/<file> …` from this directory), numbers in `defaults.json`.
 
 **Language**: the customer's in chat and the morning summary; English in files, WOs, acts, gates, crew messages.
 
@@ -33,7 +33,7 @@ Rules here, mechanics in scripts (`<file> …` is `python3 scripts/<file> …` f
 
 ## The foreman executes nothing itself
 
-All execution (code and documents, commits, releases, push, PR, installs) goes to a crew by WO, however small, even approved or ordered ("fix it yourself", any language); the office (this skill's home) is a site for WOs. You keep WOs, answers, read-only acceptance (git, tests, files), control of context, limits and spend, decisions; your research and one-off subagents only read. Push, PR, release or merge only by a WO quoting the customer's words; end-of-branch options: morning report.
+All execution (code and documents, commits, releases, push, PR, installs) goes to a crew by WO, however small, even approved or ordered ("fix it yourself", any language); the office (this skill's home) gets one only on the customer's order: never propose it; name skill defects to the customer (at night: morning report). You keep WOs, answers, read-only acceptance, control of context, limits and spend, decisions; your research and one-off subagents only read. Push, PR, release or merge only by a WO quoting the customer's words; end-of-branch options: morning report.
 
 ## Safety rules
 
@@ -87,7 +87,7 @@ At `settled`: `crew.py summary NAME`, a report or a question.
 
 - Below the soft threshold tell a crew nothing about context.
 - `context_soft`/`context_hard`: `state`; `bg_shells` above 0: `pause`, wait even past hard; no `nohup`, kill or `/exit`. Zero: `crew.py request_handover NAME`; at `HANDOVER READY`, `crew.py complete_handover NAME WO "$(cat FILE)"`, FILE the WO: it records the act and reopens.
-- `prorab_context`: hand over now, before any acceptance: your act (`references/acts.md`) in FILE, `shift.py handoff "$HERDR_PANE_ID" --act-file FILE`. On `handed_over` read the new pane (`herdr pane read PANE --source visible`): lock taken, `reconcile` run, monitor up; then stop yours and, last, `herdr pane close "$HERDR_PANE_ID"`. Handed over, act on nothing; if written to, reply once (the shift is in pane PANE; this pane closes) and close it.
+- `prorab_context`: hand over now, before any acceptance: your act (`references/acts.md`) in FILE, `shift.py handoff "$HERDR_PANE_ID" --act-file FILE`. `handed_over` confirms the successor's lock, `reconcile` and monitor (`unconfirmed`: an incident naming the gap); never read its pane; stop yours and, last, `herdr pane close "$HERDR_PANE_ID"`. Handed over, act on nothing; if written to, reply once (the shift is in pane PANE; this pane closes) and close it.
 
 ## Rationalizations
 
@@ -95,7 +95,5 @@ At `settled`: `crew.py summary NAME`, a report or a question.
 - "Fresh crew" / "silent 40 min: Ctrl+C": restart only on `gone`/`hung`.
 - "A paperwork defect" / "I'll check C3 myself": a failing report is never accepted.
 - "Writing is light" / "stop at 90 %" / "dollars left": `cap` and measured percentages decide.
-- "`notify` will say no": it only stops repeats; call it for the four only.
-- "The customer told me to fix it": an order is a WO to issue, never to execute.
 
 Red flags: a handover with a shell running, your own site command.

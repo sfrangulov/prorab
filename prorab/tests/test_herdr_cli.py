@@ -67,12 +67,16 @@ class FakeBase(unittest.TestCase):
         os.environ["HERDR_ENV"] = "1"
         self.routes = {}
 
-    def route(self, prefix, body, exit_code=0, name=None):
+    def route(self, prefix, body, exit_code=0, name=None, stderr=None):
         self._n = getattr(self, "_n", 0) + 1
         name = name or "r%d.txt" % self._n
         with open(os.path.join(self.dir, name), "w", encoding="utf-8") as fh:
             fh.write(body)
         self.routes[prefix] = {"file": name, "exit": exit_code}
+        if stderr is not None:
+            with open(os.path.join(self.dir, "e" + name), "w", encoding="utf-8") as fh:
+                fh.write(stderr)
+            self.routes[prefix]["stderr"] = "e" + name
         self._save()
 
     def route_seq(self, prefix, bodies, exit_code=0):
@@ -92,6 +96,34 @@ class FakeBase(unittest.TestCase):
     def calls(self):
         with open(os.path.join(self.dir, "calls.log"), encoding="utf-8") as fh:
             return fh.read().splitlines()
+
+
+class TestRunAck(FakeBase):
+    def test_run_ack_empty_success_is_ok(self):
+        self.route("pane close w:p1", "")
+        self.assertEqual(herdr_cli.run_ack(["pane", "close", "w:p1"]), {})
+
+    def test_run_ack_json_error_raises(self):
+        self.route("pane close w:p1", err("pane_not_found"))
+        with self.assertRaises(herdr_cli.HerdrError) as cm:
+            herdr_cli.run_ack(["pane", "close", "w:p1"])
+        self.assertEqual(cm.exception.code, "pane_not_found")
+
+    def test_run_ack_plain_text_success_is_ok(self):
+        self.route("pane close w:p1", "ok")
+        self.assertEqual(herdr_cli.run_ack(["pane", "close", "w:p1"]), {"text": "ok"})
+
+    def test_run_ack_json_without_error_is_returned(self):
+        self.route("pane close w:p1", ok({"closed": True}))
+        self.assertEqual(herdr_cli.run_ack(["pane", "close", "w:p1"])["result"],
+                         {"closed": True})
+
+    def test_run_ack_failure_names_args_rc_and_stderr(self):
+        self.route("pane close w:p1", "", exit_code=1, stderr="boom")
+        with self.assertRaises(herdr_cli.HerdrError) as cm:
+            herdr_cli.run_ack(["pane", "close", "w:p1"])
+        for part in ("pane close w:p1", "rc=1", "boom"):
+            self.assertIn(part, str(cm.exception))
 
 
 class TestEnv(FakeBase):

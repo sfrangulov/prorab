@@ -69,6 +69,31 @@ def run(args, timeout_s=None):
     return data
 
 
+def run_ack(args, timeout_s=None):
+    """`run` for herdr commands whose answer the scripts do not read: any answer on exit 0
+    is a success (empty -> {}, JSON without an `error` object -> the parsed JSON, other text
+    -> {"text": first 200 characters}). Raises only on a non-zero exit or a JSON `error`
+    object; the message names the command, the exit code and stderr (first 200 characters)."""
+    p = _exec(args, timeout_s)
+    where = "herdr %s: rc=%d, stderr=%s" % (" ".join(args), p.returncode,
+                                           (p.stderr or "").strip()[:200])
+    if p.returncode != 0:
+        e = _error_from(p)
+        raise HerdrError(e.code, "%s: %s" % (where, e))
+    out = (p.stdout or "").strip()
+    if not out:
+        return {}
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return {"text": out[:200]}
+    if isinstance(data, dict) and isinstance(data.get("error"), dict):
+        err = data["error"]
+        raise HerdrError(err.get("code", "cli_error"),
+                         "%s: %s" % (where, err.get("message") or err.get("code", "")))
+    return data
+
+
 def check_env():
     if os.environ.get("HERDR_ENV") != "1":
         raise HerdrError("not_in_herdr", "HERDR_ENV is not 1: run inside a herdr pane")

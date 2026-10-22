@@ -144,6 +144,18 @@ def agent_entry(name="a1", pane="w:p9", cwd="/work", status="idle", session="ses
             "agent_session": {"value": session}}
 
 
+def split_pane(pane, terminal=None, tab="w:1"):
+    return {"pane_id": pane, "terminal_id": terminal or "term-" + pane, "tab_id": tab}
+
+
+def pane_info(pane, terminal=None, tab="w:1", cwd=SITE_DIR, agent=None):
+    d = {"pane_id": pane, "terminal_id": terminal or "term-" + pane, "tab_id": tab,
+         "foreground_cwd": cwd}
+    if agent:
+        d["agent"] = agent
+    return d
+
+
 class CrewBase(FakeBase):
     def setUp(self):
         super().setUp()
@@ -232,7 +244,7 @@ class TestStart(CrewBase):
     def routes_for_start(self, not_ready=False):
         self.route("pane layout --pane w:p1", ok({"layout": {"panes": [
             {"pane_id": "w:p1", "rect": {"width": 200, "height": 40}}]}}))
-        self.route("pane split w:p1", ok({"pane": {"pane_id": "w:p9"}}))
+        self.route("pane split w:p1", ok({"pane": split_pane("w:p9")}))
         if not_ready:
             self.route("agent start a1", err("agent_not_ready"), exit_code=1)
         else:
@@ -584,7 +596,8 @@ class TestStart(CrewBase):
         self.assertTrue([c for c in calls if c.startswith("pane split")])
         self.assertTrue([c for c in calls if c.startswith("agent start")])
         for c in calls:
-            self.assertNotIn("w:p9", c.replace("pane layout", ""))
+            if not c.startswith("pane get"):  # reading the old pane is fine, touching it is not
+                self.assertNotIn("w:p9", c.replace("pane layout", ""))
             self.assertNotIn("close", c)
         self.assert_nothing_pressed()
 
@@ -1798,6 +1811,149 @@ class TestStop(CrewBase):
         crew.stop("a1", "N1")
         for field in ("session", "transcript", "limit_until"):
             self.assertNotIn("crew.a1." + field, self.j.kv)
+
+
+class TestStartPanes(CrewBase):
+    """F2: a failed start's pane is reused or closed, never left empty."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.make_repo()
+        self.j.files = {"N1": ["x"]}
+        self.route("pane layout --pane w:p1", ok({"layout": {"panes": [
+            {"pane_id": "w:p1", "rect": {"width": 200, "height": 40}}]}}))
+        self.route("agent start a1", ok({"agent": agent_entry()}))
+        self.route("agent list", ok({"agents": []}))
+
+    def splits(self, *panes):
+        self.route_seq("pane split w:p1", [ok({"pane": p}) for p in panes])
+
+    def pane_get(self, pane, **kw):
+        self.route("pane get " + pane, ok({"pane": pane_info(pane, **kw)}))
+
+    def first_needs_trust(self, pane=None):
+        self.write_trust([])
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["status"], "needs_trust")
+        self.write_trust([self.repo])
+        self.mark = len(self.calls())
+
+    def later(self):
+        return self.calls()[self.mark:]
+
+    def test_retry_after_trust_reuses_the_pane(self):
+        self.splits(split_pane("w:p9"))
+        self.first_needs_trust()
+        self.pane_get("w:p9", cwd=self.repo)
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p9")
+        self.assertFalse([c for c in self.later() if c.startswith("pane split")])
+        self.assertTrue([c for c in self.later()
+                         if c.startswith("agent start a1") and "--pane w:p9" in c])
+
+    def test_retry_with_the_customers_claude_running_leaves_the_pane(self):
+        self.splits(split_pane("w:p9"), split_pane("w:p10"))
+        self.first_needs_trust()
+        self.pane_get("w:p9", cwd=self.repo, agent="claude")
+        self.route("agent list", ok({"agents": [agent_entry(pane="w:p9", session="theirs")]}))
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p10")
+        rec = self.j.issue("N1")
+        self.assertEqual(rec["pane"], "w:p10")
+        self.assertEqual(rec["spare"], [{"pane": "w:p9", "terminal": "term-w:p9", "tab": "w:1"}])
+        for c in self.later():
+            self.assertFalse(c.startswith("pane close"), c)
+            self.assertNotIn("keys", c)
+
+    def test_leftover_session_id_in_a_not_issued_record_is_not_our_session(self):
+        self.splits(split_pane("w:p9"), split_pane("w:p10"))
+        self.first_needs_trust()
+        self.j.issue_set("N1", "not_issued", session_id="old-session")
+        self.pane_get("w:p9", cwd=self.repo, agent="claude")
+        self.route("agent list", ok({"agents": [
+            agent_entry(pane="w:p9", session="old-session")]}))
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p10")
+        self.assertEqual([s["pane"] for s in self.j.issue("N1")["spare"]], ["w:p9"])
+
+    def test_recorded_pane_elsewhere_is_closed_then_split(self):
+        self.splits(split_pane("w:p9"), split_pane("w:p10"))
+        self.first_needs_trust()
+        self.pane_get("w:p9", cwd="/home/user/elsewhere")
+        self.route("pane close w:p9", "")
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p10")
+        self.assertIn("pane close w:p9", self.later())
+
+    def test_gone_recorded_pane_splits_anew(self):
+        self.splits(split_pane("w:p9"), split_pane("w:p10"))
+        self.first_needs_trust()
+        self.route("pane get w:p9", err("pane_not_found"), exit_code=1)
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p10")
+        self.assertFalse([c for c in self.later() if c.startswith("pane close")])
+        self.assertFalse(self.j.issue("N1").get("spare"))
+
+    def test_recycled_pane_id_is_not_closed(self):
+        for other in ({"terminal": "term-new"}, {"tab": "w:2"}):
+            with self.subTest(other=other):
+                self.setUp()
+                self.splits(split_pane("w:p9"), split_pane("w:p10"))
+                self.first_needs_trust()
+                self.pane_get("w:p9", cwd="/home/user/elsewhere", **other)
+                r = crew.start(self.repo, "N1", "a1", "w:p1")
+                self.assertEqual(r["pane_id"], "w:p10")
+                self.assertFalse([c for c in self.later() if c.startswith("pane close")])
+                self.assertEqual(crew.close_start_panes("N1"), [])
+
+    def test_recycled_pane_id_is_not_closed_by_cleanup(self):
+        self.splits(split_pane("w:p9"))
+        self.first_needs_trust()
+        self.pane_get("w:p9", terminal="term-new")
+        self.assertEqual(crew.cleanup(os.path.join(self.dir, "nowhere"), "N1"),
+                         {"status": "absent"})
+        self.assertFalse([c for c in self.later() if c.startswith("pane close")])
+        self.assertIsNone(self.j.issue("N1").get("pane"))
+
+    def test_pane_record_without_terminal_id_is_never_closed(self):
+        self.splits({"pane_id": "w:p9", "tab_id": "w:1"}, split_pane("w:p10"))
+        self.route("pane get w:p9", ok({"pane": {"pane_id": "w:p9", "tab_id": "w:1",
+                                                 "foreground_cwd": "/home/user/elsewhere"}}))
+        self.first_needs_trust()
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["pane_id"], "w:p10")
+        self.assertFalse([c for c in self.later() if c.startswith("pane close")])
+        self.assertEqual(crew.close_start_panes("N1"), [])
+
+    def test_missing_identity_in_the_split_answer_is_read_by_pane_get(self):
+        self.splits({"pane_id": "w:p9"})
+        self.pane_get("w:p9")
+        self.write_trust([])
+        crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(self.j.issue("N1")["pane_identity"],
+                         {"terminal": "term-w:p9", "tab": "w:1"})
+
+    def test_stop_closes_start_panes_without_agent(self):
+        self.j.issue_set("N1", "issued", pane="w:p9",
+                         pane_identity={"terminal": "term-w:p9", "tab": "w:1"})
+        self.pane_get("w:p9")
+        self.route("pane close w:p9", "")
+        crew.stop("a1", "N1")
+        self.assertIn("pane close w:p9", self.calls())
+
+    def test_cleanup_closes_spare_panes_never_one_with_an_agent(self):
+        ident = lambda p: {"pane": p, "terminal": "term-" + p, "tab": "w:1"}  # noqa: E731
+        self.j.issue_set("N1", "not_issued", spare=[ident("w:p5"), ident("w:p6")])
+        self.pane_get("w:p5")
+        self.pane_get("w:p6")
+        self.route("agent list", ok({"agents": [agent_entry(pane="w:p5", session="theirs")]}))
+        self.route("pane close w:p6", "")
+        self.route("pane close w:p5", "")
+        crew.cleanup(os.path.join(self.dir, "nowhere"), "N1")
+        calls = self.calls()
+        self.assertNotIn("pane close w:p5", calls)
+        self.assertLess(calls.index("pane get w:p6"), calls.index("pane close w:p6"))
+        self.assertEqual(self.j.issue("N1")["spare"], [ident("w:p5")])
 
 
 if __name__ == "__main__":

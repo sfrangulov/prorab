@@ -249,6 +249,122 @@ def site_trust(site_path):
                    and projects[k].get("hasTrustDialogAccepted") is True for k in keys)
 
 
+def _identity_of(info):
+    """The identity herdr gives a pane: its terminal and tab ids (None when not shown)."""
+    return {"terminal": info.get("terminal_id"), "tab": info.get("tab_id")}
+
+
+def _open_pane(caller_pane, cwd):
+    """Split a new pane next to `caller_pane`; returns (pane id, identity). A field the
+    split answer lacks is read from `pane get` right after it; what stays unknown is None,
+    and a record without a terminal never matches (`_same_pane`)."""
+    info = herdr_cli.run(["pane", "split", caller_pane, "--direction",
+                          _split_direction(caller_pane), "--no-focus", "--cwd",
+                          cwd])["result"]["pane"]
+    pane = info["pane_id"]
+    if not (info.get("terminal_id") and info.get("tab_id")):
+        got = _pane_info(pane) or {}
+        info = dict(info, terminal_id=info.get("terminal_id") or got.get("terminal_id"),
+                    tab_id=info.get("tab_id") or got.get("tab_id"))
+    return pane, _identity_of(info)
+
+
+def _pane_info(pane_id):
+    """`pane get` as a dict, None when herdr cannot show the pane (gone)."""
+    try:
+        return _pane(pane_id)
+    except (herdr_cli.HerdrError, KeyError, TypeError):
+        return None
+
+
+def _same_pane(rec, info):
+    """Whether `info` (a `pane get` answer, None if it failed) is the pane that `rec`
+    ({"terminal", "tab"} of the record) was opened as. Pane ids are reused, so the id alone
+    proves nothing; a record without a terminal id never matches."""
+    return (bool(info) and bool(rec.get("terminal")) and bool(rec.get("tab"))
+            and info.get("terminal_id") == rec["terminal"]
+            and info.get("tab_id") == rec["tab"])
+
+
+def _has_agent(pane_id, info):
+    return herdr_cli.agent_by_pane(pane_id) is not None or bool(info.get("agent"))
+
+
+def _spares_of(rec):
+    return [x for x in (rec.get("spare") or []) if isinstance(x, dict) and x.get("pane")]
+
+
+def _record_panes(work_order, rec, current, spares):
+    """Write the panes of a start into the issue record; `current` is
+    {"pane", "terminal", "tab"} or None."""
+    journal.issue_set(work_order, rec.get("state") or "not_issued",
+                      pane=current["pane"] if current else None,
+                      pane_identity=({"terminal": current["terminal"], "tab": current["tab"]}
+                                     if current else None),
+                      spare=spares)
+
+
+def _take_pane(work_order, site_path, caller_pane):
+    """The pane a start works in. The issue record's pane when it is the same pane (identity),
+    holds no agent and stands in the site (reused). Otherwise: a pane with an agent (the
+    customer's `claude`) becomes a spare and stays open; a bare shell elsewhere is closed; a
+    gone or recycled pane is forgotten. Then a new split, recorded with its identity. The
+    decision rests on the pane's identity and on the agents in it, never on a session id."""
+    rec = journal.issue(work_order) or {}
+    spares = _spares_of(rec)
+    cur = None
+    if rec.get("pane"):
+        ident = rec.get("pane_identity") or {}
+        cur = {"pane": rec["pane"], "terminal": ident.get("terminal"), "tab": ident.get("tab")}
+    if cur:
+        info = _pane_info(cur["pane"])
+        if not _same_pane(cur, info):
+            cur = None  # gone, or the id was recycled: forgotten, never reused or closed
+        elif _has_agent(cur["pane"], info):
+            spares.append(cur)
+            cur = None
+        elif _same_dir(info.get("foreground_cwd"), site_path):
+            _record_panes(work_order, rec, cur, spares)
+            return cur["pane"]
+        else:
+            herdr_cli.run_ack(["pane", "close", cur["pane"]])
+            cur = None
+    pane, ident = _open_pane(caller_pane, site_path)
+    _record_panes(work_order, rec, dict(ident, pane=pane), spares)
+    return pane
+
+
+def close_start_panes(work_order):
+    """Close the panes a start left (the issue record's `pane` and every `spare`) that are
+    still the recorded pane (identity) and hold no agent; a pane with an agent stays
+    recorded, a gone or recycled one is dropped from the record, never closed. Returns the
+    closed pane ids."""
+    rec = journal.issue(work_order)
+    if not rec:
+        return []
+    entries = []
+    if rec.get("pane"):
+        ident = rec.get("pane_identity") or {}
+        entries.append({"pane": rec["pane"], "terminal": ident.get("terminal"),
+                        "tab": ident.get("tab")})
+    entries += _spares_of(rec)
+    closed, kept = [], []
+    for e in entries:
+        info = _pane_info(e["pane"])
+        if not _same_pane(e, info):
+            continue
+        if _has_agent(e["pane"], info):
+            kept.append(e)
+            continue
+        herdr_cli.run_ack(["pane", "close", e["pane"]])
+        closed.append(e["pane"])
+    if closed or len(kept) != len(entries):
+        was_current = bool(rec.get("pane")) and entries[0] in kept
+        _record_panes(work_order, rec, entries[0] if was_current else None,
+                      kept[1:] if was_current else kept)
+    return closed
+
+
 def _split_direction(caller_pane):
     try:
         layout = herdr_cli.run(["pane", "layout", "--pane", caller_pane])["result"]["layout"]
@@ -311,9 +427,7 @@ def start(site_path, work_order, name, caller_pane):
         return {"status": "files_overlap", "with": clash}
 
     trust = site_trust(site_path)
-    direction = _split_direction(caller_pane)
-    pane = herdr_cli.run(["pane", "split", caller_pane, "--direction", direction,
-                          "--no-focus", "--cwd", site_path])["result"]["pane"]["pane_id"]
+    pane = _take_pane(work_order, site_path, caller_pane)
     if trust is False:
         # `claude -w` refuses a site whose own path has no folder trust; the customer
         # accepts it in this pane once, so no agent, no keys, no session id is spent
@@ -352,6 +466,9 @@ def _register_started(site_path, work_order, name, pane, session_id):
                           worktree=worktree)
     journal.register_crew(name)
     fields = [("work_order", work_order), ("site", site_path), ("pane", pane)]
+    ident = (journal.issue(work_order) or {}).get("pane_identity")
+    if ident:
+        fields.append(("pane_identity", json.dumps(ident)))
     if worktree:
         fields += [("worktree", worktree), ("branch", branch or "")]
     for field, value in fields:
@@ -693,15 +810,14 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
         if not caller_pane:
             return {"status": "restart_failed", "reason": "pane is gone and no caller pane"}
         try:
-            pane = herdr_cli.run(["pane", "split", caller_pane, "--direction",
-                                  _split_direction(caller_pane), "--no-focus", "--cwd",
-                                  worktree])["result"]["pane"]["pane_id"]
+            pane, ident = _open_pane(caller_pane, worktree)
         except herdr_cli.HerdrError as e:
             return {"status": "restart_failed", "reason": str(e)}
         journal.kv_set(_kv(name, "pane"), pane)
+        journal.kv_set(_kv(name, "pane_identity"), json.dumps(ident))
         rec = journal.issue(work_order)
         if rec:
-            journal.issue_set(work_order, rec["state"], pane=pane)
+            journal.issue_set(work_order, rec["state"], pane=pane, pane_identity=ident)
     if not _enter_worktree(pane, worktree, timeout_s, poll_s):
         return {"status": "restart_failed", "reason": "shell did not enter the worktree",
                 "pane_id": pane}
@@ -886,7 +1002,8 @@ def stop(name, work_order):
     if worktree:
         journal.set_spent(work_order, _spend_of(work_order, worktree)["usd"])
     journal.spend(work_order, tokens=tokens)
-    for field in ("work_order", "site", "pane", "worktree", "branch", "session",
+    close_start_panes(work_order)
+    for field in ("work_order", "site", "pane", "pane_identity", "worktree", "branch", "session",
                   "transcript", "limit_until"):
         journal.kv_clear(_kv(name, field))
 
@@ -899,6 +1016,7 @@ def _default_branch(site_path):
 
 
 def cleanup(site_path, work_order):
+    close_start_panes(work_order)
     wt = _find_worktree(site_path, work_order)
     if wt is None:
         return {"status": "absent"}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fake herdr CLI for tests. Routes live in $FAKE_HERDR_DIR/routes.json:
-{"<argv prefix>": "<file>" | {"file": f, "exit": n, "sleep": s} | {"seq": [f, ...], "exit": n}}
-(sleep: seconds to wait before answering).
+{"<argv prefix>": "<file>" | {"file": f, "exit": n, "sleep": s, "stderr": f2} | {"seq": [f, ...], "exit": n}}
+(sleep: seconds to wait before answering; stderr: a file written to stderr whatever the exit code).
 Longest matching prefix wins; every call is appended to calls.log. The response
 file goes to stdout on exit 0 and to stderr otherwise."""
 import json
@@ -24,10 +24,13 @@ route = routes[key]
 code = 0
 if isinstance(route, dict):
     code = route.get("exit", 0)
+    if route.get("stderr"):
+        with open(os.path.join(d, route["stderr"]), encoding="utf-8") as fh:
+            sys.stderr.write(fh.read())
     if route.get("sleep"):
         time.sleep(route["sleep"])
     if "seq" in route:
-        cp = os.path.join(d, "counter-" + str(sorted(routes).index(key)))
+        cp = os.path.join(d, "counter-" + "".join(c if c.isalnum() else "_" for c in key))
         n = 0
         if os.path.exists(cp):
             with open(cp) as fh:

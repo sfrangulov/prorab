@@ -36,6 +36,7 @@ Every stage ends at its stop point: commit, leave no background command running,
 
 ## Constraints
 - Work only in this worktree, on the branch `prorab/<id>`, and commit there. Never push, open a pull request, release, or merge into main or any other branch.
+- While the customer has enabled crew hooks, a hook denies the commands the foreman's rules forbid and, during an emergency stop, every tool call; a denied step is a question for the foreman, never a reason to find another way.
 - Change only the work order's files: the union of the stages' Files (a path ending in `/` covers everything below it). A change outside them fails the report check; ask the foreman first if you need another file.
 - Do not touch installed things: installed skills and plugins, user configs (`~/.claude`, shell profiles), global packages; no `sudo`.
 - Never answer a trust prompt or any other consent prompt, and never press "Upgrade": stop and tell the foreman.

@@ -444,6 +444,37 @@ class TestStart(CrewBase):
     def start_line(self):
         return [c for c in self.calls() if c.startswith("agent start a1")][0]
 
+    def settings_path(self):
+        return os.path.join(self.home, ".cache", "prorab", "crew-settings.json")
+
+    def test_start_passes_settings_only_when_enabled(self):
+        repo = self.make_repo()
+        self.add_worktree(repo, "N1")
+        self.add_worktree(repo, "N2")
+        self.j.files = {"N1": ["x"], "N2": ["y"]}
+        self.routes_for_start()
+        crew.start(repo, "N1", "a1", "w:p1")
+        self.assertNotIn("--settings", self.start_line())
+        self.assertFalse(os.path.exists(self.settings_path()))
+        os.remove(os.path.join(self.dir, "calls.log"))
+        self.j.kv["hooks.enabled"] = "1"
+        self.j.active = []
+        crew.start(repo, "N2", "a1", "w:p1")
+        self.assertTrue(self.start_line().endswith(" -w prorab-N2 --settings %s"
+                                                   % self.settings_path()), self.start_line())
+        self.assertIn(" -- ", self.start_line())
+        self.assertLess(self.start_line().index(" -- "), self.start_line().index("--settings"))
+        with open(self.settings_path(), encoding="utf-8") as fh:
+            self.assertIn("hooks", json.load(fh))
+
+    def test_start_with_hooks_off_value_passes_no_settings(self):
+        self.j.kv["hooks.enabled"] = "0"
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertNotIn("--settings", self.start_line())
+        self.assertFalse(os.path.exists(self.settings_path()))
+
     def test_start_records_issuing_before_agent_start(self):
         self.j.files = {"N1": ["x"]}
         self.routes_for_start()
@@ -1406,6 +1437,49 @@ class TestRestart(CrewBase):
                       "--until done --until blocked --timeout 60000", self.calls())
         self.assertEqual(self.j.kv["crew.a1.session"], "old-session")
 
+    def settings_path(self):
+        return os.path.join(self.home, ".cache", "prorab", "crew-settings.json")
+
+    def test_restart_and_handover_pass_settings(self):
+        self.j.kv["hooks.enabled"] = "1"
+        # a resume
+        self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
+        self.assertEqual(self.go()["status"], "resumed")
+        self.assertEqual(self.starts(), [
+            "agent start a1 --kind claude --pane w:p9 -- --resume old-session --add-dir %s "
+            "--settings %s" % (self.files_dir(), self.settings_path())])
+        self.assertTrue(os.path.isfile(self.settings_path()))
+        os.remove(self.settings_path())
+        # a new session
+        self.write_transcript("/work", "old-session", "x", tokens=(130000, 0, 0))
+        self.j.kv["crew.a1.transcript"] = crew.transcript.transcript_path(
+            "/work", "old-session", self.home)
+        self.assertEqual(self.go()["status"], "restarted")
+        line = self.starts()[-1]
+        self.assertTrue(line.endswith(" --add-dir %s --settings %s"
+                                      % (self.files_dir(), self.settings_path())), line)
+        self.assertTrue(os.path.isfile(self.settings_path()))
+        # a handover restart
+        os.remove(self.settings_path())
+        with mock.patch.object(crew, "_cd_failure", return_value=None), \
+                mock.patch.object(crew, "deliver", return_value="accepted"):
+            r = crew._restart_after_exit("a1", "N1", "Work order text", self.wt, "w:p9",
+                                         {"usd": 0}, 1, 0.01)
+        self.assertEqual(r["status"], "restarted")
+        self.assertTrue(self.starts()[-1].endswith("--settings %s" % self.settings_path()))
+        self.assertTrue(os.path.isfile(self.settings_path()))
+
+    def test_restart_and_handover_pass_no_settings_while_disabled(self):
+        self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
+        self.assertEqual(self.go()["status"], "resumed")
+        with mock.patch.object(crew, "_cd_failure", return_value=None), \
+                mock.patch.object(crew, "deliver", return_value="accepted"):
+            crew._restart_after_exit("a1", "N1", "Work order text", self.wt, "w:p9",
+                                     {"usd": 0}, 1, 0.01)
+        for line in self.starts():
+            self.assertNotIn("--settings", line)
+        self.assertFalse(os.path.exists(self.settings_path()))
+
     def test_restart_new_session_when_soft_or_resume_failed(self):
         # soft context: a new session and the work order with every handover act
         self.write_transcript("/work", "old-session", "x", tokens=(130000, 0, 0))
@@ -1612,6 +1686,67 @@ class TestRestart(CrewBase):
                                          {"usd": 0}, 1, 0.01)
         self.assertEqual(r["status"], "restarted")
         self.assertEqual(self.j.kv["crew.a1.delivered"], fingerprint("Work order text"))
+
+
+class TestEmergencyStop(CrewBase):
+    def stop_file(self):
+        return os.path.join(self.home, ".cache", "prorab", "STOP")
+
+    def touch_stop(self):
+        os.makedirs(os.path.dirname(self.stop_file()), exist_ok=True)
+        with open(self.stop_file(), "w"):
+            pass
+
+    def test_emergency_stop_follows_the_file(self):
+        self.assertFalse(crew.emergency_stop())
+        self.touch_stop()
+        self.assertTrue(crew.emergency_stop())
+        os.remove(self.stop_file())
+        self.assertFalse(crew.emergency_stop())
+
+    def test_emergency_stop_refuses_starts_and_sends(self):
+        self.touch_stop()
+        self.j.kv.update({"crew.a1.work_order": "N1", "crew.a1.worktree": "/wt",
+                          "crew.a1.pane": "w:p9"})
+        refused = {"status": "emergency_stop"}
+        self.assertEqual(crew.start(SITE_DIR, "N1", "a1", "w:p1"), refused)
+        self.assertEqual(crew.restart("a1", "N1", "text", "gone", caller_pane="w:p1"), refused)
+        self.assertEqual(crew.complete_handover("a1", "N1", "text"), refused)
+        self.assertEqual(crew.request_handover("a1"), "emergency_stop")
+        self.assertEqual(crew.send_work_order("a1", "text", "N1"), "emergency_stop")
+        self.assertEqual(crew.answer("a1", text="go on"), "emergency_stop")
+        self.assertEqual(crew.resume("a1"), "emergency_stop")
+        self.assertEqual(crew.report_fix("a1", "N1", "S1", ["a problem"]), refused)
+        self.assertEqual(crew.wait_limit("a1"), refused)
+        self.assertEqual(crew.stop("a1", "N1"), refused)
+        self.assertEqual(self.calls_or_empty(), [])
+        self.assertEqual(self.j.act_log, [])
+        self.assertEqual(self.j.iters, {})
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".cache", "prorab",
+                                                     "work-orders")))
+        self.assertEqual(self.j.active, [])
+
+    def test_emergency_stop_still_pauses(self):
+        self.touch_stop()
+        self.j.kv["crew.a1.work_order"] = "N1"
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        self.assertEqual(crew.pause("a1"), "accepted")
+        self.assertTrue(any(c.startswith("agent prompt a1") for c in self.calls()))
+
+    def test_emergency_stop_leaves_the_reads_available(self):
+        self.touch_stop()
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.route("agent read a1 --source visible", "idle\n")
+        self.assertEqual(crew.state("a1")["status"], "idle")
+        self.assertEqual(crew.summary("a1"), "")
+        self.assertFalse(crew.check_report("", [], [], "/nonexistent")["ok"])
+        self.assertEqual(crew.merge_check("/nonexistent", []),
+                         {"missing": [], "conflicts": [], "errors": []})
+
+    def test_without_the_file_nothing_is_refused(self):
+        self.j.kv["crew.a1.work_order"] = "N1"
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        self.assertEqual(crew.resume("a1"), "accepted")
 
 
 def make_report(**kw):

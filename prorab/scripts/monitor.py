@@ -3,7 +3,9 @@
 
 Runs as a background command of the prorab: prints ``EVENT <line>`` for every event of the
 first poll that has any (or ``EVENT heartbeat`` after a quiet ``heartbeat_s``) and exits 0;
-the prorab handles the events and restarts it. Because every run exits on its first event,
+the prorab handles the events and restarts it. Under the customer's emergency stop (the file
+at ``emergency.stop_path``) a poll pauses every crew once and raises only ``emergency_stop`` and
+``emergency_released``; those pauses are the only deliveries a poll ever makes. Because every run exits on its first event,
 the dedupe state lives in ``$PRORAB_LOG_DIR/monitor-state.json`` and level conditions fire
 on change, not on every poll.
 """
@@ -18,14 +20,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _defaults  # noqa: E402
 import herdr_cli  # noqa: E402
+import hooks  # noqa: E402
 import limits  # noqa: E402
 import scheduler  # noqa: E402
 
 SETTLED = ("idle", "done", "blocked")
 SKIP_DIRS = frozenset((".git", "node_modules", ".venv", "__pycache__"))
-EVENT_ORDER = ("gone", "consent", "provider_error", "limit_screen", "limit", "blind",
-               "blind_week", "budget", "prorab_context", "context_hard", "context_soft",
-               "hung", "hung_unclear", "settled", "error")
+EVENT_ORDER = ("emergency_stop", "emergency_released", "gone", "consent", "provider_error",
+               "limit_screen", "limit", "blind", "blind_week", "budget", "prorab_context",
+               "compacted", "context_hard", "context_soft", "hung", "hung_unclear", "settled",
+               "error")
+# What a poll under the emergency stop keeps of its own state: readings and spend are still
+# logged; every dedupe mark is dropped, so what happened meanwhile is raised after the release.
+STOP_KEEPS = ("last_reading", "spend", "rate", "week_burn", "poll_errors", "last_error",
+              "emergency")
 
 
 # ---- log and state files --------------------------------------------------------------
@@ -186,6 +194,8 @@ def real_deps():
         "override": journal.override,
         "own_context": _own_context,
         "crews": journal.crews,
+        # the only deliveries a poll ever makes: the emergency stop's pauses
+        "pause": crew.pause,
     }
 
 
@@ -270,6 +280,9 @@ def _kv_value(kv, key):
     return None if v in (None, "") else v
 
 
+_FAILED = object()
+
+
 def _find_agent(name, listed, kv):
     """The crew's agent: by its pane in kv first, the name only as a fallback."""
     pane = _kv_value(kv, "crew.%s.pane" % name)
@@ -290,6 +303,66 @@ def _inside(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+# ---- hook events ------------------------------------------------------------------------
+
+def _read_events(path, entry, sid):
+    """The complete JSON lines appended to `path` since the offset kept in `entry`
+    ({"sid", "offset"} or None), and the new entry. The first sight of a session starts at the
+    end of an existing file (older lines are not replayed); a file that appears later is read
+    from its start; a half-written last line waits for its newline."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return [], {"sid": sid, "offset": 0}
+    if not isinstance(entry, dict) or entry.get("sid") != sid:
+        return [], {"sid": sid, "offset": size}
+    offset = entry.get("offset", 0)
+    if not isinstance(offset, int) or not 0 <= offset <= size:
+        offset = 0
+    with open(path, "rb") as fh:
+        fh.seek(offset)
+        data = fh.read()
+    end = data.rfind(b"\n") + 1
+    records = []
+    for line in data[:end].splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records, {"sid": sid, "offset": offset + end}
+
+
+def _prune_events(folder, now, retention_s):
+    """Remove the event files not touched for `retention_s`."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(folder, name)
+        try:
+            if name.endswith(".jsonl") and now - os.path.getmtime(path) > retention_s:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _event_facts(records):
+    """What a crew's new hook events say: whether it stopped with no background task, asked
+    for a tool permission, or compacted its context by itself."""
+    return {
+        "stop": any(r.get("event") == "Stop" and r.get("background_tasks", 1) is not None
+                    and not r.get("background_tasks", 1) for r in records),
+        "permission": any(r.get("event") == "Notification"
+                          and r.get("notification_type") == "permission_prompt"
+                          for r in records),
+        "compacted": any(r.get("event") == "PreCompact" and r.get("trigger") == "auto"
+                         for r in records),
+    }
+
+
 def poll(crews, d, mem, now, *, deps=None):
     """Event lines in priority order; `mem` carries the dedupe state between polls.
 
@@ -300,13 +373,21 @@ def poll(crews, d, mem, now, *, deps=None):
     """
     dp = real_deps() if deps is None else deps
     work = copy.deepcopy(mem)
-    out = _poll(crews, d, work, now, dp)
+    stopping = os.path.exists(d["emergency"]["stop_path"])   # the one file test of a poll
+    out = _poll(crews, d, work, now, dp, stopping)
+    if stopping:
+        # nothing but the emergency events is raised, and no dedupe mark is advanced
+        kept = {k: work[k] for k in STOP_KEEPS if k in work}
+        work = copy.deepcopy(mem)
+        work.update(kept)
+        out = [line for line in out if line.startswith("emergency_stop")]
+        work["active"] = bool(out)
     mem.clear()
     mem.update(work)
     return out
 
 
-def _poll(crews, d, mem, now, dp):
+def _poll(crews, d, mem, now, dp, stopping=False):
     ev = {k: [] for k in EVENT_ORDER}
     errors = {}
 
@@ -329,6 +410,31 @@ def _poll(crews, d, mem, now, dp):
     if callable(crews):
         crews = crews(kv_arg)
 
+    # the emergency stop: every registered crew with a listed agent is paused once; the
+    # release is announced once
+    emergency = mem.get("emergency") if isinstance(mem.get("emergency"), dict) else None
+    if stopping and listed is not None:
+        if emergency is None:
+            emergency = mem["emergency"] = {"since": now, "paused": []}
+            first = True
+        else:
+            first = False
+        newly = []
+        for name in crews:
+            if name in emergency["paused"] or _find_agent(name, listed, kv) is None:
+                continue
+            if guard("pause.%s" % name, dp["pause"], name, default=_FAILED) is not _FAILED:
+                emergency["paused"].append(name)
+                newly.append(name)
+        if first:
+            ev["emergency_stop"].append("emergency_stop %s" % (",".join(newly) or "-"))
+    elif not stopping and emergency is not None:
+        ev["emergency_released"].append(
+            "emergency_released %s" % (",".join(emergency["paused"]) or "-"))
+        del mem["emergency"]
+
+    hooks_on = kv_get("hooks.enabled") == "1"
+    event_files = mem.setdefault("events", {})
     mon = d["monitor"]
     last = mem.setdefault("last", {})
     gone, settled, hung = (mem.setdefault(k, {}) for k in ("gone", "settled", "hung"))
@@ -389,6 +495,10 @@ def _poll(crews, d, mem, now, dp):
             mem["week_burn"] = {"at": now, "value": fresh}
             extras["week_burn"] = fresh
     spend = (mem.get("spend") or {}).get("value")
+    if hooks_on and due("events_prune", d["rate"]["every_s"]):
+        mem["events_prune"] = {"at": now}
+        guard("events_prune", _prune_events, d["hooks"]["events_dir"], now,
+              d["hooks"]["events_retention_s"])
 
     for name in (crews if listed is not None else ()):
         if _exiting(kv_get("crew.%s.exiting" % name), now, d["crew"]["exit_window_s"]):
@@ -396,10 +506,20 @@ def _poll(crews, d, mem, now, dp):
         a = _find_agent(name, listed, kv)
         prev = last.get(name) or {}
         screen = None
+        facts = {}
+        sid = kv_get("crew.%s.session" % name)
+        if hooks_on and a is not None and hooks.safe_session_id(sid):
+            path = os.path.join(d["hooks"]["events_dir"], sid + ".jsonl")
+            got = guard("events.%s" % name, _read_events, path, event_files.get(name), sid)
+            if got is not None:
+                records, event_files[name] = got
+                facts = _event_facts(records)
+        hook_stop = facts.get("stop") and a.get("agent_status") in ("idle", "done")
         if a is not None:
             pane = a.get("pane_id")
-            need = (a.get("agent_status") != prev.get("status") or prev.get("shells")
-                    or prev.get("statusline"))
+            need = (not hook_stop
+                    and (a.get("agent_status") != prev.get("status") or prev.get("shells")
+                         or prev.get("statusline")))
             if need and pane:
                 screen = read(pane)
         st = guard("state.%s" % name, dp["state"], name, a,
@@ -446,6 +566,12 @@ def _poll(crews, d, mem, now, dp):
                     ep[key][name] = val
                     ev[key].append("%s %s %s" % (key, name, val))
 
+        if facts.get("permission") and name not in ep["consent"]:
+            ep["consent"][name] = "tool_permission"
+            ev["consent"].append("consent %s tool_permission" % name)
+        if facts.get("compacted"):
+            ev["compacted"].append("compacted %s" % name)
+
         c, suffix, from_statusline = st.get("ctx"), "", False
         if c is None and read_now:
             pct = guard("statusline.%s" % name, dp["statusline_ctx"], screen)
@@ -489,10 +615,12 @@ def _poll(crews, d, mem, now, dp):
                         ev["hung"].append("hung %s" % name)
         else:
             hung.pop(name, None)
-            if (status in SETTLED and (status == "blocked" or not bg)
+            if (status in SETTLED and (status == "blocked" or not bg or hook_stop)
                     and name not in ep["consent"] and name not in ep["provider_error"]
                     and not on_limit_screen):
-                if settled.get(name) != status:
+                if hook_stop:   # the crew's own Stop event: no screen was needed
+                    ev["settled"].append("settled %s done" % name)
+                elif settled.get(name) != status:
                     ev["settled"].append("settled %s %s" % (name, status))
                 settled[name] = status
 

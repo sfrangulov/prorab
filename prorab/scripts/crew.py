@@ -4,6 +4,8 @@
 start, deliver, state, summary, handover, restart, limit wait, report check, evidence,
 merge check, answer, pause, spend, acceptance, stop, cleanup.
 The foreman never merges, never pushes and never answers a trust/consent prompt.
+While the emergency-stop file exists, every command that starts a crew or sends to one is
+refused (`emergency_stop`); `pause` and the read-only commands stay available.
 """
 import argparse
 import fnmatch
@@ -22,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _defaults  # noqa: E402
 import herdr_cli  # noqa: E402
+import hooks  # noqa: E402
 import journal  # noqa: E402
 import limits  # noqa: E402
 import scheduler  # noqa: E402
@@ -218,6 +221,22 @@ def deliver(name, text, work_order=None):
 
 def _claude_args(*pairs):
     return ["--"] + [x for pair in pairs for x in pair]
+
+
+def emergency_stop():
+    """Whether the customer's emergency-stop file exists."""
+    return os.path.exists(_defaults.load()["emergency"]["stop_path"])
+
+
+_STOPPED = "emergency_stop"
+
+
+def _settings_pairs():
+    """`(("--settings", <path>),)` while kv `hooks.enabled` is `1` (the settings file is
+    written first), else no pair at all: the crew then runs without hooks."""
+    if journal.kv_get("hooks.enabled") != "1":
+        return ()
+    return (("--settings", hooks.write_settings()),)
 
 
 def _set_session(name, worktree, session_id, work_order):
@@ -419,6 +438,8 @@ def _files_overlap(mine, theirs):
 
 
 def start(site_path, work_order, name, caller_pane):
+    if emergency_stop():
+        return {"status": _STOPPED}
     if not herdr_cli.valid_name(name):
         return {"status": "bad_name"}
     rec = journal.issue(work_order)
@@ -469,7 +490,8 @@ def start(site_path, work_order, name, caller_pane):
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
                       + _claude_args(("--session-id", session_id), ("--add-dir", _files_dir()),
-                                     ("-w", "prorab-%s" % work_order)), timeout_s=90)
+                                     ("-w", "prorab-%s" % work_order), *_settings_pairs()),
+                      timeout_s=90)
     except herdr_cli.HerdrError as e:
         if e.code not in ("agent_not_ready", "timeout"):
             raise
@@ -517,6 +539,8 @@ def _register_started(site_path, work_order, name, pane, session_id):
 def send_work_order(name, text, work_order=None):
     """Put the work order (with the site passport the caller appended) into its file and send
     the crew the one line naming it. A delivered order marks the issue record `issued`."""
+    if emergency_stop():
+        return _STOPPED
     work_order = work_order or journal.kv_get(_kv(name, "work_order"))
     path = message_file(work_order, text, name=work_order)
     result = deliver(name, _template("Message by file").format(path=path), work_order)
@@ -728,6 +752,8 @@ def _exit(name, pane, timeout_s, poll_s):
 # ---- handover, restart ------------------------------------------------------
 
 def request_handover(name):
+    if emergency_stop():
+        return _STOPPED
     return deliver(name, _template("Handover request"))
 
 
@@ -737,6 +763,8 @@ def pause(name):
 
 def resume(name):
     """After a limit reset or a `--resume`: tell the crew to carry on."""
+    if emergency_stop():
+        return _STOPPED
     return deliver(name, _template("Continue"))
 
 
@@ -780,7 +808,7 @@ def _start_session(name, pane, claude_args, want_screen=False):
     screen maps as in `start`; the screen is read only when it is needed."""
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
-                      + _claude_args(*claude_args), timeout_s=90)
+                      + _claude_args(*claude_args, *_settings_pairs()), timeout_s=90)
     except herdr_cli.HerdrError as e:
         failed = {"status": "restart_failed", "step": "agent_start", "reason": str(e),
                   "pane_id": pane}
@@ -823,6 +851,8 @@ def _facts(worktree, work_order, base):
 
 
 def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1, base="main"):
+    if emergency_stop():
+        return {"status": _STOPPED}
     a = herdr_cli.agent(name)
     if a is None:
         return {"status": "gone"}
@@ -903,6 +933,8 @@ def restart(name, work_order, work_order_text, reason, caller_pane=None,
     """Bring a crew back in its worktree: `--resume` the old session while its context is
     below soft, else a new session with the work order and every handover act. `limit_died`
     (the session ended while waiting for a limit reset) is not counted as a restart."""
+    if emergency_stop():
+        return {"status": _STOPPED}
     if reason not in RESTART_REASONS:
         raise ValueError("unknown restart reason %r (expected one of %s)"
                          % (reason, ", ".join(RESTART_REASONS)))
@@ -1064,6 +1096,8 @@ def answer(name, choice=None, text=None):
     limit screen "limit_screen": nothing is sent (`wait_limit` is the only way to act on a
     limit screen). Without a dialog the text goes through `deliver`. The answer is recorded
     as an `answer` act on the current open stage (`_record_answer`)."""
+    if emergency_stop():
+        return _STOPPED
     work_order = journal.kv_get(_kv(name, "work_order"))
     visible = herdr_cli.agent_visible(name)
     kind = herdr_cli.consent_dialog(visible)
@@ -1111,6 +1145,8 @@ def wait_limit(name):
     """On a limit screen: choose "Stop and wait" (never "Upgrade") and note the reset time.
     Moves first, re-reads the screen, and presses Enter alone only when "Stop and wait" is
     highlighted; otherwise "unknown_limit_dialog". Never counts as a restart."""
+    if emergency_stop():
+        return {"status": _STOPPED}
     d = _defaults.load()
     visible = herdr_cli.agent_visible(name)
     found = limits.limit_screen(visible, d)
@@ -1169,6 +1205,8 @@ def stop(name, work_order, timeout_s=60, poll_s=1):
     """Exit the crew and unregister it: {"status": "stopped", ...}. When the agent does not
     leave ("bg_shells", "bg_work", "not_exited") the result is {"status": <that>}, and the
     crew stays registered with its kv in place: nothing is unregistered while its agent runs."""
+    if emergency_stop():
+        return {"status": _STOPPED}
     a = herdr_cli.agent(name)
     tokens = _tokens_of(a, name)
     worktree = journal.kv_get(_kv(name, "worktree")) or \
@@ -1392,6 +1430,8 @@ def _check_delivery(sha, changed_items, files, worktree, base):
 
 def report_fix(name, work_order, stage, problems):
     """Ask the crew to fix a failed stage report; the 4th request opens a gate."""
+    if emergency_stop():
+        return {"status": _STOPPED}
     attempt = journal.bump_iterations(stage, "report_fix")
     if journal.cycle_exceeded(stage, "report_fix"):
         journal.wait_customer(stage, "the stage report failed the check %d times; the "

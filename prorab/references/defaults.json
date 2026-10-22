@@ -129,6 +129,20 @@
     "default_duration_min": 30,
     "burn_min_span_s": 600
   },
+  "hooks": {
+    "deny": [
+      "git push", "gh pr create", "gh pr merge", "gh release", "bd init", "sudo ",
+      "brew install", "git reset --hard", "git clean -f", "git checkout main",
+      "git checkout master", "git switch main", "git switch master"
+    ],
+    "events_dir": "~/.cache/prorab/events",
+    "events_retention_s": 86400,
+    "settings_path": "~/.cache/prorab/crew-settings.json",
+    "suggestions_setting": {"promptSuggestionEnabled": false}
+  },
+  "emergency": {
+    "stop_path": "~/.cache/prorab/STOP"
+  },
   "monitor": {
     "interval_s": 90,
     "heartbeat_s": 1200,

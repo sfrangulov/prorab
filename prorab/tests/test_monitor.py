@@ -22,6 +22,10 @@ from prorab.tests.test_herdr_cli import FakeBase, ok  # noqa: E402
 
 D = _defaults.load()
 D["week"]["calendar"]["days"] = []  # no working days: W = 0, projected = used + the off-hours work
+# never the real cache: tests that need the stop file or the events use a copy (`PollBase.d`)
+_NO_CACHE = os.path.join(tempfile.gettempdir(), "prorab-tests-no-such-cache")
+D["emergency"]["stop_path"] = os.path.join(_NO_CACHE, "STOP")
+D["hooks"]["events_dir"] = os.path.join(_NO_CACHE, "events")
 
 
 def at(hh, mm=0, day=21):
@@ -66,7 +70,8 @@ class Stub:
                      "seven_day": {"usd_per_pp": None, "source": "unknown"}}
         self.week_burn = burn()
         self.calls = {"agents": 0, "kv_all": 0, "visible": [], "limit_panes": None,
-                      "spend": [], "rates": [], "week_burn": []}
+                      "spend": [], "rates": [], "week_burn": [], "pause": []}
+        self.pause_error = {}   # crew name -> exception raised once by the pause
 
     def _agents(self):
         self.calls["agents"] += 1
@@ -97,6 +102,13 @@ class Stub:
         self.calls["week_burn"].append(now)
         return json.loads(json.dumps(self.week_burn))
 
+    def _pause(self, name):
+        err = self.pause_error.pop(name, None)
+        if err:
+            raise err
+        self.calls["pause"].append(name)
+        return "accepted"
+
     def _over_budget(self, week, spend=None, kv=None):
         if self.over:  # a canned answer
             return list(self.over)
@@ -123,6 +135,7 @@ class Stub:
             "override": lambda kv=None: self.override,
             "own_context": lambda d, listed=None: self.own,
             "crews": lambda kv=None: [],
+            "pause": self._pause,
         }
 
 
@@ -132,6 +145,11 @@ def ctx(pct, soft=False, hard=False):
 
 class PollBase(unittest.TestCase):
     def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = json.loads(json.dumps(D))
+        self.d["emergency"]["stop_path"] = os.path.join(self.tmp.name, "STOP")
+        self.d["hooks"]["events_dir"] = os.path.join(self.tmp.name, "events")
         self.s = Stub()
         self.mem = {}
         self.now = at(12)
@@ -150,7 +168,7 @@ class PollBase(unittest.TestCase):
     def poll(self, now=None, names=("b1",)):
         if getattr(self, "no_crews", False):
             names = ()
-        return monitor.poll(list(names), D, self.mem, self.now if now is None else now,
+        return monitor.poll(list(names), self.d, self.mem, self.now if now is None else now,
                             deps=self.s.deps())
 
 
@@ -531,6 +549,288 @@ class TestMonitorPoll(PollBase):
         self.mem = json.loads(json.dumps(self.mem))
         self.assertTrue(first)
         self.assertEqual(self.poll(), [])
+
+
+class TestEmergencyStop(PollBase):
+    def setUp(self):
+        super().setUp()
+        self.s.crews = {"a1": st(pane="p1", ctx=ctx(10.0)), "a2": st(pane="p2", ctx=ctx(10.0))}
+        self.names = ("a1", "a2")
+
+    def stop_file(self):
+        return self.d["emergency"]["stop_path"]
+
+    def touch_stop(self):
+        with open(self.stop_file(), "w"):
+            pass
+
+    def release(self):
+        os.remove(self.stop_file())
+
+    def test_emergency_stop_pauses_every_crew_once(self):
+        self.touch_stop()
+        self.assertEqual(self.poll(names=self.names), ["emergency_stop a1,a2"])
+        self.assertEqual(self.s.calls["pause"], ["a1", "a2"])
+        self.assertEqual(self.mem["emergency"], {"since": self.now, "paused": ["a1", "a2"]})
+        self.assertEqual(self.poll(self.now + 90, names=self.names), [])
+        self.assertEqual(self.s.calls["pause"], ["a1", "a2"])
+
+    def test_emergency_stop_comes_first(self):
+        del self.s.crews["a2"]
+        self.s.crews["a1"] = st("blocked", pane="p1", ctx=ctx(10.0))
+        self.s.limits = lim(90.0, 10.0)
+        self.touch_stop()
+        self.assertEqual(self.poll(names=("a1", "a2")), ["emergency_stop a1"])
+        self.assertEqual(monitor.EVENT_ORDER[:2], ("emergency_stop", "emergency_released"))
+
+    def test_emergency_stop_silences_other_events(self):
+        self.touch_stop()
+        self.poll(names=self.names)
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))   # settles
+        self.s.crews["a2"] = st("blocked", pane="p2", ctx=ctx(70.0, soft=True), consent="mcp")
+        self.s.limits = lim(95.0, 99.0)
+        self.s.over = ["usd"]
+        self.s.own = ctx(70.0, hard=True)
+        self.assertEqual(self.poll(self.now + 90, names=self.names), [])
+        del self.s.crews["a2"]
+        self.assertEqual(self.poll(self.now + 180, names=self.names), [])
+        # readings are still logged and the spend is still computed
+        self.assertEqual(self.mem["last_reading"]["five_hour"], 95.0)
+        self.assertIn("spend", self.mem)
+        self.assertTrue(self.mem["emergency"])
+
+    def test_emergency_release_lets_the_held_events_through(self):
+        self.touch_stop()
+        self.poll(names=self.names)
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))
+        self.s.limits = lim(95.0, 10.0)
+        self.assertEqual(self.poll(self.now + 90, names=self.names), [])
+        self.release()
+        out = self.poll(self.now + 180, names=self.names)
+        self.assertEqual(out[0], "emergency_released a1,a2")
+        self.assertEqual([e.split()[0] for e in out], ["emergency_released", "limit", "settled"])
+
+    def test_emergency_released_once(self):
+        self.touch_stop()
+        self.poll(names=self.names)
+        self.release()
+        self.assertEqual(self.poll(self.now + 90, names=self.names), ["emergency_released a1,a2"])
+        self.assertNotIn("emergency", self.mem)
+        self.assertEqual(self.poll(self.now + 180, names=self.names), [])
+        self.assertEqual(self.s.calls["pause"], ["a1", "a2"])  # nothing is sent on release
+
+    def test_emergency_stop_and_release_survive_the_json_state(self):
+        self.touch_stop()
+        self.poll(names=self.names)
+        self.mem = json.loads(json.dumps(self.mem))
+        self.assertEqual(self.poll(self.now + 90, names=self.names), [])
+        self.assertEqual(self.s.calls["pause"], ["a1", "a2"])
+        self.release()
+        self.mem = json.loads(json.dumps(self.mem))
+        self.assertEqual(self.poll(self.now + 180, names=self.names), ["emergency_released a1,a2"])
+
+    def test_emergency_stop_pauses_a_crew_registered_meanwhile(self):
+        del self.s.crews["a2"]
+        self.touch_stop()
+        self.assertEqual(self.poll(names=("a1",)), ["emergency_stop a1"])
+        self.s.crews["a2"] = st(pane="p2", ctx=ctx(10.0))
+        self.assertEqual(self.poll(self.now + 90, names=self.names), [])
+        self.assertEqual(self.s.calls["pause"], ["a1", "a2"])
+        self.assertEqual(self.mem["emergency"]["paused"], ["a1", "a2"])
+
+    def test_emergency_stop_pauses_only_listed_agents(self):
+        del self.s.crews["a2"]
+        self.touch_stop()
+        self.assertEqual(self.poll(names=self.names), ["emergency_stop a1"])
+        self.assertEqual(self.s.calls["pause"], ["a1"])
+
+    def test_emergency_stop_with_no_crews_still_announces(self):
+        self.s.crews = {}
+        self.touch_stop()
+        self.assertEqual(self.poll(names=()), ["emergency_stop -"])
+        self.assertEqual(self.poll(self.now + 90, names=()), [])
+
+    def test_emergency_failed_pause_is_retried(self):
+        self.s.pause_error["a1"] = RuntimeError("herdr down")
+        self.touch_stop()
+        self.assertEqual(self.poll(names=self.names), ["emergency_stop a2"])
+        self.assertEqual(self.mem["emergency"]["paused"], ["a2"])
+        self.assertTrue(any("pause.a1" in e for e in self.mem["poll_errors"]), self.mem)
+        self.assertEqual(self.poll(self.now + 90, names=self.names), [])
+        self.assertEqual(self.s.calls["pause"], ["a2", "a1"])
+        self.assertEqual(self.mem["emergency"]["paused"], ["a2", "a1"])
+
+    def test_emergency_check_uses_the_stop_path_of_the_defaults(self):
+        self.d["emergency"]["stop_path"] = os.path.join(self.tmp.name, "other", "STOP")
+        os.makedirs(os.path.dirname(self.d["emergency"]["stop_path"]))
+        self.assertEqual(self.poll(names=self.names), [])
+        with open(self.d["emergency"]["stop_path"], "w"):
+            pass
+        self.assertEqual(self.poll(self.now + 90, names=self.names), ["emergency_stop a1,a2"])
+
+
+class TestHookEvents(PollBase):
+    SID = "11111111-2222-3333-4444-555555555555"
+
+    def setUp(self):
+        super().setUp()
+        self.s.crews = {"a1": st("working", pane="p1", ctx=ctx(10.0))}
+        self.s.kv.update({"hooks.enabled": "1", "crew.a1.session": self.SID})
+        self.events_dir = self.d["hooks"]["events_dir"]
+
+    def events_file(self, sid=None):
+        return os.path.join(self.events_dir, (sid or self.SID) + ".jsonl")
+
+    def write_event(self, event, sid=None, raw=None, **fields):
+        os.makedirs(self.events_dir, exist_ok=True)
+        rec = dict({"ts": self.now, "event": event, "session_id": sid or self.SID}, **fields)
+        with open(self.events_file(sid), "a", encoding="utf-8") as fh:
+            fh.write(raw if raw is not None else json.dumps(rec) + "\n")
+
+    def prime(self):
+        """The first sight of the crew (its events file is read from its end on)."""
+        self.assertEqual(self.poll(names=("a1",)), [])
+
+    def test_monitor_prefers_the_stop_event(self):
+        self.prime()
+        self.write_event("Stop", background_tasks=[], last_assistant_message="done")
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))   # herdr shows the change
+        self.s.calls["visible"].clear()
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), ["settled a1 done"])
+        self.assertEqual(self.s.calls["visible"], [])    # no screen was read for it
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)), [])
+        self.s.crews["a1"] = st("working", pane="p1", ctx=ctx(10.0))
+        self.poll(self.now + 270, names=("a1",))
+        self.write_event("Stop", background_tasks=[])
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))
+        self.assertEqual(self.poll(self.now + 360, names=("a1",)), ["settled a1 done"])
+
+    def test_stop_event_with_background_tasks_settles_nothing(self):
+        self.prime()
+        self.write_event("Stop", background_tasks=["npm run dev"])
+        self.write_event("Stop", raw=json.dumps({"event": "Stop", "ts": 1}) + "\n")  # field absent
+        self.s.crews["a1"] = st("idle", pane="p1", bg=1, ctx=ctx(10.0))
+        self.s.screens["p1"] = "screen"
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+
+    def test_stop_event_of_a_working_crew_is_ignored(self):
+        self.prime()
+        self.write_event("Stop", background_tasks=[])
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)), ["settled a1 idle"])
+
+    def test_screens_stay_the_fallback_without_a_stop_event(self):
+        self.prime()
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), ["settled a1 idle"])
+        self.assertEqual(self.s.calls["visible"], ["p1"] * 2)
+
+    def test_notification_permission_prompt_is_consent(self):
+        self.prime()
+        self.write_event("Notification", notification_type="idle_prompt")
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+        self.write_event("Notification", notification_type="permission_prompt")
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)),
+                         ["consent a1 tool_permission"])
+        self.write_event("Notification", notification_type="permission_prompt")
+        self.assertEqual(self.poll(self.now + 270, names=("a1",)), [])   # once per episode
+
+    def test_precompact_auto_is_compacted(self):
+        self.prime()
+        self.write_event("PreCompact", trigger="manual")
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+        self.write_event("PreCompact", trigger="auto")
+        self.write_event("PreCompact", trigger="auto")
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)), ["compacted a1"])
+        self.assertEqual(self.poll(self.now + 270, names=("a1",)), [])
+
+    def test_compacted_follows_prorab_context_in_the_order(self):
+        self.prime()
+        self.s.own = ctx(70.0, soft=True)
+        self.s.crews["a1"] = st("blocked", pane="p1", ctx=ctx(10.0))
+        self.write_event("PreCompact", trigger="auto")
+        out = self.poll(self.now + 90, names=("a1",))
+        self.assertEqual([e.split()[0] for e in out],
+                         ["prorab_context", "compacted", "settled"])
+        order = monitor.EVENT_ORDER
+        self.assertEqual(order.index("compacted"), order.index("prorab_context") + 1)
+
+    def test_events_ignored_while_hooks_are_not_enabled(self):
+        self.prime()
+        del self.s.kv["hooks.enabled"]
+        self.write_event("PreCompact", trigger="auto")
+        self.write_event("Notification", notification_type="permission_prompt")
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+
+    def test_events_read_once_and_a_partial_line_waits(self):
+        self.prime()
+        self.write_event("PreCompact", raw=json.dumps({"event": "PreCompact", "trigger": "auto"}))
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])   # no newline yet
+        with open(self.events_file(), "a", encoding="utf-8") as fh:
+            fh.write("\n")
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)), ["compacted a1"])
+        self.write_event("PreCompact", raw="not json\n")
+        self.assertEqual(self.poll(self.now + 270, names=("a1",)), [])
+        self.mem = json.loads(json.dumps(self.mem))
+        self.assertEqual(self.poll(self.now + 360, names=("a1",)), [])
+
+    def test_events_before_the_first_sight_are_not_replayed(self):
+        self.write_event("PreCompact", trigger="auto")
+        self.assertEqual(self.poll(names=("a1",)), [])
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+
+    def test_events_file_that_appears_after_the_first_sight_is_read_from_its_start(self):
+        self.prime()
+        self.write_event("PreCompact", trigger="auto")
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), ["compacted a1"])
+
+    def test_a_new_session_starts_a_new_offset(self):
+        self.prime()
+        self.write_event("PreCompact", trigger="auto")
+        other = "99999999-2222-3333-4444-555555555555"
+        self.s.kv["crew.a1.session"] = other
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])   # first sight: its end
+        self.write_event("PreCompact", sid=other, trigger="auto")
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)), ["compacted a1"])
+
+    def test_unsafe_session_id_is_never_read(self):
+        outside = os.path.join(self.tmp.name, "x.jsonl")
+        with open(outside, "w") as fh:
+            fh.write(json.dumps({"event": "PreCompact", "trigger": "auto"}) + "\n")
+        self.s.kv["crew.a1.session"] = "../x"
+        os.makedirs(self.events_dir, exist_ok=True)
+        self.assertEqual(self.poll(names=("a1",)), [])
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+
+    def test_old_event_files_pruned(self):
+        os.makedirs(self.events_dir)
+        old, fresh = self.events_file("old"), self.events_file("fresh")
+        for path, age in ((old, 90000), (fresh, 10)):
+            with open(path, "w") as fh:
+                fh.write("{}\n")
+            os.utime(path, (self.now - age, self.now - age))
+        stray = os.path.join(self.events_dir, "notes.txt")
+        with open(stray, "w") as fh:
+            fh.write("x")
+        os.utime(stray, (self.now - 90000, self.now - 90000))
+        self.poll(names=("a1",))
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(fresh))
+        self.assertTrue(os.path.exists(stray))   # only `*.jsonl` event files are the reader's
+
+    def test_pruning_runs_now_and_then_and_needs_the_hooks(self):
+        os.makedirs(self.events_dir)
+        old = self.events_file("old")
+        with open(old, "w") as fh:
+            fh.write("{}\n")
+        os.utime(old, (self.now - 90000, self.now - 90000))
+        del self.s.kv["hooks.enabled"]
+        self.poll(names=("a1",))
+        self.assertTrue(os.path.exists(old))
+        self.s.kv["hooks.enabled"] = "1"
+        self.poll(self.now + 90, names=("a1",))
+        self.assertFalse(os.path.exists(old))
 
 
 class TestMonitorG(PollBase):
@@ -948,6 +1248,43 @@ class TestProcessBudget(FakeBase):
         self.assertIsNone(self.mem["last_reading"]["seven_day"])
 
 
+    def test_emergency_check_starts_no_process(self):
+        self._fresh_sensor()
+        self._agents("working")
+        stop = os.path.join(self.dir, "STOP")
+        self.d["emergency"]["stop_path"] = stop
+        self.d["hooks"]["events_dir"] = os.path.join(self.dir, "events")
+        pauses = []
+        deps = monitor.real_deps()
+        deps["pause"] = lambda name: pauses.append(name) or "accepted"
+        poll = lambda: monitor.poll(list(self.names), self.d, self.mem, time.time(),  # noqa: E731
+                                    deps=deps)
+        poll()   # first sight: reads
+        before = self._procs()
+        poll()
+        self.assertEqual(self._procs() - before, 2)   # agent list + kv list
+        with open(stop, "w"):
+            pass
+        tests = []
+        real_exists = os.path.exists
+        before = self._procs()
+        with mock.patch.object(monitor.os.path, "exists",
+                               side_effect=lambda p: tests.append(p) or real_exists(p)):
+            events = poll()
+        self.assertEqual(events, ["emergency_stop b1,b2,b3"])
+        self.assertEqual(pauses, ["b1", "b2", "b3"])
+        self.assertEqual(self._procs() - before, 2)   # apart from the pauses: the same two
+        self.assertEqual(tests.count(stop), 1)        # one file test per poll
+        before = self._procs()
+        self.assertEqual(poll(), [])
+        self.assertEqual(self._procs() - before, 2)
+        self.assertEqual(pauses, ["b1", "b2", "b3"])
+        os.remove(stop)
+        before = self._procs()
+        self.assertEqual(poll(), ["emergency_released b1,b2,b3"])
+        self.assertEqual(self._procs() - before, 2)
+
+
 class TestMonitorMain(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -961,6 +1298,9 @@ class TestMonitorMain(unittest.TestCase):
             else:
                 os.environ["PRORAB_LOG_DIR"] = saved
         self.addCleanup(restore)
+        home = mock.patch.dict(os.environ, {"HOME": self.tmp.name})  # the stop file's path
+        home.start()
+        self.addCleanup(home.stop)
         self.s = Stub()
 
     def run_main(self, *extra):

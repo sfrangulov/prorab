@@ -125,6 +125,18 @@ class TestDefaults(unittest.TestCase):
              "spend_every_s": 300, "reset_grace_s": 120},
         )
         self.assertEqual(d["timeouts"], {"bd_s": 30, "git_s": 60, "herdr_s": 60})
+        self.assertEqual(d["hooks"], {
+            "deny": ["git push", "gh pr create", "gh pr merge", "gh release", "bd init",
+                     "sudo ", "brew install", "git reset --hard", "git clean -f",
+                     "git checkout main", "git checkout master", "git switch main",
+                     "git switch master"],
+            "events_dir": os.path.expanduser("~/.cache/prorab/events"),
+            "events_retention_s": 86400,
+            "settings_path": os.path.expanduser("~/.cache/prorab/crew-settings.json"),
+            "suggestions_setting": {"promptSuggestionEnabled": False}})
+        self.assertNotIn("guard_max_ms", d["hooks"])
+        self.assertEqual(d["emergency"],
+                         {"stop_path": os.path.expanduser("~/.cache/prorab/STOP")})
         self.assertNotIn("polish_cmd", d)
 
     def test_price_table_families(self):

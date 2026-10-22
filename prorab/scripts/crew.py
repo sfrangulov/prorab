@@ -222,6 +222,33 @@ def _set_session(name, worktree, session_id):
 
 # ---- start ------------------------------------------------------------------
 
+def site_trust(site_path):
+    """Whether Claude Code has the folder trust of exactly this site: True, False, or None
+    when `crew.trust_path` cannot be parsed twice in a row (unknown, not "untrusted").
+    The file is only read; of its content only the one flag is looked at. A parent folder's
+    entry never counts; the path as given or its real path does."""
+    cfg = _defaults.load()["crew"]
+    keys = [site_path.rstrip("/") or "/"]
+    real = os.path.realpath(site_path)
+    if real not in keys:
+        keys.append(real)
+    for attempt in (0, 1):
+        try:
+            with open(cfg["trust_path"], encoding="utf-8") as fh:
+                projects = json.load(fh).get("projects")
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError, AttributeError):
+            if attempt == 0:
+                time.sleep(cfg["trust_retry_s"])  # Claude Code rewrites the file often
+                continue
+            return None
+        if not isinstance(projects, dict):
+            return False
+        return any(isinstance(projects.get(k), dict)
+                   and projects[k].get("hasTrustDialogAccepted") is True for k in keys)
+
+
 def _split_direction(caller_pane):
     try:
         layout = herdr_cli.run(["pane", "layout", "--pane", caller_pane])["result"]["layout"]
@@ -283,9 +310,15 @@ def start(site_path, work_order, name, caller_pane):
     if clash:
         return {"status": "files_overlap", "with": clash}
 
+    trust = site_trust(site_path)
     direction = _split_direction(caller_pane)
     pane = herdr_cli.run(["pane", "split", caller_pane, "--direction", direction,
                           "--no-focus", "--cwd", site_path])["result"]["pane"]["pane_id"]
+    if trust is False:
+        # `claude -w` refuses a site whose own path has no folder trust; the customer
+        # accepts it in this pane once, so no agent, no keys, no session id is spent
+        journal.issue_set(work_order, "not_issued", name=name, pane=pane, reason="needs_trust")
+        return {"status": "needs_trust", "pane_id": pane, "site": site_path, "trust": "missing"}
     session_id = str(uuid.uuid4())
     journal.issue_set(work_order, "issuing", name=name, pane=pane, session_id=session_id)
     try:
@@ -297,7 +330,10 @@ def start(site_path, work_order, name, caller_pane):
             raise
         return (_consent_result(herdr_cli.pane_visible(pane), pane)
                 or {"status": "not_ready", "pane_id": pane})
-    return _register_started(site_path, work_order, name, pane, session_id)
+    result = _register_started(site_path, work_order, name, pane, session_id)
+    if trust is None:
+        result["trust"] = "unknown"
+    return result
 
 
 def _register_started(site_path, work_order, name, pane, session_id):

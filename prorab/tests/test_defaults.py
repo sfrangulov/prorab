@@ -77,7 +77,11 @@ class TestDefaults(unittest.TestCase):
         )
         self.assertEqual(d["cycles"], {"approval": 6, "review": 10, "report_fix": 3})
         self.assertEqual(d["handover"], {"min_interval_s": 600})
-        self.assertEqual(d["crew"], {"ask_timeout_s": 600})
+        self.assertEqual(d["crew"], {
+            "ask_timeout_s": 600,
+            "trust_path": os.path.expanduser("~/.claude.json"),
+            "trust_retry_s": 1,
+        })
 
         self.assertEqual(
             d["budget"],

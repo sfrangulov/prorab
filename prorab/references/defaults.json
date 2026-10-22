@@ -87,7 +87,9 @@
     "min_interval_s": 600
   },
   "crew": {
-    "ask_timeout_s": 600
+    "ask_timeout_s": 600,
+    "trust_path": "~/.claude.json",
+    "trust_retry_s": 1
   },
   "budget": {
     "usd": 100,

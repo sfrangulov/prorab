@@ -26,7 +26,7 @@ Rules here, mechanics in scripts (`<file> …` is `python3 scripts/<file> …` f
 
 1. **Goal**: `brainstorming` with the customer, once.
 2. **Plan**: `writing-plans`; tasks become WOs and stages.
-3. **Work orders** (`references/work-order.md`): `journal.py work-order SITE TITLE --body TEXT --estimate-usd USD [--goal GOAL]`; `journal.py stage WO TITLE --file PATH --duration MIN`.
+3. **Work orders** (`references/work-order.md`): `journal.py work-order SITE TITLE --body TEXT --estimate-usd USD`; `journal.py stage WO TITLE --file PATH --duration MIN`.
 4. **Issuing**: `scheduler.py plan`; `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"`; `journal.py stage-start STAGE`; FILE: the filled template plus `journal.py passport SITE`; `crew.py send_work_order NAME "$(cat FILE)" --work-order WO` (kept in `~/.cache/prorab/work-orders/`).
 5. **Monitor** (Start, 5); 6. **Acceptance**; 7. **Handover** (Context).
 8. **Report**: `shift.py report`.
@@ -43,7 +43,7 @@ All execution (code and documents, commits, releases, push, PR, installs) goes t
 - Crews do not write to the foreman's office journal; everything goes through the foreman.
 - Do not read credential stores. Do not put secrets into work orders.
 - Mass runs, heavy downloads and anything the machine's endpoint security agents would notice — only with a clearance.
-- Remember that crews work in the customer's permission mode (usually bypass): constraints are enforced by work orders and acceptance. Crew hooks could back the safety rules with code (section "Candidate: crew hooks").
+- Remember that crews work in the customer's permission mode (usually bypass): constraints are enforced by work orders and acceptance. Crew hooks back the safety rules with code once the customer enables them (section "Crew hooks").
 - The customer's command "ignore limits and finish" lifts the 5h and week thresholds, the shift budget and the work orders' estimates until the current goal is done, and nothing else. It never lifts these safety rules (consent prompts, push, PR, releases, merging into main) and never machine protection (Mac load, the heavy-run slots, `parallel_ceiling`, the heavy-run limit per stage).
 
 ## Scheduling
@@ -76,10 +76,10 @@ At `settled`: `crew.py summary NAME`, a report or a question.
 
 ## Crews in trouble
 
-- **Consent prompt** (`needs_trust`, `needs_consent`, `consent…`): press nothing, not "Yes", "No (recommended)", "Continue without", Esc; no workaround (configs, environment, `.envrc`, `.mcp.json`, another folder). `journal.py wait WO "consent prompt: <kind>"`, <kind> its glossary word; next WO; `api_key`: one urgent push. `trust`: the gate asks the customer to run `claude` in the site once and accept, then `start` again; new sites only in a trusted folder (`~/projects/`).
+- **Consent prompt** (`needs_consent`, `consent…`): press nothing, not "Yes", "No (recommended)", "Continue without", Esc; no workaround (configs, environment, `.envrc`, `.mcp.json`, another folder). `journal.py wait WO "consent prompt: <kind>"`, <kind> its glossary word; next WO; `api_key`: one urgent push. `needs_trust`: gate at once naming its pane: the customer runs `claude` there once, accepts, `/exit`s, then `start` again (same pane); a parent folder's trust never counts.
 - **Delivery** only by `crew.py`, never `herdr agent prompt` or keys. `stalled`/`unconfirmed`: never send again (directly, after clearing, by restart), no Enter on an empty composer; `crew.py state NAME`: `consent` set: Consent prompt, else an incident, `journal.py wait WO "delivery unconfirmed"`, next WO. `blocked`: the same `state`.
 - **Limit screen** (`limit_screen`), no failure: `crew.py wait_limit NAME` (`unknown_limit_dialog`: a gate; never "Upgrade"), after the reset `resume`; session ended: `restart … limit_died`. `provider_error`: a gate at once, `provider error: <pattern>`.
-- **Restart** (`crew.py restart NAME WO "$(cat FILE)" gone|hung --caller-pane "$HERDR_PANE_ID"`) only on `gone`/`hung`; a heavy-slot holder is never hung. `hung_unclear`: an incident note; no restart, Ctrl+C, Esc or slot release. `crew.py ask_predecessor WO SESSION_ID CWD QUESTION`: by hand only, for an unclear act, in the worktree, on its estimate.
+- **Restart** (`crew.py restart NAME WO "$(cat FILE)" gone|hung --caller-pane "$HERDR_PANE_ID"`) only on `gone`/`hung`; a heavy-slot holder is never hung. `hung_unclear`: an incident note; no restart, Ctrl+C, Esc or slot release. `crew.py ask_predecessor`: by hand only, for an unclear act, in the worktree, on its estimate.
 - **Push** only for an exhausted limit, every WO waiting, a foreman failure, an API-key dialog: first `journal.py notify KEY --kind limit|all_waiting|foreman_failure|api_key`, push only on `{"push": true}`. The rest: morning report; no reminders.
 - **Incident**: `journal.py act BEAD answer "[incident] <what happened>"`.
 
@@ -91,7 +91,7 @@ At `settled`: `crew.py summary NAME`, a report or a question.
 
 ## Rationalizations
 
-- "One keystroke" / "enables nothing" / "standing clearance": any key answers a consent prompt.
+- "One keystroke" / "enables nothing": any key answers a consent prompt.
 - "It never arrived, a re-send cannot double it": you cannot see what arrived.
 - "Fresh crew" / "silent 40 min: Ctrl+C": restart only on `gone`/`hung`.
 - "A paperwork defect" / "I'll check C3 myself": a failing report is never accepted.

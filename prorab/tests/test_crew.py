@@ -163,6 +163,16 @@ class CrewBase(FakeBase):
                                           "PRORAB_LOG_DIR": os.path.join(self.dir, "logs")})
         p4.start()
         self.addCleanup(p4.stop)
+        # the synthetic ~/.claude.json trusts the test sites (F1); tests of the trust replace it
+        self.write_trust([SITE_DIR, os.path.join(self.dir, "repo")])
+
+    def trust_file(self):
+        return os.path.join(self.home, ".claude.json")
+
+    def write_trust(self, paths, flag=True):
+        projects = {p: {"hasTrustDialogAccepted": flag, "allowedTools": []} for p in paths}
+        with open(self.trust_file(), "w", encoding="utf-8") as fh:
+            json.dump({"projects": projects}, fh)
 
     def make_repo(self):
         repo = os.path.join(self.dir, "repo")
@@ -290,6 +300,113 @@ class TestStart(CrewBase):
         crew.start(repo, "N1", "a1", "w:p1")
         self.assertIn("pane split w:p1 --direction down --no-focus --cwd %s" % repo,
                       self.calls())
+
+    def stat_trust(self):
+        with open(self.trust_file(), "rb") as fh:
+            data = fh.read()
+        return data, os.stat(self.trust_file()).st_mtime_ns
+
+    def assert_needs_trust_untouched(self, r):
+        self.assertEqual(r, {"status": "needs_trust", "pane_id": "w:p9", "site": SITE_DIR,
+                             "trust": "missing"})
+        for c in self.calls():
+            self.assertFalse(c.startswith("agent start"), c)
+            for word in ("send", "prompt", "keys"):
+                self.assertNotIn(word, c)
+        rec = self.j.issue("N1")
+        self.assertEqual((rec["state"], rec["pane"], rec["reason"]),
+                         ("not_issued", "w:p9", "needs_trust"))
+        self.assertEqual(self.j.active, [])
+
+    def test_untrusted_site_needs_trust_without_agent_start(self):
+        self.write_trust(["/home/user/projects/other"])
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        self.assert_needs_trust_untouched(crew.start(SITE_DIR, "N1", "a1", "w:p1"))
+        self.assertIn("pane split w:p1 --direction right --no-focus --cwd %s" % SITE_DIR,
+                      self.calls())
+
+    def test_parent_trust_does_not_count(self):
+        self.write_trust(["/home/user/projects", "/home/user", "/"])
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        self.assert_needs_trust_untouched(crew.start(SITE_DIR, "N1", "a1", "w:p1"))
+
+    def test_trust_flag_false_needs_trust(self):
+        self.write_trust([SITE_DIR], flag=False)
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        self.assert_needs_trust_untouched(crew.start(SITE_DIR, "N1", "a1", "w:p1"))
+
+    def test_trust_flag_not_true_needs_trust(self):
+        with open(self.trust_file(), "w", encoding="utf-8") as fh:
+            json.dump({"projects": {SITE_DIR: {"hasTrustDialogAccepted": "true"}}}, fh)
+        self.assertIs(crew.site_trust(SITE_DIR), False)
+
+    def test_missing_claude_json_needs_trust(self):
+        os.remove(self.trust_file())
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        self.assert_needs_trust_untouched(crew.start(SITE_DIR, "N1", "a1", "w:p1"))
+
+    def test_trailing_slash_is_stripped(self):
+        self.assertIs(crew.site_trust(SITE_DIR + "/"), True)
+
+    def test_trust_by_real_path(self):
+        repo = self.make_repo()
+        link = os.path.join(self.dir, "link")
+        os.symlink(repo, link)
+        self.write_trust([os.path.realpath(repo)])
+        self.assertIs(crew.site_trust(link), True)
+        self.add_worktree(repo, "N1")
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        self.assertEqual(crew.start(link, "N1", "a1", "w:p1")["status"], "started")
+
+    def test_unreadable_claude_json_read_twice(self):
+        with open(self.trust_file(), "w", encoding="utf-8") as fh:
+            fh.write('{"projects": {')
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        with mock.patch.object(crew.time, "sleep") as sleep:
+            r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        sleep.assert_called_once_with(_defaults.load()["crew"]["trust_retry_s"])
+        self.assertEqual(r["trust"], "unknown")
+        self.assertIn(r["status"], ("started", "started_no_worktree"))
+
+    def test_unreadable_then_valid_starts_without_trust_field(self):
+        good = json.dumps({"projects": {SITE_DIR: {"hasTrustDialogAccepted": True}}})
+        path = self.trust_file()
+
+        def rewrite(_s):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(good)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{")
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        with mock.patch.object(crew.time, "sleep", side_effect=rewrite):
+            r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertNotIn("trust", r)
+        self.assertIn(r["status"], ("started", "started_no_worktree"))
+
+    def test_trust_file_never_written(self):
+        cases = [["/home/user/projects"], [SITE_DIR], []]
+        for paths in cases:
+            self.write_trust(paths)
+            before = self.stat_trust()
+            self.j.kv.clear()
+            self.j.files = {"N1": ["x"]}
+            self.routes_for_start()
+            crew.start(SITE_DIR, "N1", "a1", "w:p1")
+            self.assertEqual(self.stat_trust(), before)
+        with open(self.trust_file(), "w", encoding="utf-8") as fh:
+            fh.write("{")
+        before = self.stat_trust()
+        with mock.patch.object(crew.time, "sleep"):
+            crew.site_trust(SITE_DIR)
+        self.assertEqual(self.stat_trust(), before)
+        self.assertEqual([f for f in os.listdir(self.home) if "claude" in f], [".claude.json"])
 
     def test_start_parallel_limit(self):
         self.j.active = ["b0", "b1"]

@@ -12,6 +12,8 @@ SCRIPTS_DIR = os.path.join(
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
+if os.environ.get("PRORAB_FAST") == "1":
+    raise unittest.SkipTest("journal tests run the real `bd`: skipped in the fast tier (PRORAB_FAST=1)")
 if shutil.which("bd") is None:
     raise unittest.SkipTest("journal tests need the `bd` (beads >= 1.3) binary on PATH")
 

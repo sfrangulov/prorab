@@ -663,7 +663,7 @@ class TestSendState(CrewBase):
         self.route("agent prompt a1", err("agent_prompt_stalled"), exit_code=1)
         self.route("agent get a1", ok({"agent": {"agent_status": "done"}}))
         self.route("agent read a1 --source visible", composer)
-        self.route("agent send-keys a1", ok({}))
+        self.route("agent send-keys a1", "")
         self.route("agent wait a1", ok({"agent": {"agent_status": "working"}}))
 
     def sent_line(self):
@@ -873,12 +873,24 @@ class TestHandover(CrewBase):
         for c in self.calls():
             self.assertFalse(c.startswith("agent prompt"))
 
+    def test_complete_handover_survives_the_silent_pane_run(self):
+        self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
+        inwt = {"pane": {"pane_id": "w:p9", "foreground_cwd": self.wt}}
+        self.route("pane get w:p9", ok(inwt))
+        self.route("pane run w:p9", "")
+        self.route("agent start a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        r = crew.complete_handover("a1", "N1", "Work order text", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "restarted")
+        self.assertTrue(any(c.startswith("agent start a1 --kind claude --pane w:p9 -- ")
+                            for c in self.calls()))
+
     def test_complete_handover_sequence(self):
         self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
         pane_info = {"pane": {"pane_id": "w:p9", "foreground_cwd": "/home/user/projects/demo-app"}}
         inwt = {"pane": {"pane_id": "w:p9", "foreground_cwd": self.wt}}
         self.route_seq("pane get w:p9", [ok(pane_info), ok(pane_info), ok(inwt)])
-        self.route("pane run w:p9", ok({}))
+        self.route("pane run w:p9", "")
         self.route("agent start a1", ok({}))
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         r = crew.complete_handover("a1", "N1", "Work order text", timeout_s=2, poll_s=0.01)
@@ -908,7 +920,7 @@ class TestHandover(CrewBase):
         self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
         pane_info = {"pane": {"pane_id": "w:p9", "foreground_cwd": "/home/user/projects/demo-app"}}
         self.route("pane get w:p9", ok(pane_info))
-        self.route("pane run w:p9", ok({}))
+        self.route("pane run w:p9", "")
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         r = crew.complete_handover("a1", "N1", "t", timeout_s=0.1, poll_s=0.01)
         self.assertEqual(r["status"], "restart_failed")
@@ -922,7 +934,7 @@ class TestHandover(CrewBase):
         pane_info = {"pane": {"pane_id": "w:p9", "foreground_cwd": "/home/user/projects/demo-app"}}
         inwt = {"pane": {"pane_id": "w:p9", "foreground_cwd": wt}}
         self.route_seq("pane get w:p9", [ok(pane_info), ok(pane_info), ok(inwt)])
-        self.route("pane run w:p9", ok({}))
+        self.route("pane run w:p9", "")
 
     def go(self):
         return crew.complete_handover("a1", "N1", "t", timeout_s=2, poll_s=0.01)
@@ -1147,7 +1159,7 @@ class TestAnswer(CrewBase):
         super().setUp()
         self.j.kv["crew.a1.work_order"] = "N1"
         self.route("agent list", ok({"agents": [agent_entry(status="working")]}))
-        self.route("agent send-keys a1", ok({}))
+        self.route("agent send-keys a1", "")
 
     def test_answer_choice_dialog_keys(self):
         self.route("agent read a1 --source visible", DIALOG)
@@ -1187,9 +1199,16 @@ class TestAnswer(CrewBase):
         crew.answer("a1", choice=3)
         self.assertIn("agent send-keys a1 down down enter", self.calls())
 
+    def test_answer_free_text_takes_silent_send_text(self):
+        self.route("agent read a1 --source visible", DIALOG)
+        self.route("pane send-text w:p9", "")
+        crew.answer("a1", text="own answer")
+        self.assertIn("pane send-text w:p9 own answer", self.calls())
+        self.assertIn("agent send-keys a1 enter", self.calls())
+
     def test_answer_text_selects_type_something(self):
         self.route("agent read a1 --source visible", DIALOG)
-        self.route("pane send-text w:p9", ok({}))
+        self.route("pane send-text w:p9", "")
         crew.answer("a1", text="own answer")
         calls = self.calls()
         i_nav = calls.index("agent send-keys a1 down down down")
@@ -1247,7 +1266,7 @@ class TestWaitLimit(CrewBase):
     def setUp(self):
         super().setUp()
         self.j.kv["crew.a1.work_order"] = "N1"
-        self.route("agent send-keys a1", ok({}))
+        self.route("agent send-keys a1", "")
 
     def keys(self):
         return [c for c in self.calls() if c.startswith("agent send-keys")]
@@ -1338,7 +1357,7 @@ class TestRestart(CrewBase):
                           "crew.a1.session": "old-session", "crew.a1.work_order": "N1"})
         self.route("agent list", ok({"agents": []}))
         self.route("pane get w:p9", ok({"pane": {"pane_id": "w:p9", "foreground_cwd": self.wt}}))
-        self.route("pane run w:p9", ok({}))
+        self.route("pane run w:p9", "")
         self.route("agent start a1", ok({}))
         self.route("pane read w:p9 --source visible", "$ \n")
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
@@ -1400,13 +1419,31 @@ class TestRestart(CrewBase):
         self.assertEqual(len(self.j.gates), 1)
         self.assertEqual(self.calls_or_empty(), [])
 
+    def test_restart_survives_the_silent_pane_run(self):
+        self.route("pane run w:p9", "")  # the real herdr prints nothing on success
+        self.assertEqual(self.go()["status"], "resumed")
+        calls = self.calls()
+        i_cd = calls.index("pane run w:p9 cd %s" % self.wt)
+        i_start = next(i for i, c in enumerate(calls)
+                       if c.startswith("agent start a1 --kind claude --pane w:p9 -- --resume "))
+        self.assertTrue(i_cd < i_start)
+        self.assertEqual(self.j.restarts, {"N1": 1})
+
+    def test_restart_failure_names_step_and_pane(self):
+        self.route("pane run w:p9", "", exit_code=1, stderr="nope")
+        r = self.go()
+        self.assertEqual(r["status"], "restart_failed")
+        self.assertEqual((r["step"], r["pane_id"]), ("cd", "w:p9"))
+        self.assertIn("nope", r["reason"])
+        self.assertIn("pane run w:p9", r["reason"])
+
     def test_failed_herdr_call_leaves_counter_and_session(self):
         self.route("pane run w:p9", err("cli_error"), exit_code=1)
         r = self.go("hung")
         self.assertEqual(r["status"], "restart_failed")
         self.assertEqual(self.j.restarts, {})
         self.assertEqual(self.j.kv["crew.a1.session"], "old-session")
-        self.route("pane run w:p9", ok({}))
+        self.route("pane run w:p9", "")
         self.route("agent start a1", err("agent_start_failed"), exit_code=1)
         self.assertEqual(self.go("hung")["status"], "restart_failed")
         self.assertEqual(self.j.restarts, {})
@@ -1443,7 +1480,7 @@ class TestRestart(CrewBase):
         self.route("pane split w:p1", ok({"pane": {"pane_id": "w:p12"}}))
         self.route("pane get w:p12", ok({"pane": {"pane_id": "w:p12",
                                                   "foreground_cwd": self.wt}}))
-        self.route("pane run w:p12", ok({}))
+        self.route("pane run w:p12", "")
         self.route("agent start a1", ok({}))
         self.route("pane read w:p12 --source visible", "$ \n")
         self.assertEqual(self.go()["status"], "resumed")
@@ -2040,7 +2077,7 @@ class TestExitDialog(CrewBase):
         self.route("agent read a1 --source visible", self.composer)
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.route("pane send-keys w:p9", "")
-        self.route("pane run w:p9", ok({}))
+        self.route("pane run w:p9", "")
         self.route("agent start a1", ok({}))
 
     def listed(self, *present):

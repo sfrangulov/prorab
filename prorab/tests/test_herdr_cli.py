@@ -198,9 +198,41 @@ class TestRun(FakeBase):
         self.assertIn("agent text", herdr_cli.agent_visible("a1"))
 
     def test_send_keys(self):
-        self.route("agent send-keys a1 down enter", ok({}))
+        self.route("agent send-keys a1 down enter", "")
         herdr_cli.send_keys("a1", ["down", "enter"])
         self.assertIn("agent send-keys a1 down enter", self.calls())
+
+    def test_run_empty_stdout_names_command_rc_and_stderr(self):
+        self.route("pane get w:p9", "", stderr="boom")
+        with self.assertRaises(herdr_cli.HerdrError) as cm:
+            herdr_cli.run(["pane", "get", "w:p9"])
+        self.assertEqual(cm.exception.code, "cli_error")
+        self.assertIn("herdr pane get w:p9: non-JSON output (rc=0, stdout='', stderr='boom')",
+                      str(cm.exception))
+
+    def test_failures_name_args_and_exit_code(self):
+        self.route("agent list", "", exit_code=3, stderr="bad")
+        self.route("pane read w:p1 --source visible", "", exit_code=4, stderr="gone")
+        for call, parts in ((lambda: herdr_cli.agents(), ("herdr agent list", "rc=3", "bad")),
+                            (lambda: herdr_cli.pane_visible("w:p1"),
+                             ("herdr pane read w:p1", "rc=4", "gone"))):
+            with self.assertRaises(herdr_cli.HerdrError) as cm:
+                call()
+            for part in parts:
+                self.assertIn(part, str(cm.exception))
+
+    def test_json_error_code_is_kept_with_args_and_rc(self):
+        self.route("agent get a1", err("agent_not_found"), exit_code=1)
+        with self.assertRaises(herdr_cli.HerdrError) as cm:
+            herdr_cli.run(["agent", "get", "a1"])
+        self.assertEqual(cm.exception.code, "agent_not_found")
+        self.assertIn("rc=1", str(cm.exception))
+        self.assertIn("herdr agent get a1", str(cm.exception))
+
+    def test_send_keys_takes_silent_success(self):
+        self.route("agent send-keys a1 enter", "")
+        herdr_cli.send_keys("a1", ["enter"])
+        self.assertIn("agent send-keys a1 enter", self.calls())
 
     def test_non_json_error_is_cli_error(self):
         self.route("agent list", "syntax error: bad flag", exit_code=2)
@@ -339,7 +371,7 @@ class TestRecoverStalled(FakeBase):
     def setup_agent(self, status, screen):
         self.route("agent get a1", ok({"agent": {"name": "a1", "agent_status": status}}))
         self.route("agent read a1", fixture("composer", screen))
-        self.route("agent send-keys a1 enter", ok({}))
+        self.route("agent send-keys a1 enter", "")
         self.route("agent wait a1", ok({"agent": {"agent_status": "working"}}))
 
     def keys(self):

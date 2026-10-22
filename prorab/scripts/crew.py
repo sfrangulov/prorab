@@ -741,9 +741,20 @@ def _same_dir(a, b):
 
 
 def _enter_worktree(pane, worktree, timeout_s, poll_s):
-    herdr_cli.run(["pane", "run", pane, "cd %s" % shlex.quote(worktree)])
+    herdr_cli.run_ack(["pane", "run", pane, "cd %s" % shlex.quote(worktree)])
     return _wait(lambda: _same_dir(_pane(pane).get("foreground_cwd"), worktree),
                  timeout_s, poll_s)
+
+
+def _cd_failure(pane, worktree, timeout_s, poll_s):
+    """None when the shell in `pane` entered the worktree, else a restart_failed result."""
+    try:
+        if _enter_worktree(pane, worktree, timeout_s, poll_s):
+            return None
+        reason = "shell did not enter the worktree"
+    except herdr_cli.HerdrError as e:
+        reason = str(e)
+    return {"status": "restart_failed", "step": "cd", "reason": reason, "pane_id": pane}
 
 
 def _start_session(name, pane, claude_args, want_screen=False):
@@ -753,7 +764,8 @@ def _start_session(name, pane, claude_args, want_screen=False):
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
                       + _claude_args(*claude_args), timeout_s=90)
     except herdr_cli.HerdrError as e:
-        failed = {"status": "restart_failed", "reason": str(e), "pane_id": pane}
+        failed = {"status": "restart_failed", "step": "agent_start", "reason": str(e),
+                  "pane_id": pane}
         if e.code != "agent_not_ready":
             return failed, ""
         screen = herdr_cli.pane_visible(pane)
@@ -833,7 +845,8 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
     if left in ("bg_shells", "bg_work"):  # nothing but the saved act is recorded
         return {"status": "bg_shells", "bg_shells": herdr_cli.bg_shells(_screen_of(pane))}
     if left != "exited":
-        return {"status": "restart_failed", "reason": "agent did not exit"}
+        return {"status": "restart_failed", "step": "exit", "reason": "agent did not exit",
+                "pane_id": pane}
     journal.kv_clear(pending)
     journal.kv_set("handover.%s.last" % work_order, time.time())
     journal.set_spent(work_order, spend["usd"])  # the predecessor's dollars are in the worktree
@@ -847,8 +860,9 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
 
 def _restart_after_exit(name, work_order, work_order_text, worktree, pane, spend, timeout_s,
                         poll_s):
-    if not _enter_worktree(pane, worktree, timeout_s, poll_s):
-        return {"status": "restart_failed", "reason": "shell did not enter the worktree"}
+    failed = _cd_failure(pane, worktree, timeout_s, poll_s)
+    if failed:
+        return failed
     session_id = str(uuid.uuid4())
     failed, _screen = _start_session(
         name, pane, (("--session-id", session_id), ("--add-dir", _files_dir())))
@@ -919,15 +933,16 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
         try:
             pane, ident = _open_pane(caller_pane, worktree)
         except herdr_cli.HerdrError as e:
-            return {"status": "restart_failed", "reason": str(e)}
+            return {"status": "restart_failed", "step": "split", "reason": str(e),
+                    "pane_id": caller_pane}
         journal.kv_set(_kv(name, "pane"), pane)
         journal.kv_set(_kv(name, "pane_identity"), json.dumps(ident))
         rec = journal.issue(work_order)
         if rec:
             journal.issue_set(work_order, rec["state"], pane=pane, pane_identity=ident)
-    if not _enter_worktree(pane, worktree, timeout_s, poll_s):
-        return {"status": "restart_failed", "reason": "shell did not enter the worktree",
-                "pane_id": pane}
+    failed = _cd_failure(pane, worktree, timeout_s, poll_s)
+    if failed:
+        return failed
 
     old = journal.kv_get(_kv(name, "session"))
     path = _transcript_for(name)
@@ -1055,7 +1070,7 @@ def answer(name, choice=None, text=None):
         if keys:
             herdr_cli.send_keys(name, keys)
         pane = (herdr_cli.agent(name) or {}).get("pane_id") or journal.kv_get(_kv(name, "pane"))
-        herdr_cli.run(["pane", "send-text", pane, text])
+        herdr_cli.run_ack(["pane", "send-text", pane, text])
         herdr_cli.send_keys(name, ["enter"])
         _record_answer(work_order, "answer to crew %s (free text): %s" % (name, text))
     return _status(name)

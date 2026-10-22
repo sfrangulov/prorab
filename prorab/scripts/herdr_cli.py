@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """Thin wrapper over the herdr CLI (>= 0.9.5): JSON calls, env check, reliable send,
-screen markers (consent prompts, choice dialogs, composer line)."""
+screen markers (consent prompts, choice dialogs, composer line).
+
+Every herdr call goes through one of three functions, by what the scripts do with its answer:
+- `run`: the answer is read, so it must be JSON (an empty or non-JSON answer on exit 0 is a
+  failure): `agent list|get|start|prompt|wait`, `pane get|layout|split`, `tab create`.
+- `_text`: the answer is plain text: `pane read`, `agent read`, `--version`.
+- `run_ack`: the answer is not read, and herdr is silent on success (`pane run` prints nothing
+  and exits 0), so any answer on exit 0 is a success: `pane run`, `pane send-text`,
+  `pane send-keys`, `agent send-keys`, `pane close`. A command whose real success answer is
+  not known is safe here too.
+Every HerdrError names the herdr args and the exit code."""
 import json
 import os
 import re
@@ -35,37 +45,52 @@ def _exec(args, timeout_s):
     return p
 
 
-def _error_from(p):
-    """Build a HerdrError from a failed process (JSON error or raw text)."""
+def _error_from(p, args=()):
+    """Build a HerdrError from a failed process (JSON error or raw text). The message names
+    the herdr args and the exit code, and carries stderr when the message lacks it."""
+    where = "herdr %s: rc=%d" % (" ".join(args), p.returncode) if args else None
+    stderr = (p.stderr or "").strip()
+    code, msg = "cli_error", None
     for text in (p.stderr, p.stdout):
         try:
             err = json.loads(text).get("error")
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError, TypeError):
             continue
         if isinstance(err, dict) and err.get("code"):
-            return HerdrError(err["code"], err.get("message") or err["code"])
-    msg = (p.stderr or p.stdout or "").strip() or "exit %d" % p.returncode
-    return HerdrError("cli_error", msg)
+            code, msg = err["code"], err.get("message") or err["code"]
+            break
+    if msg is None:
+        msg = stderr or (p.stdout or "").strip() or "exit %d" % p.returncode
+    elif stderr and stderr not in msg and not stderr.startswith("{"):
+        msg = "%s (stderr: %s)" % (msg, stderr[:200])
+    return HerdrError(code, "%s: %s" % (where, msg) if where else msg)
+
+
+def _fail(args, p, what):
+    return HerdrError("cli_error", "herdr %s: %s (rc=%d, stdout=%r, stderr=%r)"
+                      % (" ".join(args), what, p.returncode, (p.stdout or "").strip()[:200],
+                         (p.stderr or "").strip()[:200]))
 
 
 def _text(args, timeout_s=None):
     p = _exec(args, timeout_s)
     if p.returncode != 0:
-        raise _error_from(p)
+        raise _error_from(p, args)
     return p.stdout
 
 
 def run(args, timeout_s=None):
     p = _exec(args, timeout_s)
     if p.returncode != 0:
-        raise _error_from(p)
+        raise _error_from(p, args)
     try:
         data = json.loads(p.stdout)
     except ValueError:
-        raise HerdrError("cli_error", "non-JSON output: %s" % p.stdout.strip()[:200])
+        raise _fail(args, p, "non-JSON output")
     if isinstance(data, dict) and isinstance(data.get("error"), dict):
-        raise HerdrError(data["error"].get("code", "cli_error"),
-                         data["error"].get("message", ""))
+        err = data["error"]
+        raise HerdrError(err.get("code", "cli_error"), "herdr %s: rc=%d: %s"
+                         % (" ".join(args), p.returncode, err.get("message", "")))
     return data
 
 
@@ -73,13 +98,10 @@ def run_ack(args, timeout_s=None):
     """`run` for herdr commands whose answer the scripts do not read: any answer on exit 0
     is a success (empty -> {}, JSON without an `error` object -> the parsed JSON, other text
     -> {"text": first 200 characters}). Raises only on a non-zero exit or a JSON `error`
-    object; the message names the command, the exit code and stderr (first 200 characters)."""
+    object; the message names the command, the exit code and stderr."""
     p = _exec(args, timeout_s)
-    where = "herdr %s: rc=%d, stderr=%s" % (" ".join(args), p.returncode,
-                                           (p.stderr or "").strip()[:200])
     if p.returncode != 0:
-        e = _error_from(p)
-        raise HerdrError(e.code, "%s: %s" % (where, e))
+        raise _error_from(p, args)
     out = (p.stdout or "").strip()
     if not out:
         return {}
@@ -89,8 +111,9 @@ def run_ack(args, timeout_s=None):
         return {"text": out[:200]}
     if isinstance(data, dict) and isinstance(data.get("error"), dict):
         err = data["error"]
-        raise HerdrError(err.get("code", "cli_error"),
-                         "%s: %s" % (where, err.get("message") or err.get("code", "")))
+        raise HerdrError(err.get("code", "cli_error"), "herdr %s: rc=%d, stderr=%s: %s"
+                         % (" ".join(args), p.returncode, (p.stderr or "").strip()[:200],
+                            err.get("message") or err.get("code", "")))
     return data if isinstance(data, dict) else {"text": out[:200]}
 
 
@@ -150,7 +173,7 @@ def agent_visible(name):
 
 
 def send_keys(name, keys):
-    run(["agent", "send-keys", name] + list(keys))
+    run_ack(["agent", "send-keys", name] + list(keys))
 
 
 def bottom_block(visible, n):

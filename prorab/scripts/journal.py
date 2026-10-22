@@ -936,6 +936,10 @@ def _emit(value):
     return 0
 
 
+# The only matters that justify a push notification (the spec's urgent list).
+URGENT_KINDS = ("limit", "all_waiting", "foreman_failure", "api_key")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -999,7 +1003,8 @@ def main(argv=None):
     p.add_argument("--add"); p.add_argument("--remove")
     p = sub.add_parser("iterations")
     p.add_argument("stage"); p.add_argument("kind"); p.add_argument("--bump", action="store_true")
-    sub.add_parser("notify").add_argument("key")
+    p = sub.add_parser("notify")
+    p.add_argument("key"); p.add_argument("--kind", required=True, choices=URGENT_KINDS)
     p = sub.add_parser("passport")
     p.add_argument("site"); p.add_argument("--set-file")
     p = sub.add_parser("issues")

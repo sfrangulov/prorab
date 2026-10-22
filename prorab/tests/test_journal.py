@@ -777,8 +777,10 @@ class TestJournalG(JournalBase):
         self.assertIsNone(journal.override(kv=journal.kv_all()))
 
     def test_cli_notify_and_iterations(self):
-        self.assertEqual(self.run_cli("notify", "gate-9"), (0, {"push": True}))
-        self.assertEqual(self.run_cli("notify", "gate-9"), (0, {"push": False}))
+        self.assertEqual(self.run_cli("notify", "gate-9", "--kind", "api_key"),
+                         (0, {"push": True}))
+        self.assertEqual(self.run_cli("notify", "gate-9", "--kind", "api_key"),
+                         (0, {"push": False}))
         self.assertEqual(self.run_cli("iterations", "st9", "approval"),
                          (0, {"n": 0, "limit": 6, "exceeded": False}))
         self.assertEqual(self.run_cli("iterations", "st9", "report_fix", "--bump")[1],

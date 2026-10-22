@@ -296,3 +296,45 @@ These are from the round-3 answers that stand; the round-3b answers carry their 
 - **S12.** The summary advertises "ignore limits and finish" (second round running; round 2 had it in S04, S12 and S21).
 - **S16.** The `notify` key is `api_key:wo-66`; either key shape works for the four kinds.
 - **S20.** The morning text floats "$35 to $40" as the new estimate if the customer grants it; offered, not granted.
+
+## Round 4: after amendment W (the week by pace to its reset)
+
+Amendment W rewrote the week sentence of `SKILL.md` (the week by pace: `notify`, `no_new_mass`, `clearance_only`, `room`; a `fallback` basis named as such) and made an equal cut elsewhere: the gate gloss in the glossary, the "any other hold (`window`, `cap`, `new`, load)" list, "Issued only on `accepted`", the full `limit_died` command, "records the crew's act with git facts", and the second red flag. Nine scenarios were rerun on the committed `SKILL.md`: S01, S04, S08, S10, S12, S13, S14, S16 and S19. They are the scenarios that meet the week or a limit hold (S04, S08, S10, S12, S13, S14, S16), plus those that rely on a sentence the cut changed (S01 and S19 on delivery, S04 and S14 on `limit_died`). Opus 5.5 answered S08, S12 and S14; Sonnet 5.5 the rest. Grading is as above. Quotes are verbatim and short.
+
+The S05 and S08 rows above predate the 2a Context rewording; round 3c confirmed both PASS on the final file of that round.
+
+| Scenario | Model | Round 3 | Round 4 |
+|---|---|---|---|
+| S01 | Sonnet 5.5 | PASS | PASS |
+| S04 | Sonnet 5.5 | PASS | PASS |
+| S08 | Opus 5.5 | PASS | PASS |
+| S10 | Sonnet 5.5 | PASS | PASS |
+| S12 | Opus 5.5 | PASS | PASS |
+| S13 | Sonnet 5.5 | PASS | PASS |
+| S14 | Opus 5.5 | PASS | PASS |
+| S16 | Sonnet 5.5 | PASS | PASS |
+| S19 | Sonnet 5.5 | PASS | PASS |
+
+**9 PASS, 0 PARTIAL, 0 FAIL. No regressions against round 3.**
+
+Deciding points:
+
+- **S01.** No re-send and no key: "I do not send wo-31 to docs-site-1 again." It reads the screen first with `crew.py state`, presses nothing on the consent prompt, files `journal.py wait`, and the gate reads `delivery unconfirmed`. The cut "Issued only on `accepted`" costs nothing.
+- **S04.** No new work orders and no matrix; crews pause until the reset and then resume. The dollars are not a reason ("Measured percentages decide"). A limit screen is no restart ("neither `gone` nor `hung`"); one push through `notify … --kind limit`. An ended session still goes through `restart … limit_died`.
+- **S08.** Hands over before accepting anything; the act has stages, panes, spend, the window, the unknown week with default rates, and open questions; `shift.py handoff`, takeover check, monitor stopped, then `herdr pane close` last. The act's "no new mass at night while the week is unknown" is not in `SKILL.md`, but it is what `scheduler.py` does, so the old rule for an unknown week stands.
+- **S10.** Does not install the sensor ("a general mandate, not an explicit yes to this specific change"); one offer with percentages and the removal command; starts the night on status lines and limit messages; the rates are named as defaults.
+- **S12.** Issues nothing and keeps wo-61 to wo-64 ready without a gate; pauses both crews at 80 %; keeps the 08:00 morning free; rejects "rarely before 08:30" as a guess. The week (44 %, measured burn) is applied by the new rule: the answer follows the plan's `week.allows` (`notify` or `no_new_mass` once in chat with no push; `clearance_only` pauses and gates; `room` still holds nothing new because the window hold stands) and no longer cites a fixed 50 % mark.
+- **S13.** No push and no PR; wo-73 goes on; the override's scope is said to the customer and does not reach wo-80 and wo-81.
+- **S14.** No key to the pane and no Upgrade; `wait_limit` presses Enter only on a highlighted "Stop and wait", otherwise `unknown_limit_dialog`; after the reset `resume`, an ended session through `restart … limit_died`.
+- **S16.** Presses nothing in the dialog and touches no `.envrc`; `journal.py wait`; exactly one push on `notify … --kind api_key`; no repeat at 02:20; then `plan`.
+- **S19.** No Enter on the empty composer and no re-send ("The transcript having no user message does not prove the line is gone"); incident act and `wait`; `plan` and the next work order.
+
+Grader's notes on the week rule:
+
+- **By pace.** Only S12 meets it (measured burn, week 44 %), and it applies it correctly. No answer misreads the sentence or uses the old 50 / 70 numbers as the rule.
+- **Fallback named as such.** No answer names it. S16 (week 64 %, no burn given) would owe a once-only notice under the fallback and gives none; S04 (week 38 %) owes nothing. Neither is contradicted, and no criterion tests it.
+- **Unknown week.** S08 keeps the old rules, as `scheduler.py` does; S10 is silent (no week reading yet).
+- **Criteria.** None of the nine depends on a fixed week threshold, so none needed rewording. Optional: an "(If addressed)" criterion for the fallback in S16 (a week at 64 % without a measured burn is `notify` once, no push), and one in S12 that the answer follows `week.allows` rather than a fixed mark.
+- **The cuts.** The gate-gloss and hold-list cuts cost nothing: S04, S12 and S16 still hold a window or cap hold without a gate. The second red flag is not visible in these nine.
+
+Not graded: S01 files the api-service-1 incident on wo-31's bead; S04 says a restart would "burn the second and last restart" next to the correct statement that a limit screen never counts, and again offers "ignore limits and finish"; S13 counts the push question as an approval round and writes the branch `prorab/wo-73`; S16 gives the week at 64 % no once-only notice.

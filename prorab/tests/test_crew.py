@@ -2166,6 +2166,30 @@ class TestExitDialog(CrewBase):
         self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
         self.assertEqual(self.j.gates, [])
 
+    def test_stop_after_a_refused_handover_clears_the_act_mark(self):
+        self.listed(True)
+        self.screens(self.composer, fixture("exit", "bg_work.txt"))
+        self.route("pane get w:p9", self.shell)
+        self.assertEqual(self.handover()["status"], "bg_shells")
+        self.assertIn("crew.a1.handover_act", self.j.kv)
+        self.listed(True, True, False)
+        self.screens(self.composer)
+        self.assertEqual(crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)["status"], "stopped")
+        self.assertNotIn("crew.a1.handover_act", self.j.kv)
+
+    def test_restart_after_a_refused_handover_clears_the_act_mark(self):
+        self.listed(True)
+        self.screens(self.composer, fixture("exit", "bg_work.txt"))
+        self.route("pane get w:p9", self.shell)
+        self.assertEqual(self.handover()["status"], "bg_shells")
+        self.assertIn("crew.a1.handover_act", self.j.kv)
+        self.listed(True, True, False)
+        self.screens(self.composer)
+        self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
+        r = crew.restart("a1", "N1", "t", "gone", caller_pane="w:p1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "resumed")
+        self.assertNotIn("crew.a1.handover_act", self.j.kv)
+
     def test_bg_work_marker_needs_the_dialog_shape(self):
         prose = "Background work is running in the other pane, I will wait.\n"
         self.assertIsNone(crew.exit_dialog(prose))

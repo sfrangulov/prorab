@@ -904,6 +904,7 @@ def restart(name, work_order, work_order_text, reason, caller_pane=None,
         return {"status": "restart_failed", "reason": str(e)}
     finally:
         journal.kv_clear(_kv(name, "exiting"))
+        journal.kv_clear(_kv(name, "handover_act"))  # a later handover saves its own act
 
 
 def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s, poll_s,
@@ -1134,7 +1135,7 @@ def stop(name, work_order, timeout_s=60, poll_s=1):
     journal.spend(work_order, tokens=tokens)
     close_start_panes(work_order)
     for field in ("work_order", "site", "pane", "pane_identity", "worktree", "branch", "session",
-                  "transcript", "limit_until", "exiting"):
+                  "transcript", "limit_until", "exiting", "handover_act"):
         journal.kv_clear(_kv(name, field))
     return {"status": "stopped", "tokens": tokens}
 

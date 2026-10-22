@@ -1349,6 +1349,11 @@ class TestWaitLimit(CrewBase):
         self.assertEqual(self.keys(), [])
 
 
+def fingerprint(text):
+    import hashlib
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
 class TestRestart(CrewBase):
     def setUp(self):
         super().setUp()
@@ -1372,6 +1377,7 @@ class TestRestart(CrewBase):
         return os.path.join(self.home, ".cache", "prorab", "work-orders")
 
     def test_restart_resumes_below_soft(self):
+        self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
         self.assertEqual(self.go()["status"], "resumed")
         self.assertEqual(self.starts(), ["agent start a1 --kind claude --pane w:p9 -- "
                                          "--resume old-session --add-dir %s" % self.files_dir()])
@@ -1508,6 +1514,69 @@ def make_report(**kw):
     text = "# Stage report\n\n" + "\n".join(v for v in parts.values() if v)
     heavy = kw.get("heavy", "Heavy runs: 3\n")
     return text + ("\n" + heavy if heavy else "") + kw.get("tail", "")
+
+    # ---- a changed work order on resume (F7) ----
+
+    CHANGED = "The work order changed since you last read it: read the file %s, then continue " \
+              "from where you stopped."
+
+    def prompts(self):
+        return [c for c in self.calls() if c.startswith("agent prompt a1")]
+
+    def test_resume_sends_a_changed_work_order(self):
+        self.j.kv["crew.a1.delivered"] = fingerprint("old text")
+        r = crew.restart("a1", "N1", "new text", "gone", caller_pane="w:p1")
+        self.assertEqual(r["status"], "resumed")
+        self.assertTrue(r["work_order_sent"])
+        path = os.path.join(self.files_dir(), "N1.md")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "new text")
+        (line,) = self.prompts()
+        self.assertIn(self.CHANGED % path, line)
+        self.assertNotIn("Continue", line)
+        self.assertEqual(self.j.kv["crew.a1.delivered"], fingerprint("new text"))
+
+    def test_resume_unchanged_work_order_sends_continue(self):
+        self.j.kv["crew.a1.delivered"] = fingerprint("Work order text\n")
+        r = self.go()
+        self.assertEqual(r["status"], "resumed")
+        self.assertFalse(r["work_order_sent"])
+        (line,) = self.prompts()
+        self.assertIn("Continue from where you stopped.", line)
+        self.assertFalse(os.path.exists(os.path.join(self.files_dir(), "N1.md")))
+
+    def test_resume_without_fingerprint_sends_the_work_order(self):
+        r = self.go()
+        self.assertTrue(r["work_order_sent"])
+        (line,) = self.prompts()
+        self.assertIn("The work order changed since you last read it", line)
+        self.assertEqual(self.j.kv["crew.a1.delivered"], fingerprint("Work order text"))
+
+    def test_resume_not_accepted_keeps_the_old_fingerprint(self):
+        self.j.kv["crew.a1.delivered"] = fingerprint("old text")
+        with mock.patch.object(crew, "deliver", return_value="stalled"):
+            r = crew.restart("a1", "N1", "new text", "gone", caller_pane="w:p1")
+        self.assertEqual(r["status"], "prompt_not_accepted")
+        self.assertEqual(self.j.kv["crew.a1.delivered"], fingerprint("old text"))
+
+    def test_new_session_restart_records_the_fingerprint_of_the_work_order(self):
+        self.write_transcript("/work", "old-session", "x", tokens=(130000, 0, 0))
+        self.j.kv["crew.a1.transcript"] = crew.transcript.transcript_path(
+            "/work", "old-session", self.home)
+        self.j.add_act("N1", "handover", "Act one")
+        self.assertEqual(self.go()["status"], "restarted")
+        self.assertEqual(self.j.kv["crew.a1.delivered"], fingerprint("Work order text"))
+
+    def test_fingerprint_recorded_on_accepted_delivery(self):
+        with mock.patch.object(crew, "deliver", return_value="stalled"):
+            crew.send_work_order("a1", "do it\nnow", "N1")
+        self.assertNotIn("crew.a1.delivered", self.j.kv)
+        with mock.patch.object(crew, "deliver", return_value="accepted"):
+            crew.send_work_order("a1", "do it\nnow\n", "N1")
+        self.assertEqual(self.j.kv["crew.a1.delivered"], fingerprint("do it\nnow"))
+
+    def test_changed_work_order_block_in_acts_md(self):
+        self.assertEqual(crew._template("Changed work order"), self.CHANGED % "{path}")
 
 
 class TestCheckReport(CrewBase):
@@ -2277,3 +2346,80 @@ class TestExitDialog(CrewBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStopClosesPane(CrewBase):
+    IDENT = {"terminal": "term-w:p9", "tab": "w:1"}
+
+    def setUp(self):
+        super().setUp()
+        self.j.active = ["a1"]
+        self.j.kv.update({"crew.a1.work_order": "N1", "crew.a1.pane": "w:p9",
+                          "crew.a1.pane_identity": json.dumps(self.IDENT)})
+        self.route("agent prompt a1", err("agent_not_found"), exit_code=1)
+        self.route("pane read w:p9 --source visible", "$ \n")
+        self.route("pane close w:p9", "")
+
+    def exiting(self):
+        self.route_seq("agent list", [ok({"agents": [agent_entry()]}), ok({"agents": []})])
+
+    def test_stop_closes_the_crew_pane_after_exit(self):
+        self.exiting()
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9")}))
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "stopped")
+        self.assertTrue(r["pane_closed"])
+        calls = self.calls()
+        i = next(k for k, c in enumerate(calls) if c.startswith("agent prompt a1 /exit"))
+        self.assertLess(i, calls.index("pane get w:p9"))
+        self.assertLess(calls.index("pane get w:p9"), calls.index("pane close w:p9"))
+
+    def test_stop_never_closes_a_pane_with_an_agent(self):
+        self.route("agent list", ok({"agents": []}))
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", agent="claude")}))
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertFalse(r["pane_closed"])
+        self.assertNotIn("pane close w:p9", self.calls())
+
+    def test_stop_never_closes_a_pane_listing_another_agent(self):
+        self.route("agent list", ok({"agents": [agent_entry(name="other")]}))
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9")}))
+        self.assertFalse(crew._close_crew_pane("a1"))
+        self.assertNotIn("pane close w:p9", self.calls())
+
+    def test_stop_leaves_a_pane_whose_identity_changed(self):
+        self.route("agent list", ok({"agents": []}))
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", terminal="term-other")}))
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "stopped")
+        self.assertFalse(r["pane_closed"])
+        self.assertNotIn("pane close w:p9", self.calls())
+
+    def test_stop_closes_the_pane_when_the_agent_is_already_gone(self):
+        self.route("agent list", ok({"agents": []}))
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9")}))
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertTrue(r["pane_closed"])
+        self.assertIn("pane close w:p9", self.calls())
+        self.assertNotIn("crew.a1.pane", self.j.kv)
+
+    def test_stop_does_not_close_on_an_unknown_cwd(self):
+        self.route("agent list", ok({"agents": []}))
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", cwd=None)}))
+        self.assertFalse(crew.stop("a1", "N1")["pane_closed"])
+        self.assertNotIn("pane close w:p9", self.calls())
+
+    def test_a_failed_close_is_not_an_error(self):
+        self.route("agent list", ok({"agents": []}))
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9")}))
+        self.route("pane close w:p9", err("pane_busy"), exit_code=1)
+        r = crew.stop("a1", "N1")
+        self.assertEqual(r["status"], "stopped")
+        self.assertFalse(r["pane_closed"])
+
+    def test_stop_clears_the_delivered_fingerprint(self):
+        self.route("agent list", ok({"agents": []}))
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9")}))
+        self.j.kv["crew.a1.delivered"] = "abc"
+        crew.stop("a1", "N1")
+        self.assertNotIn("crew.a1.delivered", self.j.kv)

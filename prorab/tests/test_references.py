@@ -118,7 +118,7 @@ class TestActs(unittest.TestCase):
             source = fh.read()
         read_by_crew = set(re.findall(r'_template\("([^"]+)"\)', source))
         self.assertEqual(read_by_crew, {"Handover request", "Pause", "Continue",
-                                        "Message by file", "Fix the report"})
+                                        "Changed work order", "Message by file", "Fix the report"})
         for heading in read_by_crew:
             own = block("acts.md", heading)
             self.assertTrue(own.strip(), heading)

@@ -7,6 +7,7 @@ The foreman never merges, never pushes and never answers a trust/consent prompt.
 """
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -53,6 +54,11 @@ def _consent_result(visible, pane):
 
 def _kv(name, field):
     return "crew.%s.%s" % (name, field)
+
+
+def _fingerprint(text):
+    """The SHA-256 of a work-order text (stripped): what `crew.<name>.delivered` records."""
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
 def _template(heading):
@@ -505,8 +511,10 @@ def send_work_order(name, text, work_order=None):
     work_order = work_order or journal.kv_get(_kv(name, "work_order"))
     path = message_file(work_order, text, name=work_order)
     result = deliver(name, _template("Message by file").format(path=path), work_order)
-    if result == "accepted" and work_order:
-        journal.issue_set(work_order, "issued", name=name)
+    if result == "accepted":
+        journal.kv_set(_kv(name, "delivered"), _fingerprint(text))
+        if work_order:
+            journal.issue_set(work_order, "issued", name=name)
     return result
 
 
@@ -875,6 +883,7 @@ def _restart_after_exit(name, work_order, work_order_text, worktree, pane, spend
         return {"status": "prompt_not_accepted", "reason": str(e), "pane_id": pane}
     if sent != "accepted":
         return {"status": "prompt_not_accepted", "sent": sent, "pane_id": pane}
+    journal.kv_set(_kv(name, "delivered"), _fingerprint(work_order_text))
     return {"status": "restarted", "sent": sent, "usd": spend["usd"], "pane_id": pane,
             "session_id": session_id}
 
@@ -958,13 +967,23 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
                 return failed
             if counted:
                 journal.bump_restarts(work_order)
+            fp = _fingerprint(work_order_text)
+            changed = journal.kv_get(_kv(name, "delivered")) != fp
             try:
-                sent = resume(name)
+                if changed:  # the work order differs from what the crew read: send it again
+                    path = message_file(work_order, work_order_text, name=work_order)
+                    sent = deliver(name, _template("Changed work order").format(path=path),
+                                   work_order)
+                else:
+                    sent = resume(name)
             except herdr_cli.HerdrError as e:
                 return {"status": "prompt_not_accepted", "reason": str(e), "pane_id": pane}
             if sent != "accepted":
                 return {"status": "prompt_not_accepted", "sent": sent, "pane_id": pane}
-            return {"status": "resumed", "pane_id": pane, "session_id": old}
+            if changed:
+                journal.kv_set(_kv(name, "delivered"), fp)
+            return {"status": "resumed", "pane_id": pane, "session_id": old,
+                    "work_order_sent": changed}
     session_id = str(uuid.uuid4())
     failed, _screen = _start_session(name, pane, (("--session-id", session_id), files))
     if failed:
@@ -980,6 +999,7 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
     if sent != "accepted":
         return {"status": "prompt_not_accepted", "sent": sent, "pane_id": pane,
                 "session_id": session_id}
+    journal.kv_set(_kv(name, "delivered"), _fingerprint(work_order_text))
     return {"status": "restarted", "pane_id": pane, "session_id": session_id}
 
 
@@ -1116,6 +1136,25 @@ def wait_limit(name):
 
 # ---- stop, cleanup ----------------------------------------------------------
 
+def _close_crew_pane(name):
+    """Close the crew's own pane (kv `pane`) after its agent left: only when it is still the
+    pane the crew was opened in (identity), shows a working directory and holds no agent,
+    the crew's or another. Best-effort; returns whether the pane was closed."""
+    pane = journal.kv_get(_kv(name, "pane"))
+    if not pane:
+        return False
+    try:
+        rec = json.loads(journal.kv_get(_kv(name, "pane_identity")) or "{}")
+    except ValueError:
+        return False
+    info = _pane_info(pane)
+    if not isinstance(rec, dict) or not _same_pane(rec, info):
+        return False
+    if _has_agent(pane, info) or not info.get("foreground_cwd"):
+        return False
+    return _close_pane(pane)
+
+
 def stop(name, work_order, timeout_s=60, poll_s=1):
     """Exit the crew and unregister it: {"status": "stopped", ...}. When the agent does not
     leave ("bg_shells", "bg_work", "not_exited") the result is {"status": <that>}, and the
@@ -1133,11 +1172,12 @@ def stop(name, work_order, timeout_s=60, poll_s=1):
     if worktree:
         journal.set_spent(work_order, _spend_of(work_order, worktree)["usd"])
     journal.spend(work_order, tokens=tokens)
+    pane_closed = _close_crew_pane(name)
     close_start_panes(work_order)
     for field in ("work_order", "site", "pane", "pane_identity", "worktree", "branch", "session",
-                  "transcript", "limit_until", "exiting", "handover_act"):
+                  "transcript", "limit_until", "exiting", "handover_act", "delivered"):
         journal.kv_clear(_kv(name, field))
-    return {"status": "stopped", "tokens": tokens}
+    return {"status": "stopped", "tokens": tokens, "pane_closed": pane_closed}
 
 
 def _default_branch(site_path):

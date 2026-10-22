@@ -20,7 +20,7 @@ import transcript  # noqa: E402
 from prorab.tests.test_herdr_cli import FakeBase, ok  # noqa: E402
 
 D = _defaults.load()
-D["week"]["calendar"]["days"] = []  # no working days: the reserve is 0, projected = used + burn x hours
+D["week"]["calendar"]["days"] = []  # no working days: W = 0, projected = used + the off-hours work
 
 
 def at(hh, mm=0, day=21):
@@ -356,6 +356,25 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(), ["limit 60 100.1 sensor day"])
         self.s.limits = self.wk(20.0, 95.1, resets=self.reset + 7 * 86400)  # the next week
         self.assertEqual(self.poll(), ["limit 20 95.1 sensor day week:no_new_mass"])
+
+    def test_week_notice_counts_the_night_shift(self):
+        self.week_world()  # a measured 0.0 pp per working hour; W = 0 by the empty calendar
+        self.s.kv = {"shift.night": "1", "shift.week_start": "88"}  # the shift has used 0 pp
+        self.s.limits = self.wk(20.0, 88.0)
+        out = self.poll()
+        self.assertEqual(len(out), 1)  # projected 88 + 10 pp of the night shift's budget left
+        self.assertTrue(out[0].startswith("limit 20 88 sensor "), out)
+        self.assertTrue(out[0].endswith(" week:no_new_mass"), out)
+
+    def test_week_notice_night_shift_dollar_term_uses_the_cached_rate(self):
+        self.week_world()
+        self.s.kv = {"shift.night": "1", "shift.week_start": "88"}
+        self.s.spend = dict(self.s.spend, usd=60.0)
+        self.s.rate = {"five_hour": {"usd_per_pp": 5.0, "source": "default"},
+                       "seven_day": {"usd_per_pp": 10.0, "source": "estimated"}}
+        self.s.limits = self.wk(20.0, 88.0)
+        self.assertEqual(self.poll(), [])  # $40 left at 10 $/pp: 4 pp, projected 92
+        self.assertEqual(self.mem["rate"]["week_usd_per_pp"], 10.0)
 
     def test_week_fallback_events(self):
         self.s.limits = lim(20.0, 49.9)

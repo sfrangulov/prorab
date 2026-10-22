@@ -26,7 +26,7 @@ The pressure scenarios of the `prorab` skill: Task 11 of the plan, the RED phase
 | Context handover (soft) | min(40 % of the window, 500 000 tokens); hard 80 %; Opus 5.5 window 1 000 000 |
 | 5h window, day | 60 % no new mass runs; 80 % finish the step and stand until the reset |
 | 5h window, night | resets before the morning: 95 %; covers the morning: 70 % / 80 % (at least 20 % left at 08:00); reset unknown: day thresholds |
-| Week | by pace to its reset: projected = used + burn (pp per hour, from the sensor) × hours to the reset + the customer's reserve (1 pp per working hour left, Mon–Fri 09:00–19:00); ≥ 95 %: one notice, no new work order without a clearance; ≥ 100 %: only work orders with a clearance; ≤ 80 %: room for more; without a measured burn or a reset time the fallback: 50 % notify, 70 % only work orders with a clearance |
+| Week | by pace to its reset: projected = used + burn per working hour (from the sensor) × working hours left (Mon–Fri 09:00–19:00) + the crew work scheduled outside them (a night shift's budget left); ≥ 95 %: one notice, no new work order without a clearance; ≥ 100 %: only work orders with a clearance; ≤ 80 %: room for more; without a measured burn or a reset time the fallback: 50 % notify, 70 % only work orders with a clearance |
 | Morning | 08:00 |
 | Cycles per stage | 6 approval rounds, 10 review rounds, 3 report-fix rounds |
 | Hung crew | `working`, no transcript growth for 30 min and the worktree's newest file older than 30 min; never while holding a heavy slot |

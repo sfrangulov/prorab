@@ -319,25 +319,24 @@ class TestReport(ShiftBase):
                                                      "resets_at": reset}}}, fh)
 
     def test_report_week_projection_lines(self):
-        self._no_working_days()
+        self._no_working_days()  # W = 0 whenever the test runs
         self.start_shift()
         reset = int(time.time()) + 48 * 3600
         self._week_sensor(reset)
-        base = time.time() - 1
-        with open(os.path.join(self.logs, "monitor.log"), "w", encoding="utf-8") as fh:
-            for hours, pct in ((-10, 47.0), (-6.5, 48.0), (-3, 49.0), (0, 50.0)):
-                fh.write(json.dumps({"ts": base + hours * 3600, "source": "sensor",
-                                     "five_hour": 30.0, "seven_day": pct,
-                                     "resets_at": base + 3600, "seven_day_resets_at": reset,
-                                     "events": []}) + "\n")
-        text = self.report_text()
+        measured = {"pp_per_h": 0.30, "source": "measured", "reason": None, "intervals": 3,
+                    "pp": 3.0, "hours": 10.0, "resets_at": reset, "at": time.time(),
+                    "per": "working_hour"}
+        with mock.patch.object(shift.limits, "week_burn", return_value=measured):
+            text = self.report_text()
         self.assertIn("- week: 50 % used, resets ", text)
         self.assertIn("(in 48.0 h)", text)
-        self.assertIn("0.30 pp/h (measured over 10.0 h, 3 intervals)", text)
-        self.assertIn("customer's reserve: 0 working hours left \u00d7 1 pp/h (default; "
-                      "calendar no working days) = 0 pp", text)
-        self.assertIn("- week projection at the reset: 50 + 0.30 \u00d7 48.0 + 0 = 64.4 %", text)
+        self.assertIn("0.30 pp per working hour (measured over 10.0 working hours, 3 intervals)",
+                      text)
+        self.assertIn("working hours left: 0.0 (calendar no working days)", text)
+        self.assertIn("off-hours crew work: 0 pp (no night shift)", text)
+        self.assertIn("- week projection at the reset: 50 + 0.30 \u00d7 0.0 + 0 = 50.0 %", text)
         self.assertIn("the week allows: room for more", text)
+        self.assertNotIn("reserve", text)
 
     def test_report_week_fallback_named(self):
         self._no_working_days()

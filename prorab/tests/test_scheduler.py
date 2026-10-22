@@ -16,6 +16,7 @@ if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
 import _defaults  # noqa: E402
+import limits  # noqa: E402
 import scheduler  # noqa: E402
 
 D = _defaults.load()
@@ -356,9 +357,11 @@ class TestScheduler(unittest.TestCase):
         r = self._fits(hold=True, override=True)
         self.assertEqual((r["pace"], r["ok"]), (True, True))
 
-    def _week_plan(self, pace, used=50.0, journal=None, ov=None, burn=True):
+    def _week_plan(self, pace, used=50.0, journal=None, ov=None, burn=True, rates=None):
         d = json.loads(json.dumps(D))
-        d["week"]["calendar"]["days"] = []  # no reserve: projected = used + pace x hours
+        # every instant working (to the microsecond): W = the hours to the reset
+        d["week"]["calendar"] = {"days": list(limits._DAYS), "start": "00:00",
+                                 "end": "23:59:59.999999"}
         now = at(14)
         lim = {"five_hour": 10.0, "seven_day": used, "five_hour_resets_at": now + 3600,
                "five_hour_resets_in_s": 3600, "seven_day_resets_at": now + 48 * 3600}
@@ -367,16 +370,27 @@ class TestScheduler(unittest.TestCase):
         if wb is None:
             wb = {"pp_per_h": None, "resets_at": None}
         plan = scheduler.build_plan(j, d, now, lim, os.path.join(self.tmp.name, "none"),
-                                    (1.0, 8), week_burn=wb)
+                                    (1.0, 8), week_burn=wb, rates=rates)
         return plan, j
 
     def test_build_plan_reports_week_projection(self):
         plan, _ = self._week_plan(0.3)
-        self.assertAlmostEqual(plan["week"]["projected"], 64.4)
+        self.assertAlmostEqual(plan["week"]["projected"], 64.4)  # 50 + 0.3 x 48 working hours
+        self.assertEqual(plan["week"]["off_hours_pp"], 0.0)
+        self.assertNotIn("reserve_pp", plan["week"])
         self.assertEqual((plan["week"]["allows"], plan["week"]["basis"]), ("room", "projection"))
         normal, _ = self._week_plan(0.7)  # 83.6
         self.assertEqual(normal["week"]["allows"], "normal")
         self.assertEqual((plan["allowed"], plan["new"]), (normal["allowed"], normal["new"]))
+
+    def test_build_plan_night_shift_counts_off_hours(self):
+        j = self._journal(kv={"shift.night": "1", "shift.week_start": "50"})
+        rates = {"five_hour": {"usd_per_pp": 5.0, "source": "default"},
+                 "seven_day": {"usd_per_pp": None, "source": "unknown"}}
+        plan, _ = self._week_plan(0.0, used=53.0, journal=j, rates=rates)
+        self.assertEqual(plan["week"]["off_hours_pp"], 7.0)  # week_pp 10 less the rise 3
+        self.assertEqual(plan["week"]["off_hours_reason"], "the night shift's budget left")
+        self.assertAlmostEqual(plan["week"]["projected"], 60.0)
 
     def test_build_plan_week_alert_holds_uncleared(self):
         j = self._journal(labels={"s4": ["clearance:granted"]})

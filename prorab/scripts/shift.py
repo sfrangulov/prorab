@@ -422,12 +422,18 @@ def _calendar_text(cal):
     return "%s %s\u2013%s" % (span, cal["start"], cal["end"])
 
 
-def _week_lines(d, now, lim):
-    """The week by pace to its reset (R88): where it stands, the burn, the reserve, the
-    projection at the reset and what that allows; the fallback is named as such."""
+def _week_lines(d, now, lim, kv, sp, rates):
+    """The week by pace to its reset (R88, R101): where it stands, the burn per working hour,
+    the working hours left, the crew work outside them, the projection at the reset and what
+    that allows; the fallback is named as such."""
     wk = d["week"]
     burn = limits.week_burn(scheduler.readings(), d, now)
-    proj = limits.week_projection(lim, burn, d, now)
+    night = kv.get("shift.night") == "1"
+    start, week = kv.get("shift.week_start"), lim.get("seven_day")
+    rise = None if start in (None, "") or week is None else float(week) - float(start)
+    off = limits.off_hours(night, journal.budget(kv), rise, sp["usd"],
+                           rates["seven_day"].get("usd_per_pp"))
+    proj = limits.week_projection(lim, burn, d, now, off_hours=off)
     if proj["used"] is None:
         return ["- week: unknown (no projection; the unknown-week rules apply)"]
     at = proj["resets_at"]
@@ -440,19 +446,21 @@ def _week_lines(d, now, lim):
         lines.append("- week burn: none \u2014 fallback thresholds (%s)"
                      % (proj["reason"] or burn["reason"]))
     else:
-        lines.append("- week burn: %.2f pp/h (measured over %.1f h, %d intervals)"
-                     % (pace, burn["hours"], burn["intervals"]))
+        lines.append("- week burn: %.2f pp per working hour (measured over %.1f working "
+                     "hours, %d interval%s)"
+                     % (pace, burn["hours"], burn["intervals"],
+                        "" if burn["intervals"] == 1 else "s"))
     if at is None:
-        lines.append("- customer's reserve: unknown (reset time unknown)")
+        lines.append("- working hours left: unknown (reset time unknown)")
     else:
-        lines.append("- customer's reserve: %s working hours left \u00d7 %s pp/h (default; "
-                     "calendar %s) = %s pp"
-                     % (_g(proj["working_hours"]), _g(wk["reserve_pp_per_hour"]),
-                        _calendar_text(wk["calendar"]), _g(proj["reserve_pp"])))
+        lines.append("- working hours left: %.1f (calendar %s)"
+                     % (proj["working_hours"], _calendar_text(wk["calendar"])))
+    lines.append("- off-hours crew work: %s pp (%s)"
+                 % (_g(proj["off_hours_pp"]), proj["off_hours_reason"]))
     if proj["basis"] == "projection":
         lines.append("- week projection at the reset: %s + %.2f \u00d7 %.1f + %s = %.1f %%"
-                     % (_g(proj["used"]), pace, proj["hours_to_reset"], _g(proj["reserve_pp"]),
-                        proj["projected"]))
+                     % (_g(proj["used"]), pace, proj["working_hours"],
+                        _g(proj["off_hours_pp"]), proj["projected"]))
     else:
         lines.append("- week projection: none \u2014 fallback thresholds %s %% notify, %s %% "
                      "clearance only" % (_g(wk["fallback_notify_pct"]),
@@ -461,12 +469,12 @@ def _week_lines(d, now, lim):
     return lines
 
 
-def _limits_lines(d, now, lim):
+def _limits_lines(d, now, lim, kv, sp, rates):
     five = lim.get("five_hour")
     resets = lim.get("five_hour_resets_at")
     lines = ["- 5h window: %s%s" % ("unknown" if five is None else "%s %%" % _g(five),
                                    "" if resets is None else " (resets %s)" % _clock(resets))]
-    lines += _week_lines(d, now, lim)
+    lines += _week_lines(d, now, lim, kv, sp, rates)
     lines.append("- source: %s" % lim.get("source", "unknown"))
     night = journal.kv_get("shift.night") == "1"
     lines.append("- 5h thresholds in force: %s" % _cap_text(_cap(d, now, lim, night)))
@@ -560,7 +568,7 @@ def report(date, out_dir):
     if branches:
         section("Finished branches", branches)
     section("Budget", _budget(sp, d, kv, lim, rates, start, work_orders))
-    section("Limits", _limits_lines(d, now, lim))
+    section("Limits", _limits_lines(d, now, lim, kv, sp, rates))
     section("Incidents", _incidents(work_orders, start))
     free = _without_limits(d, kv, start, now)
     if free:

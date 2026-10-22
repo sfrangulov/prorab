@@ -203,6 +203,20 @@ def _week_notice(mem, proj):
     return fire
 
 
+def _off_hours(mem, kv_get, week, get_budget):
+    """N for the projection from what the poll already holds: the kv snapshot, the cached
+    spend and the cached seven-day rate. Nothing is read here."""
+    night = kv_get("shift.night") == "1"
+    budget = get_budget() if night else None
+    if budget is None:  # no night shift, or its budget unreadable
+        return limits.off_hours(False, {}, None, 0.0, None)
+    start = kv_get("shift.week_start")
+    rise = None if week is None or start in (None, "") else float(week) - float(start)
+    spent = ((mem.get("spend") or {}).get("value") or {}).get("usd", 0.0)
+    return limits.off_hours(night, budget, rise, spent,
+                            (mem.get("rate") or {}).get("week_usd_per_pp"))
+
+
 def _budget_item(item, spend, budget, week, kv):
     """`<item>=<spent>/<limit>` in dollars (or pp); the bare name when a figure is missing."""
     try:
@@ -338,7 +352,8 @@ def _poll(crews, d, mem, now, dp):
     if due("rate", d["rate"]["every_s"]):
         fresh = guard("rates", dp["rates"], d, now)
         if fresh is not None:
-            mem["rate"] = {"at": now}
+            mem["rate"] = {"at": now,
+                           "week_usd_per_pp": (fresh.get("seven_day") or {}).get("usd_per_pp")}
             extras["rate"] = fresh
     if due("week_burn", d["rate"]["every_s"]):
         fresh = guard("week_burn", dp["week_burn"], d, now)
@@ -483,7 +498,9 @@ def _poll(crews, d, mem, now, dp):
         if not isinstance(prev, list) or len(prev) != len(cur):
             prev = [0, False]  # the state of an older form reads as empty
         proj = guard("week", limits.week_projection, lim,
-                     (mem.get("week_burn") or {}).get("value"), d, now)
+                     (mem.get("week_burn") or {}).get("value"), d, now,
+                     off_hours=_off_hours(mem, kv_get, week,
+                                          lambda: guard("budget", dp["budget"], kv=kv_arg)))
         notice = proj is not None and _week_notice(mem, proj)
         if notice or any(c > p for c, p in zip(cur, prev)):
             line = "limit %s %s %s %s" % (_fmt(five), _fmt(week), source, cap["mode"])

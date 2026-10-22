@@ -27,7 +27,7 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(d["week"], {
             "alert_pct": 95, "clearance_pct": 100, "margin_pp": 20,
             "fallback_notify_pct": 50, "fallback_clearance_pct": 70,
-            "burn_horizon_s": 86400, "reserve_pp_per_hour": 1.0,
+            "burn_horizon_working_h": 10,
             "calendar": {"days": ["mon", "tue", "wed", "thu", "fri"],
                          "start": "09:00", "end": "19:00"}})
         with open(_defaults.DEFAULT_PATH, encoding="utf-8") as fh:

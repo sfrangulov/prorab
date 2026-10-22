@@ -263,7 +263,9 @@ def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None, week_burn=N
     import limits
     if week_burn is None:
         week_burn = limits.week_burn(readings(log), d, now)
-    week = limits.week_projection(lim, week_burn, d, now)
+    off = limits.off_hours(night, b, rise, spend["usd"],
+                           (rates.get("seven_day") or {}).get("usd_per_pp"))
+    week = limits.week_projection(lim, week_burn, d, now, off_hours=off)
     gate = not ov and week["allows"] in ("no_new_mass", "clearance_only")
     pause = []
     if not ov and week["allows"] == "clearance_only":

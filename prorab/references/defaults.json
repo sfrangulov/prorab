@@ -56,8 +56,7 @@
     "margin_pp": 20,
     "fallback_notify_pct": 50,
     "fallback_clearance_pct": 70,
-    "burn_horizon_s": 86400,
-    "reserve_pp_per_hour": 1.0,
+    "burn_horizon_working_h": 10,
     "calendar": {
       "days": ["mon", "tue", "wed", "thu", "fri"],
       "start": "09:00",

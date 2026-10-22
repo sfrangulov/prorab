@@ -81,8 +81,9 @@ class FakeBase(unittest.TestCase):
 
     def route_seq(self, prefix, bodies, exit_code=0):
         names = []
+        self._n = getattr(self, "_n", 0) + 1
         for i, b in enumerate(bodies):
-            n = "s%d_%d.txt" % (len(self.routes), i)
+            n = "s%d_%d.txt" % (self._n, i)
             with open(os.path.join(self.dir, n), "w", encoding="utf-8") as fh:
                 fh.write(b)
             names.append(n)

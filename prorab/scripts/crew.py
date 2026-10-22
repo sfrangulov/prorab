@@ -627,6 +627,9 @@ def accept(work_order, stage, act_text):
             "over": spend["over"]}
 
 
+_OPTION_ONE = re.compile(r"^\s*(?:\u276f\s*)?1\.\s")  # the first row of a numbered dialog
+
+
 def exit_dialog(visible):
     """The dialog Claude Code shows after `/exit`, read in the bottom block only: "worktree"
     (the keep-or-remove question of a `-w` session), "bg_work" (background work is running),
@@ -636,7 +639,7 @@ def exit_dialog(visible):
     wt = d["worktree_exit"]
     if wt["marker"] in low and any(wt["keep"] in ln for ln in low.splitlines()):
         return "worktree"
-    if d["exit_bg_work"] in low:
+    if d["exit_bg_work"] in low and any(_OPTION_ONE.match(ln) for ln in low.splitlines()):
         return "bg_work"
     return None
 
@@ -670,6 +673,8 @@ def _exit(name, pane, timeout_s, poll_s):
     the exit and cleared here on every result but "exited": the caller clears it after
     its follow-up."""
     mark = _kv(name, "exiting")
+    if not pane:
+        return "not_exited"
     if herdr_cli.bg_shells(_screen_of(pane)) > 0:
         return "bg_shells"
     journal.kv_set(mark, time.time())
@@ -816,19 +821,23 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
     act = "%s\n\n%s" % (act, _facts(worktree, work_order, base))
     spend = _spend_of(work_order, worktree)
     act = "%s\n\n%s" % (act, _spend_block(work_order, spend))
-    try:
-        journal.add_act(work_order, "handover", act)
-    except Exception as e:  # without a saved act the crew must not be exited
-        return {"status": "act_not_saved", "reason": str(e)}
+    pending = _kv(name, "handover_act")  # the act is saved once, however often the exit is refused
+    if journal.kv_get(pending) is None:
+        try:
+            journal.add_act(work_order, "handover", act)
+        except Exception as e:  # without a saved act the crew must not be exited
+            return {"status": "act_not_saved", "reason": str(e)}
+        journal.kv_set(pending, "1")
+
+    left = _exit(name, pane, timeout_s, poll_s)
+    if left in ("bg_shells", "bg_work"):  # nothing but the saved act is recorded
+        return {"status": "bg_shells", "bg_shells": herdr_cli.bg_shells(_screen_of(pane))}
+    if left != "exited":
+        return {"status": "restart_failed", "reason": "agent did not exit"}
+    journal.kv_clear(pending)
     journal.kv_set("handover.%s.last" % work_order, time.time())
     journal.set_spent(work_order, spend["usd"])  # the predecessor's dollars are in the worktree
     journal.spend(work_order, sessions=1)
-
-    left = _exit(name, pane, timeout_s, poll_s)
-    if left in ("bg_shells", "bg_work"):
-        return {"status": "bg_shells"}
-    if left != "exited":
-        return {"status": "restart_failed", "reason": "agent did not exit"}
     try:
         return _restart_after_exit(name, work_order, work_order_text, worktree, pane, spend,
                                    timeout_s, poll_s)

@@ -2103,6 +2103,33 @@ class TestExitDialog(CrewBase):
         self.assertEqual(r["status"], "resumed")
         self.assertEqual(self.keys(), ["pane send-keys w:p9 1"])
 
+    def test_refused_handover_exit_records_nothing(self):
+        self.listed(True)
+        self.screens(self.composer, fixture("exit", "bg_work.txt"))
+        self.route("pane get w:p9", self.shell)
+        self.assertEqual(self.handover()["status"], "bg_shells")
+        self.assertNotIn("handover.N1.last", self.j.kv)
+        self.assertEqual(self.j.spent, [])
+        # the second call exits: one act in all, one session, no handover_loop
+        self.listed(True, True, False)
+        self.screens(self.composer)
+        self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
+        self.assertEqual(self.handover()["status"], "restarted")
+        self.assertEqual(len(self.j.acts("N1", "handover")), 1)
+        self.assertEqual(self.j.spent, [("N1", 1, 0, 0)])
+        self.assertEqual(self.j.gates, [])
+
+    def test_bg_work_marker_needs_the_dialog_shape(self):
+        prose = "Background work is running in the other pane, I will wait.\n"
+        self.assertIsNone(crew.exit_dialog(prose))
+
+    def test_stop_without_a_pane_exits_nothing(self):
+        self.j.kv.pop("crew.a1.pane")
+        self.route("agent list", ok({"agents": [dict(agent_entry(), pane_id=None)]}))
+        self.assertEqual(crew.stop("a1", "N1", timeout_s=0.2, poll_s=0.01)["status"],
+                         "not_exited")
+        self.assertEqual(self.j.active, ["a1"])
+
     def test_exit_with_bg_shells_sends_nothing(self):
         self.listed(True)
         self.screens("bar · 1 shell\n")

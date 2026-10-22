@@ -990,7 +990,7 @@ def main(argv=None):
     sub.add_parser("foreman-session").add_argument("session")
     p = sub.add_parser("research")
     p.add_argument("key"); p.add_argument("--estimate-usd", type=float, required=True)
-    p.add_argument("--session", required=True); p.add_argument("--run-cwd")
+    p.add_argument("--session"); p.add_argument("--run-cwd")
     p = sub.add_parser("shift-spend")
     p.add_argument("--week-pp", type=float)
     p = sub.add_parser("lock")
@@ -1018,6 +1018,12 @@ def main(argv=None):
     if a.cmd == "ensure":
         ensure_db()
         return _emit({"ok": True})
+    if a.cmd == "research" and not a.session:
+        import herdr_cli  # lazy, like the lock checks
+        a.session = herdr_cli.own_session()
+        if not a.session:
+            _emit({"error": "foreman session unknown: pass --session"})
+            return 1
     ensure_db()
     if a.cmd == "work-order":
         est = {"usd": a.estimate_usd}

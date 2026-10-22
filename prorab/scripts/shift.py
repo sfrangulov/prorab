@@ -136,23 +136,11 @@ def start_caffeinate(pid):
         return os.posix_spawnp("caffeinate", args, os.environ, file_actions=actions)
 
 
-def _own_session():
-    """The session of the agent in $HERDR_PANE_ID, so the foreman's own spend counts."""
-    pane = os.environ.get("HERDR_PANE_ID")
-    if not pane:
-        return None
-    try:
-        a = herdr_cli.agent_by_pane(pane)
-    except herdr_cli.HerdrError:
-        return None
-    return ((a or {}).get("agent_session") or {}).get("value")
-
-
 def begin(d, night=False, foreman_session=None):
     now = time.time()
     problems = preflight(d, night)
     lim, rates = _rates_and_limits(d, now)
-    journal.begin_shift(lim.get("seven_day"), foreman_session or _own_session())
+    journal.begin_shift(lim.get("seven_day"), foreman_session or herdr_cli.own_session())
     journal.kv_set("shift.night", 1 if night else 0)
     machine = journal.machine()
     slots_dir = slots.default_slots_dir()

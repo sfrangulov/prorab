@@ -98,6 +98,19 @@ def agent_by_pane(pane_id, agents_list=None):
     return None
 
 
+def own_session():
+    """The session of the agent in $HERDR_PANE_ID (the foreman's own), else None: no pane,
+    no agent in it, no session shown, or herdr fails."""
+    pane = os.environ.get("HERDR_PANE_ID")
+    if not pane:
+        return None
+    try:
+        a = agent_by_pane(pane)
+    except HerdrError:
+        return None
+    return ((a or {}).get("agent_session") or {}).get("value")
+
+
 def valid_name(name):
     """herdr's agent name rule."""
     return isinstance(name, str) and NAME_RULE.match(name) is not None

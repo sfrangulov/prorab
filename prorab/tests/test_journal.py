@@ -584,6 +584,39 @@ class TestJournalDollars(JournalBase):
                          (0, True, True, 8.0))
         self.assertEqual(journal.research_items()["big"]["run_cwd"], "/home/user/projects/demo-app-r")
 
+    def set_agent(self, pane, session):
+        body = {"id": "cli:x", "result": {"agents": [
+            {"name": "prorab", "pane_id": pane, "agent_session": {"value": session}}]}}
+        with open(os.path.join(self.herdr_dir, "agents.json"), "w", encoding="utf-8") as fh:
+            json.dump(body, fh)
+        with open(os.path.join(self.herdr_dir, "routes.json"), "w", encoding="utf-8") as fh:
+            json.dump({"agent list": "agents.json"}, fh)
+
+    def test_cli_research_default_session_from_pane(self):
+        own = "/home/user/projects/demo-app"
+        self.start(foreman="fs1")
+        self.write(own, "fs1", [("f1", T0 + 10, 2.0)])
+        self.set_agent("w:p1", "fs1")
+        os.environ["HERDR_PANE_ID"] = "w:p1"
+        self.addCleanup(os.environ.pop, "HERDR_PANE_ID", None)
+        rc, out = self.run_cli("research", "k1", "--estimate-usd", "5")
+        self.assertEqual((rc, out["fits"]), (0, True))
+        self.assertEqual(journal.research_items()["k1"]["session"], "fs1")
+        # an explicit --session still wins
+        rc, out = self.run_cli("research", "k2", "--estimate-usd", "1", "--session", "fs2")
+        self.assertEqual(journal.research_items()["k2"]["session"], "fs2")
+
+    def test_cli_research_without_pane_needs_session(self):
+        os.environ.pop("HERDR_PANE_ID", None)
+        rc, out = self.run_cli("research", "k1", "--estimate-usd", "5")
+        self.assertEqual((rc, out), (1, {"error": "foreman session unknown: pass --session"}))
+        self.set_agent("w:p1", "fs1")  # a pane with no agent in it: still unknown
+        os.environ["HERDR_PANE_ID"] = "w:p2"
+        self.addCleanup(os.environ.pop, "HERDR_PANE_ID", None)
+        rc, out = self.run_cli("research", "k1", "--estimate-usd", "5")
+        self.assertEqual((rc, out), (1, {"error": "foreman session unknown: pass --session"}))
+        self.assertEqual(journal.research_items(), {})
+
     def test_begin_shift_lists_work_orders_closed_before(self):
         wt = "/home/user/projects/demo-app-%s"
         closed, still_open, no_time, late, by_act = (new_work_order(t) for t in "CODLA")

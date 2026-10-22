@@ -1,6 +1,7 @@
 """Journal CLI checks that never reach the real `bd`: argument errors exit before any bd call."""
 import contextlib
 import io
+import json
 import os
 import sys
 import unittest
@@ -36,6 +37,16 @@ class TestJournalCliArguments(unittest.TestCase):
         self.assertEqual(self.main("notify", "gate-9"), 2)
         self.assertEqual(self.main("notify", "gate-9", "--kind", "other"), 2)
         self.assertEqual(self.main("notify", "gate-9", "--kind", "routine"), 2)
+
+    def test_research_without_pane_needs_session_before_any_bd_call(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERDR_PANE_ID", None)
+            with contextlib.redirect_stdout(out):
+                rc = journal.main(["research", "k", "--estimate-usd", "5"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out.getvalue()),
+                         {"error": "foreman session unknown: pass --session"})
 
     def test_notify_kinds_are_the_four_urgent_ones(self):
         self.assertEqual(journal.URGENT_KINDS,

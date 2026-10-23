@@ -717,6 +717,7 @@ class TestHandoff(ShiftBase):
         self.assertIn("pane split w:p1 --direction right --no-focus --cwd %s"
                       % os.path.expanduser("~/projects/prorab"), self.calls())
         self.assertEqual(journal.kv_get("prorab:handoff"), "w:p9")  # the new foreman clears it
+        self.assertEqual(journal.bd(["show", res["bead"]])[0]["status"], "closed")
 
     def test_handoff_waits_for_lock_reconcile_and_monitor(self):
         self.routes_for_handoff()

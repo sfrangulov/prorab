@@ -368,7 +368,7 @@ def override(kv=None):
 
 def ready():
     out = []
-    for it in bd(["ready"]):
+    for it in bd(["ready", "-n", "0"]):  # bd ready lists 100 at most by default
         if WORK_ORDER_LABEL in (it.get("labels") or []) or it.get("parent"):
             out.append(it)
     return out

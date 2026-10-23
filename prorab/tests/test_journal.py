@@ -125,6 +125,13 @@ class TestJournal(JournalBase):
         self.assertIn(n, ids)
         self.assertNotIn(other, ids)
 
+    def test_ready_is_not_capped_at_one_hundred_beads(self):
+        for i in range(101):  # top priority, so a capped query would list only these
+            journal.bd(["create", "alien %d" % i, "-d", "x", "-p", "0", "--silent"], json_out=False)
+        n = new_work_order()
+        self.assertIn(n, [i["id"] for i in journal.ready()])
+        self.assertIn(n, journal.ready_work_orders())
+
     def test_acts_roundtrip(self):
         n = new_work_order()
         journal.add_act(n, "acceptance", "accepted")

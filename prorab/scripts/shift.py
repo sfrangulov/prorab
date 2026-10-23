@@ -212,6 +212,7 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
         if holder is not None and holder != caller_pane:
             missing = _unconfirmed(pane, now, alive)
             if not missing:
+                journal.bd(["close", bead])  # the takeover is confirmed: the bead is done
                 return {"status": "handed_over", "confirmed": ["lock", "reconcile", "monitor"],
                         "new_pane": pane, "bead": bead, "delivery": delivery}
         if time.monotonic() >= deadline:

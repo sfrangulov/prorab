@@ -566,9 +566,13 @@ def _poll(crews, d, mem, now, dp, stopping=False):
         hook_stop = facts.get("stop") and a.get("agent_status") in ("idle", "done")
         if a is not None:
             pane = a.get("pane_id")
-            need = (not hook_stop
-                    and (a.get("agent_status") != prev.get("status") or prev.get("shells")
-                         or prev.get("statusline")))
+            # an open consent episode is read again on each poll once herdr no longer shows the
+            # crew blocked (the dialog can still be up), until a read shows no prompt
+            consent_open = (name in ep["consent"]
+                            and a.get("agent_status") in ("idle", "done", "working"))
+            need = consent_open or (not hook_stop
+                                    and (a.get("agent_status") != prev.get("status")
+                                         or prev.get("shells") or prev.get("statusline")))
             if need and pane:
                 screen = read(pane)
         st = guard("state.%s" % name, dp["state"], name, a,
@@ -892,7 +896,8 @@ def _consent_watches(mem, kv, listed, screens, now, lock, d, dp, errors, ev, gua
                           and a.get("name") == name), None)
             holds = (agent is not None
                      and agent.get("agent_status") in ("idle", "done", "working")
-                     and not (pane in screens and herdr_cli.consent_dialog(screens[pane])))
+                     and not (pane in screens and herdr_cli.consent_dialog(screens[pane]))
+                     and name not in mem.get("consent", {}))   # no episode open for the crew
         else:
             holds = False   # api_key and unknown kinds are never inferred
         mark = [rec.get("since"), lock]

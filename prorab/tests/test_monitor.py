@@ -747,6 +747,21 @@ class TestHookEvents(PollBase):
         self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))
         self.assertEqual(self.poll(self.now + 360, names=("a1",)), ["settled a1 done"])
 
+    def test_stop_event_still_reads_the_screen_while_a_consent_episode_is_open(self):
+        dialog = fixture("consent", "mcp.txt")
+        self.prime()
+        self.s.screens["p1"] = dialog
+        self.s.crews["a1"] = st("blocked", pane="p1", ctx=ctx(10.0), consent="mcp")
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), ["consent a1 mcp"])
+        self.write_event("Stop", background_tasks=[])
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0), consent="mcp")
+        self.s.calls["visible"].clear()
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)), [])   # the prompt is still up
+        self.assertEqual(self.s.calls["visible"], ["p1"])
+        self.s.screens["p1"] = "a clean screen\n"
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))
+        self.assertEqual(self.poll(self.now + 270, names=("a1",)), ["settled a1 idle"])
+
     def test_stop_event_with_background_tasks_settles_nothing(self):
         self.prime()
         self.write_event("Stop", background_tasks=["npm run dev"])
@@ -775,6 +790,9 @@ class TestHookEvents(PollBase):
         self.write_event("Notification", notification_type="permission_prompt")
         self.assertEqual(self.poll(self.now + 180, names=("a1",)),
                          ["consent a1 tool_permission"])
+        # the prompt stays on screen: the episode stays open (a read that shows none ends it)
+        self.s.screens["p1"] = fixture("consent", "tool_permission.txt")
+        self.s.crews["a1"] = st("working", pane="p1", ctx=ctx(10.0), consent="tool_permission")
         self.write_event("Notification", notification_type="permission_prompt")
         self.assertEqual(self.poll(self.now + 270, names=("a1",)), [])   # once per episode
 
@@ -1769,6 +1787,69 @@ class TestConsentDone(TimerBase):
         self.s.crews["a1"] = st("working", pane="w:p9")
         self.s.screens["w:p9"] = "New MCP server found in .mcp.json\n1. Use this\n2. Not now\n"
         self.assertEqual(self.poll(names=("a1",)), [])
+
+    def test_consent_done_trust_not_before_the_exit_at_a_short_interval(self):
+        add_watch(self.s, "trust")
+        self.s.crews["x"] = st("idle", pane="w:p9", bg=1)   # the customer's claude
+        for i in range(6):
+            self.s.trust = i >= 3
+            self.assertEqual(self.poll(self.T + 2 * i), [], i)
+        del self.s.crews["x"]
+        self.assertEqual(self.poll(self.T + 12), ["consent_done wo-1 trust"])
+        self.assertEqual(self.poll(self.T + 14), [])
+
+    def _dialog_poll(self, status, screen, t):
+        self.s.screens["w:p9"] = screen
+        self.s.crews["a1"] = st(status, pane="w:p9", ctx=ctx(10.0),
+                                      consent=herdr_cli.consent_dialog(screen))
+        before = len(self.s.calls["visible"])
+        out = self.poll(self.T + t, names=("a1",))
+        return out, len(self.s.calls["visible"]) - before
+
+    def test_consent_done_dialog_not_before_the_prompt_is_left_at_a_short_interval(self):
+        add_watch(self.s, "mcp")
+        dialog = fixture("consent", "mcp.txt")
+        clean = "just a screen\n"
+        out = []
+        for t in (0, 2, 4):
+            out.append(self._dialog_poll("blocked", dialog, t)[0])
+        self.assertEqual(out, [["consent a1 mcp"], [], []])
+        self.assertEqual(self._dialog_poll("idle", dialog, 6)[0], [])
+        for t in (8, 10):
+            got, reads = self._dialog_poll("idle", dialog, t)
+            self.assertEqual((got, reads), ([], 1), t)
+        self.assertEqual(self._dialog_poll("idle", clean, 12)[0],
+                         ["consent_done wo-1 mcp", "settled a1 idle"])
+        self.assertEqual(self._dialog_poll("idle", clean, 14), ([], 0))
+
+    def test_main_consent_done_after_the_exit_at_a_short_interval(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        add_watch(self.s, "trust")
+        self.s.trust = True
+        self.s.crews = {"x": st("idle", pane="w:p9", bg=1)}   # the customer's claude
+        deps = self.s.deps()
+        deps["crews"] = lambda kv=None: []
+        start = 1_000_000.0
+        clock = {"t": start, "m": 50_000.0}
+
+        def fake_sleep(sec):
+            clock["t"] += sec
+            clock["m"] += sec
+            if clock["t"] >= start + 7:
+                self.s.crews.pop("x", None)
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"PRORAB_LOG_DIR": tmp.name, "HOME": tmp.name}), \
+                mock.patch.object(monitor.time, "sleep", fake_sleep), \
+                mock.patch.object(monitor.time, "time", lambda: clock["t"]), \
+                mock.patch.object(monitor.time, "monotonic", lambda: clock["m"]), \
+                redirect_stdout(buf):
+            monitor.main(["--interval", "2", "--heartbeat", "1000000"], deps=deps)
+            rows = monitor.readings()
+        self.assertEqual(buf.getvalue().strip(), "EVENT consent_done wo-1 trust")
+        self.assertEqual(clock["t"], start + 8)
+        for r in rows[:-1]:
+            self.assertNotIn("consent_done wo-1 trust", r.get("events") or [])
 
     def test_api_key_watch_never_fires(self):
         add_watch(self.s, "api_key")

@@ -3662,6 +3662,128 @@ class TestNewSiteTrust(CrewBase):
         self.assertTrue(crew._new_site_eligible(site, "N1"))
 
 
+class TestNewSite(CrewBase):
+    """`crew.py new_site`: a site from nothing (15.3), real git in a temporary projects dir."""
+
+    def setUp(self):
+        super().setUp()
+        self.projects = os.path.join(self.home, "projects")
+        os.makedirs(self.projects)
+        self.site = os.path.join(self.projects, "fresh-site")
+        p = mock.patch.object(crew, "_take_pane", return_value="w:p7")
+        self.take = p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.object(crew, "_new_site_trust",
+                              return_value={"status": "trusted", "pane_id": "w:p7"})
+        self.trust = p.start()
+        self.addCleanup(p.stop)
+
+    def make(self, path=None):
+        return crew.new_site(path or self.site, "N1", "w:p1")
+
+    def test_new_site_makes_a_repository_with_one_empty_commit(self):
+        r = self.make()
+        self.assertEqual(r["status"], "created")
+        self.assertEqual(r["site"], self.site)
+        self.assertEqual(r["pane_id"], "w:p7")
+        self.assertEqual(r["trust"], {"status": "trusted", "pane_id": "w:p7"})
+        self.assertEqual(git(self.site, "rev-list", "--all").split(), [r["commit"]])
+        self.assertEqual(git(self.site, "rev-parse", "HEAD").strip(), r["commit"])
+        self.assertEqual(git(self.site, "branch", "--show-current").strip(), "main")
+        self.assertEqual(git(self.site, "log", "-1", "--format=%s").strip(), "Start the site")
+        self.assertEqual(git(self.site, "show", "--stat", "--format=", "HEAD").strip(), "")
+        self.assertEqual(os.listdir(self.site), [".git"])
+
+    def test_new_site_refuses_an_existing_path(self):
+        os.makedirs(self.site)
+        self.assertEqual(self.make()["status"], "exists")
+        self.assertEqual(os.listdir(self.site), [])
+        self.trust.assert_not_called()
+
+    def test_new_site_second_call_for_the_same_path_is_exists_and_presses_nothing(self):
+        self.make()
+        self.trust.reset_mock()
+        self.take.reset_mock()
+        self.assertEqual(self.make()["status"], "exists")
+        self.trust.assert_not_called()
+        self.take.assert_not_called()
+
+    def test_new_site_refuses_outside_projects_dir(self):
+        other = os.path.join(self.dir, "elsewhere")
+        os.makedirs(other)
+        r = self.make(os.path.join(other, "site"))
+        self.assertEqual(r["status"], "outside_projects")
+        self.assertEqual(os.listdir(other), [])
+        r = self.make(os.path.join(self.projects, "sub", "site"))
+        self.assertEqual(r["status"], "outside_projects")
+        self.assertFalse(os.path.exists(os.path.join(self.projects, "sub")))
+
+    def test_new_site_refuses_a_bad_name(self):
+        for bad in ("-site", ".site", "a b", "a;b", "é"):
+            r = self.make(os.path.join(self.projects, bad))
+            self.assertEqual(r["status"], "bad_name", bad)
+            self.assertEqual(os.listdir(self.projects), [], bad)
+
+    def test_new_site_refuses_under_the_emergency_stop(self):
+        with mock.patch.object(crew, "emergency_stop", return_value=True):
+            self.assertEqual(self.make(), {"status": "emergency_stop"})
+        self.assertEqual(os.listdir(self.projects), [])
+        self.trust.assert_not_called()
+
+    def test_new_site_records_kv_and_act(self):
+        r = self.make()
+        key = "site.created.%s" % hashlib.sha1(os.path.realpath(self.site).encode()).hexdigest()[:16]
+        rec = json.loads(self.j.kv[key])
+        self.assertEqual(set(rec), {"path", "commit", "work_order", "at"})
+        self.assertEqual((rec["path"], rec["commit"], rec["work_order"]),
+                         (self.site, r["commit"], "N1"))
+        acts = self.j.acts("N1")
+        self.assertEqual(len(acts), 1)
+        self.assertEqual(acts[0], "[site] created %s empty: git init -b main, commit %s"
+                         % (self.site, r["commit"]))
+
+    def test_new_site_record_is_what_eligibility_reads(self):
+        self.make()
+        self.assertIsNone(crew._new_site_eligible(self.site, "N1"))
+
+    def test_new_site_calls_the_trust_step(self):
+        self.trust.return_value = {"status": "needs_trust", "pane_id": "w:p7", "reason": "x"}
+        r = self.make()
+        self.take.assert_called_once_with("N1", self.site, "w:p1")
+        self.trust.assert_called_once_with(self.site, "N1", "w:p7")
+        self.assertEqual(r["status"], "created")
+        self.assertEqual(r["trust"]["status"], "needs_trust")
+
+    def test_new_site_git_failure_removes_only_its_folder(self):
+        real = crew._git_soft
+        calls = []
+
+        def broken(args, cwd=None):
+            calls.append(args[0])
+            if args[0] == "commit":
+                return subprocess.CompletedProcess(["git"], 1, "", "no identity")
+            return real(args, cwd)
+        keep = os.path.join(self.projects, "keep")
+        os.makedirs(keep)
+        with mock.patch.object(crew, "_git_soft", broken):
+            r = self.make()
+        self.assertEqual(r["status"], "git_failed")
+        self.assertIn("no identity", r["detail"])
+        self.assertFalse(os.path.exists(self.site))
+        self.assertTrue(os.path.isdir(keep))
+        self.assertEqual(self.j.kv_all().keys() & {k for k in self.j.kv if k.startswith("site.")},
+                         set())
+        self.trust.assert_not_called()
+
+    def test_cli_new_site(self):
+        with mock.patch.object(crew, "new_site", return_value={"status": "created"}) as n, \
+                mock.patch("builtins.print"):
+            code = crew.main(["new_site", "/home/user/projects/x", "N1", "w:p1"])
+        self.assertEqual(code, 0)
+        n.assert_called_once_with(site_path="/home/user/projects/x", work_order="N1",
+                                  caller_pane="w:p1")
+
+
 class TestCli(unittest.TestCase):
     def test_cli_restart_takes_both_spellings(self):
         for flag in ("--caller_pane", "--caller-pane"):

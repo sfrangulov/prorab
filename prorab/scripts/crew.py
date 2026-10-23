@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Crew lifecycle: a Claude crew in a herdr pane inside a per-work-order git worktree.
 
-start, deliver, state, summary, handover, restart, limit wait, report check, evidence,
+new_site, start, deliver, state, summary, handover, restart, limit wait, report check, evidence,
 merge check, answer, pause, spend, acceptance, stop, cleanup.
-The foreman never merges, never pushes and never answers a trust/consent prompt.
+The foreman never merges, never pushes and never answers a trust/consent prompt, save the
+folder trust of the site `new_site` has just made empty.
 While the emergency-stop file exists, every command that starts a crew or sends to one is
 refused (`emergency_stop`); `pause` and the read-only commands stay available.
 """
@@ -14,6 +15,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -775,6 +777,50 @@ def _new_site_trust(site_path, work_order, pane):
     if site_trust(site_path, retry=True) is not True:
         return _trust_needs(pane, "trust not recorded")
     return {"status": "trusted", "pane_id": pane}
+
+
+_SITE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def new_site(site_path, work_order, caller_pane):
+    """Make a site that does not exist yet: the folder (`os.mkdir` without `exist_ok`, so the
+    call itself proves it is new), `git init -b main`, one empty commit "Start the site" in the
+    customer's git identity, the kv record and the act `_new_site_eligible` and the trust read,
+    the start pane, then the folder trust (`_new_site_trust`). Refuses under the emergency stop,
+    outside `crew.projects_dir` and for a bad name; a git failure removes the folder this call
+    made. Writes no file in the site."""
+    if emergency_stop():
+        return {"status": _STOPPED}
+    path = os.path.abspath(site_path.rstrip("/") or "/")
+    root = os.path.realpath(_defaults.load()["crew"]["projects_dir"])
+    if os.path.realpath(os.path.dirname(path)) != root:
+        return {"status": "outside_projects", "projects_dir": root}
+    if not _SITE_NAME.match(os.path.basename(path)):
+        return {"status": "bad_name", "name": os.path.basename(path)}
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        return {"status": "exists", "site": path}
+    steps = (["init", "-q", "-b", "main"],
+             ["commit", "-q", "--allow-empty", "-m", "Start the site"],
+             ["rev-parse", "HEAD"])
+    commit = ""
+    for step in steps:
+        p = _git_soft(step, path)
+        if p.returncode != 0:
+            shutil.rmtree(path, ignore_errors=True)
+            return {"status": "git_failed",
+                    "detail": "git %s: %s" % (step[0], (p.stderr or p.stdout).strip())}
+        commit = p.stdout.strip()
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    journal.kv_set(_site_key(os.path.realpath(path)),
+                   json.dumps({"path": path, "commit": commit, "work_order": work_order,
+                               "at": now}))
+    journal.add_act(work_order, "answer", "[site] created %s empty: git init -b main, commit %s"
+                    % (path, commit))
+    pane = _take_pane(work_order, path, caller_pane)
+    return {"status": "created", "site": path, "commit": commit,
+            "trust": _new_site_trust(path, work_order, pane), "pane_id": pane}
 
 
 # ---- sending, state ---------------------------------------------------------
@@ -1900,6 +1946,7 @@ def main(argv=None):
         return p
 
     cmd("start", "site_path", "work_order", "name", "caller_pane")
+    cmd("new_site", "site_path", "work_order", "caller_pane")
     cmd("name_for", "site", "n")
     cmd("send_work_order", "name", "text", work_order={})
     cmd("state", "name")

@@ -24,6 +24,7 @@ Path: <site path>
 
 ## Beads
 <the site's own .beads, or "none: crews run no bd here and never use a parent folder's beads database">
+A site made by `crew.py new_site` has no beads of its own: its passport says Beads "none" (as above), and that its first stage sets up the worktree (the site holds one empty commit and no file yet).
 
 ## Known quirks
 <What surprises a newcomer: flaky tests, slow steps, generated files, tools the site expects.>

@@ -27,7 +27,7 @@ Rules here, mechanics in scripts (`<file> …`: `python3 scripts/<file> …` fro
 1. Goal: `brainstorming` with the customer, once; no goal or criterion takes a stub as done.
 2. Plan: `writing-plans`; tasks become WOs and stages.
 3. Work orders (`references/work-order.md`): `journal.py work-order SITE TITLE --body TEXT --estimate-usd USD`, then `stage` per stage.
-4. Issuing: `scheduler.py plan`; `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"`; `journal.py stage-start STAGE`; FILE: the filled template plus `journal.py passport SITE`; `crew.py send_work_order NAME "$(cat FILE)" --work-order WO` (kept in `~/.cache/prorab/work-orders/`).
+4. Issuing: `scheduler.py plan`; new site: `crew.py new_site` first; `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"`; `journal.py stage-start STAGE`; FILE: the filled template plus `journal.py passport SITE`; `crew.py send_work_order NAME "$(cat FILE)" --work-order WO` (kept in `~/.cache/prorab/work-orders/`).
 5–8. Monitor, Acceptance, Context; `shift.py report`.
 
 ## The foreman executes nothing itself
@@ -36,7 +36,7 @@ All execution (code, docs, commits, installs) goes to a crew by WO, however smal
 
 ## Safety rules
 
-- Answer no consent prompt at all (section "Crew permissions"). Do not press "Upgrade". Do not push, open PRs, ship releases or merge into main.
+- Answer no consent prompt at all, save the trust `crew.py new_site` gives its own new site (section "Crew permissions"). Do not press "Upgrade". Do not push, open PRs, ship releases or merge into main.
 - Do not touch installed copies of skills or user configs, except the sensor with the customer's consent.
 - Sites' beads databases are only read: never initialised or edited. Crews keep them themselves, as the site's `CLAUDE.md` says.
 - Crews do not write to the foreman's office journal; everything goes through the foreman.

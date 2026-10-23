@@ -600,6 +600,168 @@ def _register_started(site_path, work_order, name, pane, session_id):
     return result
 
 
+# ---- the folder trust of a site this shift made -------------------------------
+# The one place where a script presses a key on a consent dialog. It is narrow on purpose:
+# only the folder `new_site` has just made empty, only Claude Code's own trust dialog for
+# exactly that path with "Yes, I trust this folder" selected, one Enter, every condition
+# checked again right before it, nothing pressed after it. `crew.trust_path` is only read.
+
+_TRUST_YES = "1. Yes, I trust this folder"
+_SELECTED_ROW = re.compile(r"^[>❯] +(.*)$")
+
+
+def _site_key(real):
+    """The kv key of a site `new_site` made: the first 16 hex of the sha1 of its real path."""
+    return "site.created.%s" % hashlib.sha1(real.encode("utf-8")).hexdigest()[:16]
+
+
+def _site_record(site_path):
+    """The kv record `new_site` wrote for this site (a dict), else None."""
+    raw = journal.kv_get(_site_key(os.path.realpath(site_path.rstrip("/") or "/")))
+    try:
+        rec = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _new_site_eligible(site_path, work_order):
+    """None when the folder is one `new_site` made for this work order and is still exactly
+    what it made: no link, directly under the projects root, a repository of its own with
+    the one recorded commit, no remote, nothing untracked or changed. Else the reason."""
+    path = site_path.rstrip("/") or "/"
+    if os.path.islink(path):
+        return "the site path is a link"
+    real = os.path.realpath(path)
+    try:
+        rec = _site_record(path)
+    except JournalError:
+        return "the journal cannot be read"
+    if rec is None:
+        return "no record that new_site made this folder"
+    recorded = rec.get("path")
+    if not isinstance(recorded, str) or recorded.rstrip("/") not in (path, real):
+        return "the record is for another path"
+    if rec.get("work_order") != work_order:
+        return "the record is for another work order"
+    commit = rec.get("commit")
+    if not isinstance(commit, str) or not commit.strip():
+        return "the record holds no commit"
+    root = os.path.realpath(_defaults.load()["crew"]["projects_dir"])
+    if os.path.dirname(real) != root:
+        return "the folder is not directly under the projects folder"
+    top = _git_soft(["rev-parse", "--show-toplevel"], real)
+    if top.returncode != 0 or os.path.realpath(top.stdout.strip()) != real:
+        return "the folder is not a repository of its own"
+    commits = _git_soft(["rev-list", "--all"], real)
+    if commits.returncode != 0 or commits.stdout.split() != [commit.strip()]:
+        return "the repository holds more than the recorded commit"
+    remotes = _git_soft(["remote"], real)
+    if remotes.returncode != 0 or remotes.stdout.strip():
+        return "the repository has a remote"
+    status = _git_soft(["status", "--porcelain", "--untracked-files=all"], real)
+    if status.returncode != 0 or status.stdout.strip():
+        return "the repository has changes or untracked files"
+    return None
+
+
+def _trust_name(site_path):
+    """The agent name of the trust session: `<base>-trust`, base as `name_for` builds it."""
+    base = name_for(site_path, 0)[:-len("-0")][:32 - len("-trust")].rstrip("-")
+    return "%s-trust" % (base or "c")
+
+
+def _trust_screen_problem(screen, site_path):
+    """None when the screen is Claude Code's folder-trust dialog for exactly this site with
+    "Yes, I trust this folder" selected, else why not. Read in the bottom block only; the
+    path must be a whole line of it; no marker of another dialog may share the block."""
+    if herdr_cli.not_logged_in(screen):
+        return "the screen is a login screen"
+    if herdr_cli.consent_dialog(screen) != "trust":
+        return "the screen is not the folder trust dialog"
+    block = herdr_cli.bottom_block(screen, _defaults.load()["screen"]["tail_lines"])
+    low = block.lower()
+    for kind, markers in herdr_cli.CONSENT_KINDS:
+        if kind != "trust" and any(m in low for m in markers):
+            return "the block also shows a %s dialog" % kind
+    lines = [ln.replace(" ", " ").strip() for ln in block.splitlines()]
+    path = site_path.rstrip("/") or "/"
+    if not any(ln in (path, os.path.realpath(path)) for ln in lines):
+        return "the dialog does not show the site path as a line of its own"
+    selected = [m.group(1).strip() for m in map(_SELECTED_ROW.match, lines) if m]
+    if selected != [_TRUST_YES]:
+        return "'Yes, I trust this folder' is not the selected option"
+    return None
+
+
+def _trust_needs(pane, reason):
+    return {"status": "needs_trust", "pane_id": pane, "reason": reason}
+
+
+def _new_site_trust(site_path, work_order, pane):
+    """Accept the folder trust of a site `new_site` just made, in `pane`, by its own dialog.
+    "trusted" | "needs_trust" (with a reason) | the consent result of another dialog |
+    `_STOPPED`. One Enter at most; see the section comment. No CLI of its own."""
+    if emergency_stop():
+        return {"status": _STOPPED}
+    reason = _new_site_eligible(site_path, work_order)
+    if reason:
+        return _trust_needs(pane, reason)
+    name = _trust_name(site_path)
+    if not herdr_cli.valid_name(name):
+        return _trust_needs(pane, "no valid agent name for the trust session")
+    commit = (_site_record(site_path) or {}).get("commit")
+    session_id = str(uuid.uuid4())
+    rec = journal.issue(work_order) or {}
+    journal.issue_set(work_order, rec.get("state") or "not_issued",
+                      sessions=list(rec.get("sessions") or []) + [session_id])
+    try:
+        herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
+                      + _claude_args(("--session-id", session_id)), timeout_s=90)
+    except herdr_cli.HerdrError as e:
+        if e.code not in ("agent_not_ready", "timeout"):
+            raise
+        screen = _screen_of(pane)
+        if herdr_cli.not_logged_in(screen) or herdr_cli.consent_dialog(screen) != "trust":
+            return (_consent_result(screen, pane) or {"status": "not_ready", "pane_id": pane})
+        problem = _trust_screen_problem(screen, site_path)
+        if problem:
+            return _trust_needs(pane, problem)
+        # everything again, as close to the key as it can be: the screen, the repository,
+        # the stop file
+        screen = _screen_of(pane)
+        problem = (_trust_screen_problem(screen, site_path)
+                   or _new_site_eligible(site_path, work_order)
+                   or ("the emergency stop is set" if emergency_stop() else None))
+        if problem:
+            return _trust_needs(pane, problem)
+        try:
+            herdr_cli.run_ack(["pane", "send-keys", pane, "enter"])
+        except herdr_cli.HerdrError as err:
+            herdr_cli.log_keys(pane, ["enter"], "new-site trust", crew=name, ok=False,
+                               error=str(err))
+            return _trust_needs(pane, "the key was not delivered")
+        herdr_cli.log_keys(pane, ["enter"], "new-site trust", crew=name)
+        journal.add_act(work_order, "answer",
+                        "[site] folder trust accepted by the foreman: %s, created empty by "
+                        "new_site (commit %s), pane %s, %s"
+                        % (site_path, commit, pane, time.strftime("%Y-%m-%dT%H:%M:%S%z")))
+        try:
+            ready = herdr_cli.wait_ready(name)
+        except herdr_cli.HerdrError:
+            ready = "timeout"
+        if ready not in ("idle", "done"):
+            after = _screen_of(pane)  # nothing more is pressed, whatever it shows
+            return _consent_result(after, pane) or {"status": "not_ready", "pane_id": pane}
+    left = _exit(name, pane, 60, 1)
+    journal.kv_clear(_kv(name, "exiting"))
+    if left != "exited":
+        return _trust_needs(pane, "the trust session did not exit: %s" % left)
+    if site_trust(site_path, retry=True) is not True:
+        return _trust_needs(pane, "trust not recorded")
+    return {"status": "trusted", "pane_id": pane}
+
+
 # ---- sending, state ---------------------------------------------------------
 
 def send_work_order(name, text, work_order=None):

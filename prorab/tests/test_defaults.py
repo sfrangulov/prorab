@@ -84,6 +84,7 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(d["crew"], {
             "ask_timeout_s": 600,
             "trust_path": os.path.expanduser("~/.claude.json"),
+            "projects_dir": os.path.expanduser("~/projects"),
             "trust_retry_s": 1,
             "exit_window_s": 300,
         })

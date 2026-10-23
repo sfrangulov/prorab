@@ -94,6 +94,7 @@
   "crew": {
     "ask_timeout_s": 600,
     "trust_path": "~/.claude.json",
+    "projects_dir": "~/projects",
     "trust_retry_s": 1,
     "exit_window_s": 300
   },

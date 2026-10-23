@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -3307,6 +3308,315 @@ class TestStopClosesPane(CrewBase):
         self.j.kv["crew.a1.delivered"] = "abc"
         crew.stop("a1", "N1")
         self.assertNotIn("crew.a1.delivered", self.j.kv)
+
+
+class TestNewSiteTrust(CrewBase):
+    """The one folder trust the foreman gives: the site `new_site` made, by its own dialog (15.2)."""
+    TRUST_NAME = "site-x-trust"
+
+    def setUp(self):
+        super().setUp()
+        self.projects = os.path.join(self.home, "projects")
+        os.makedirs(self.projects)
+        self.site = self.make_site("site-x")
+        self.commit = git(self.site, "rev-parse", "HEAD").strip()
+        self.record(self.site)
+        self.j.issue_set("N1", "not_issued", pane="w:p9")
+        self.write_trust([self.site])
+        self.route("agent start %s" % self.TRUST_NAME, err("agent_not_ready"), exit_code=1)
+        self.route("agent wait %s" % self.TRUST_NAME, ok({"agent": {"agent_status": "idle"}}))
+        self.route("agent prompt %s" % self.TRUST_NAME, ok({"agent": {"agent_status": "working"}}))
+        self.route("agent list", ok({"agents": []}))
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", cwd=self.site)}))
+        self.route("pane send-keys w:p9", "")
+        self.composer = fixture("composer", "empty.txt")
+
+    def make_site(self, name, parent=None):
+        site = os.path.join(parent or self.projects, name)
+        os.makedirs(site)
+        git(site, "init", "-q", "-b", "main")
+        git(site, "commit", "-q", "--allow-empty", "-m", "Start the site")
+        return site
+
+    def site_key(self, site):
+        return "site.created.%s" % hashlib.sha1(os.path.realpath(site).encode()).hexdigest()[:16]
+
+    def record(self, site, work_order="N1", commit=None, path=None):
+        self.j.kv[self.site_key(site)] = json.dumps({
+            "path": path or site, "commit": commit or self.commit, "work_order": work_order,
+            "at": "2026-10-23T10:00:00+0000"})
+
+    def dialog(self, site=None, selected=1):
+        text = fixture("consent", "trust.txt").replace("/home/user/projects/demo-app",
+                                                       site or self.site)
+        if selected == 2:
+            text = text.replace("> 1. Yes", "  1. Yes").replace("  2. No", "> 2. No")
+        return text
+
+    def screens(self, *texts):
+        self.route_seq("pane read w:p9 --source visible", list(texts))
+
+    def trust(self):
+        return crew._new_site_trust(self.site, "N1", "w:p9")
+
+    def keys(self):
+        return [c for c in self.calls() if c.startswith("pane send-keys")]
+
+    def stat_trust(self):
+        with open(self.trust_file(), "rb") as fh:
+            return fh.read(), os.stat(self.trust_file()).st_mtime_ns
+
+    def assert_no_key(self):
+        self.assertEqual(self.keys(), [])
+        self.assertEqual(self.keys_lines(), [])
+
+    def after_first_read(self, action):
+        """Run `action` once, right after the first screen read of the trust session."""
+        real, seen = herdr_cli.pane_visible, []
+
+        def read(pane):
+            text = real(pane)
+            if not seen:
+                seen.append(1)
+                action()
+            return text
+        return mock.patch.object(herdr_cli, "pane_visible", read)
+
+    # the key
+
+    def test_new_site_trust_presses_one_enter_on_its_own_dialog(self):
+        self.screens(self.dialog(), self.dialog(), self.composer)
+        r = self.trust()
+        self.assertEqual(r, {"status": "trusted", "pane_id": "w:p9"})
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 enter"])
+        (line,) = self.keys_lines()
+        self.assertEqual((line["keys"], line["why"], line["target"], line["ok"]),
+                         (["enter"], "new-site trust", "w:p9", True))
+        start = [c for c in self.calls() if c.startswith("agent start")]
+        self.assertEqual(len(start), 1)
+        self.assertTrue(start[0].startswith("agent start %s --kind claude --pane w:p9 -- "
+                                            "--session-id " % self.TRUST_NAME))
+        self.assertNotIn(" -w ", start[0])
+        calls = self.calls()
+        self.assertLess(calls.index(self.keys()[0]),
+                        next(i for i, c in enumerate(calls) if c.startswith("agent prompt")))
+        self.assertIn(start[0].split("--session-id ")[1], self.j.issue("N1")["sessions"])
+
+    def test_new_site_trust_other_path_presses_nothing(self):
+        self.screens(self.dialog(site="/home/user/projects/other"))
+        r = self.trust()
+        self.assertEqual((r["status"], r["pane_id"]), ("needs_trust", "w:p9"))
+        self.assertTrue(r["reason"])
+        self.assert_no_key()
+
+    def test_new_site_trust_prefix_path_presses_nothing(self):
+        # the site's path is a prefix of the dialog's: not the same line
+        self.screens(self.dialog(site=self.site + "-2"))
+        self.assertEqual(self.trust()["status"], "needs_trust")
+        self.assert_no_key()
+
+    def test_new_site_trust_path_inside_a_longer_line_presses_nothing(self):
+        text = fixture("consent", "trust.txt").replace("/home/user/projects/demo-app",
+                                                       "see " + self.site + " here")
+        self.screens(text)
+        self.assertEqual(self.trust()["status"], "needs_trust")
+        self.assert_no_key()
+
+    def test_new_site_trust_other_kind_presses_nothing(self):
+        self.screens(fixture("consent", "mcp.txt"))
+        self.assertEqual(self.trust(), {"status": "needs_consent", "kind": "mcp",
+                                        "pane_id": "w:p9"})
+        self.assert_no_key()
+
+    def test_new_site_trust_no_selected_yes_presses_nothing(self):
+        self.screens(self.dialog(selected=2))
+        r = self.trust()
+        self.assertEqual(r["status"], "needs_trust")
+        self.assert_no_key()
+
+    def test_new_site_trust_trust_text_with_another_dialog_presses_nothing(self):
+        self.screens(self.dialog() + "\n" + fixture("consent", "bypass_warning.txt"))
+        self.assertEqual(self.trust()["status"], "needs_trust")
+        self.assert_no_key()
+
+    def test_new_site_trust_second_dialog_after_enter_presses_nothing_more(self):
+        self.screens(self.dialog(), self.dialog(), fixture("consent", "bypass_warning.txt"))
+        self.route("agent wait %s" % self.TRUST_NAME, ok({"agent": {"agent_status": "blocked"}}))
+        r = self.trust()
+        self.assertEqual(r, {"status": "needs_consent", "kind": "bypass_warning",
+                             "pane_id": "w:p9"})
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 enter"])
+        self.assertEqual(len(self.keys_lines()), 1)
+        self.assertEqual(len(self.j.acts("N1", "answer")), 1)  # the Enter is still recorded
+        self.assertFalse([c for c in self.calls() if c.startswith("agent prompt")])
+
+    def test_new_site_trust_repo_changes_before_enter_presses_nothing(self):
+        self.screens(self.dialog(), self.dialog(), self.composer)
+
+        def dirty():
+            with open(os.path.join(self.site, "stray.txt"), "w") as fh:
+                fh.write("x\n")
+        with self.after_first_read(dirty):
+            r = self.trust()
+        self.assertEqual(r["status"], "needs_trust")
+        self.assertTrue(r["reason"])
+        self.assert_no_key()
+
+    def test_new_site_trust_emergency_stop_before_enter_presses_nothing(self):
+        self.screens(self.dialog(), self.dialog(), self.composer)
+        stop = crew._defaults.load()["emergency"]["stop_path"]
+
+        def halt():
+            os.makedirs(os.path.dirname(stop), exist_ok=True)
+            with open(stop, "w") as fh:
+                fh.write("stop\n")
+        with self.after_first_read(halt):
+            r = self.trust()
+        self.assertEqual(r["status"], "needs_trust")
+        self.assert_no_key()
+        self.assertEqual(self.j.acts("N1"), [])
+
+    def test_new_site_trust_under_the_emergency_stop_starts_nothing(self):
+        with mock.patch.object(crew, "emergency_stop", return_value=True):
+            self.assertEqual(self.trust(), {"status": crew._STOPPED})
+        self.assertEqual(self.calls_or_empty(), [])
+
+    def test_new_site_trust_failed_key_is_not_an_acceptance(self):
+        self.screens(self.dialog(), self.dialog(), self.composer)
+        self.route("pane send-keys w:p9", err("pane_not_found"), exit_code=1)
+        r = self.trust()
+        self.assertEqual(r["status"], "needs_trust")
+        (line,) = self.keys_lines()
+        self.assertFalse(line["ok"])
+        self.assertEqual(self.j.acts("N1"), [])
+
+    # the outcome
+
+    def test_new_site_trust_flag_missing_is_needs_trust(self):
+        self.write_trust(["/home/user/projects/other"])
+        self.screens(self.dialog(), self.dialog(), self.composer)
+        r = self.trust()
+        self.assertEqual((r["status"], r["reason"]), ("needs_trust", "trust not recorded"))
+        self.assertEqual(len(self.keys()), 1)
+
+    def test_new_site_trust_ready_without_dialog_presses_nothing(self):
+        self.route("agent start %s" % self.TRUST_NAME, ok({"agent": agent_entry(
+            name=self.TRUST_NAME)}))
+        self.screens(self.composer)
+        self.assertEqual(self.trust(), {"status": "trusted", "pane_id": "w:p9"})
+        self.assert_no_key()
+        self.assertEqual(self.j.acts("N1"), [])
+
+    def test_new_site_trust_ready_without_dialog_flag_missing(self):
+        self.write_trust([])
+        self.route("agent start %s" % self.TRUST_NAME, ok({"agent": agent_entry(
+            name=self.TRUST_NAME)}))
+        self.screens(self.composer)
+        r = self.trust()
+        self.assertEqual((r["status"], r["reason"]), ("needs_trust", "trust not recorded"))
+        self.assert_no_key()
+
+    def test_new_site_trust_records_the_act(self):
+        self.screens(self.dialog(), self.dialog(), self.composer)
+        self.trust()
+        (text,) = self.j.acts("N1", "answer")
+        self.assertTrue(text.startswith(
+            "[site] folder trust accepted by the foreman: %s, created empty by new_site "
+            "(commit %s), pane w:p9, " % (self.site, self.commit)), text)
+        self.assertEqual(self.j.issue("N1")["pane"], "w:p9")
+
+    def test_new_site_trust_never_writes_trust_path(self):
+        self.screens(self.dialog(), self.dialog(), self.composer)
+        before = self.stat_trust()
+        self.assertEqual(self.trust()["status"], "trusted")
+        self.assertEqual(self.stat_trust(), before)
+
+    def test_new_site_trust_trust_session_is_not_registered(self):
+        self.screens(self.dialog(), self.dialog(), self.composer)
+        self.trust()
+        self.assertEqual(self.j.active, [])
+        self.assertEqual([k for k in self.j.kv if k.startswith("crew.")], [])
+
+    def test_new_site_trust_name_is_valid_and_short(self):
+        for site in ("/p/Site X", "/p/9lives", "/p/" + "a" * 60, "/p/_"):
+            name = crew._trust_name(site)
+            self.assertTrue(herdr_cli.valid_name(name), name)
+            self.assertTrue(name.endswith("-trust"), name)
+
+    # eligibility
+
+    def test_new_site_trust_eligible_site(self):
+        self.assertIsNone(crew._new_site_eligible(self.site, "N1"))
+        self.assertIsNone(crew._new_site_eligible(self.site + "/", "N1"))
+
+    def test_new_site_trust_without_record_not_eligible(self):
+        del self.j.kv[self.site_key(self.site)]
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+        r = self.trust()
+        self.assertEqual((r["status"], r["pane_id"]), ("needs_trust", "w:p9"))
+        self.assertEqual(self.calls_or_empty(), [])
+
+    def test_new_site_trust_record_of_another_work_order_not_eligible(self):
+        self.record(self.site, work_order="N2")
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+
+    def test_new_site_trust_record_of_another_path_or_commit_not_eligible(self):
+        self.record(self.site, path=self.site + "-2")
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+        self.record(self.site, commit="0" * 40)
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+        self.j.kv[self.site_key(self.site)] = "not json"
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+
+    def test_new_site_trust_with_remote_not_eligible(self):
+        git(self.site, "remote", "add", "origin", "https://example.invalid/x.git")
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+
+    def test_new_site_trust_with_a_second_commit_not_eligible(self):
+        git(self.site, "commit", "-q", "--allow-empty", "-m", "more")
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+
+    def test_new_site_trust_with_a_second_branch_not_eligible(self):
+        git(self.site, "branch", "other")
+        git(self.site, "checkout", "-q", "other")
+        git(self.site, "commit", "-q", "--allow-empty", "-m", "more")
+        git(self.site, "checkout", "-q", "main")
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))  # rev-list --all sees both
+
+    def test_new_site_trust_with_untracked_file_not_eligible(self):
+        os.makedirs(os.path.join(self.site, "d"))
+        with open(os.path.join(self.site, "d", "f.txt"), "w") as fh:
+            fh.write("x\n")
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+
+    def test_new_site_trust_with_a_staged_change_not_eligible(self):
+        with open(os.path.join(self.site, "f.txt"), "w") as fh:
+            fh.write("x\n")
+        git(self.site, "add", "f.txt")
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
+
+    def test_new_site_trust_outside_projects_dir_not_eligible(self):
+        elsewhere = os.path.join(self.dir, "elsewhere")
+        os.makedirs(elsewhere)
+        nested = os.path.join(self.projects, "deeper")
+        os.makedirs(nested)
+        for parent in (elsewhere, nested):
+            site = self.make_site("site-y", parent=parent)
+            self.commit = git(site, "rev-parse", "HEAD").strip()
+            self.record(site)
+            self.assertTrue(crew._new_site_eligible(site, "N1"), parent)
+
+    def test_new_site_trust_symlinked_site_not_eligible(self):
+        link = os.path.join(self.projects, "link-x")
+        os.symlink(self.site, link)
+        self.record(link)
+        self.assertTrue(crew._new_site_eligible(link, "N1"))
+
+    def test_new_site_trust_folder_without_a_repo_of_its_own_not_eligible(self):
+        site = os.path.join(self.projects, "plain")
+        os.makedirs(site)
+        self.record(site)
+        self.assertTrue(crew._new_site_eligible(site, "N1"))
 
 
 class TestCli(unittest.TestCase):

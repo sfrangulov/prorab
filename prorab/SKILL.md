@@ -18,7 +18,7 @@ Rules here, mechanics in scripts (`<file> …`: `python3 scripts/<file> …` fro
 3. `shift.py reconcile` before any issuing.
 4. Offer the sensor and the hooks (`references/customer.md`) once each while off, naming gain, edit, undo; only an explicit yes acts.
 5. `monitor.py` in the background, never two; handle each event by its section, then restart it. `blind*`: tell the customer once.
-6. `shift.py preflight [--night]`, `begin [--night]` (not on a takeover), at night `shift.py caffeinate PID`; tell morning, thresholds, budget, rate, the emergency stop (`touch`/`rm ~/.cache/prorab/STOP`).
+6. `shift.py preflight [--night]`, `begin [--night]` (not on a takeover), at night `shift.py caffeinate PID`; tell what preflight names, the emergency stop (`touch`/`rm ~/.cache/prorab/STOP`).
 
 ## The cycle
 
@@ -26,7 +26,7 @@ Rules here, mechanics in scripts (`<file> …`: `python3 scripts/<file> …` fro
 2. Plan: `writing-plans`; tasks become WOs and stages.
 3. Work orders (`references/work-order.md`): `journal.py work-order SITE TITLE --body TEXT --estimate-usd USD`; `journal.py stage WO TITLE --file PATH --duration MIN`.
 4. Issuing: `scheduler.py plan`; `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"`; `journal.py stage-start STAGE`; FILE: the filled template plus `journal.py passport SITE`; `crew.py send_work_order NAME "$(cat FILE)" --work-order WO` (kept in `~/.cache/prorab/work-orders/`).
-5–8. Monitor (Start, 5), Acceptance, Handover (Context), Report (`shift.py report`).
+5–8. Monitor, Acceptance, Context; `shift.py report`.
 
 ## The foreman executes nothing itself
 
@@ -45,7 +45,7 @@ All execution (code, docs, commits, installs) goes to a crew by WO, however smal
 
 ## Scheduling
 
-- `plan`: issue in `order` (critical path), at most `new` (min of four bounds), only where `fits.<id>.ok`; a `budget`/`week` miss waits with a gate, any other hold without one, for a later `plan`.
+- `plan`: issue in `order`, at most `new`, only where `fits.<id>.ok`; a `budget`/`week` miss waits with a gate, any other hold without one, for a later `plan`.
 - Heavy runs only `slots.py run --kind heavy -- CMD`, set in the WO; over the stage limit, a clearance.
 - Crews share a site only with disjoint files. Small tasks: a crew's subagents; a new crew only for long work accepted alone.
 - **Thresholds** (`limit`; `scheduler.py cap`, measured percentages, never dollars left): from `no_new_mass` issue nothing, start no long run; at `stop` every crew, light work too, ends its step on `crew.py pause NAME` until the reset, then `resume`; at night say it keeps the customer's morning reserve. Week (`plan`): `notify`, `no_new_mass`: tell the customer once, no push; `clearance_only`: `pause` each crew in `week.pause`, gate its WO; `room`: fill `new` or propose a night or weekend shift, never start one; a `fallback` basis named so.
@@ -56,7 +56,7 @@ All execution (code, docs, commits, installs) goes to a crew by WO, however smal
 - Every WO has a dollar estimate; your research or one-off subagent too, before it starts: `journal.py research KEY --estimate-usd USD`. Refused: no start, no lowered estimate, no moving it into another.
 - `budget estimate:<id>`, or a crew asking for more: `pause` that crew; `journal.py wait WO 'spent $X of estimate $Y; asks $Z'`; others go on. `usd`/`week_pp`: nothing new, `pause` every crew, a gate. Never raise an estimate or grant dollars, even part; never tell a crew to skip review or tests.
 - Unit changed: tell each running crew at once its remaining estimate in it.
-- Rate ($ per pp of window or week): `limits.py rate`; defaults until the first estimate, always named defaults. Never invent a rate or cap. `machine.*` is machine protection, not budget; crew handover, `context.*`. Budget and rate go into the journal (`begin`, acts) and the morning report.
+- Rate ($ per pp of window or week): `limits.py rate`; defaults until the first estimate, always named defaults. Never invent a rate or cap. Budget and rate go into the journal (`begin`, acts) and the morning report.
 
 ## Acceptance
 
@@ -70,22 +70,22 @@ At `settled`: `crew.py summary NAME`, a report or a question.
 ## Answers
 
 - As the crews' human partner (`references/superpowers.md`) answer from the WO and journal, without the customer: `crew.py answer NAME --text TEXT` records it. Never reopen a recorded decision; goal, budget or taste: a gate and `pause`.
-- First `journal.py iterations STAGE approval --bump` (or `review`; limits `cycles.approval`, `cycles.review`); approve only by that file's rule. `"exceeded": true`: no approval, no rework list; `wait` naming the question and rounds; `pause`.
+- First `journal.py iterations STAGE approval --bump` (or `review`); approve only by that file's rule. `"exceeded": true`: no approval, no rework list; `wait` naming the question and rounds; `pause`.
 
 ## The customer (`references/customer.md`)
 
 - Language: the customer's in chat and the morning summary; English in files, WOs, acts, gates, crew messages.
 - Promise a time: `journal.py due set` at once; `due LABEL TEXT`: keep it, say so, `due clear LABEL`.
 - Reports: result and recommendation first, one to three lines; at most one decision question, last, one line; tables and numbers in a `reports/` file the reply names; other decisions wait.
-- Delegation words approve exactly your last stated figure or option, lifting no stop, safety rule or machine protection; quote them only in the approval act (`references/acts.md`).
+- Delegation words approve exactly your last stated figure or option, lifting no stop, safety rule or machine protection; quote them only in the approval act.
 - Panes: touch only yours, never the customer's; helpers in one named tab; none of yours empty or waiting unexplained; asked, one line each.
-- Stuck or working? Read last tool-call times; your subagent on its own background work past the figure: investigate, stop, incident; a crew: ask it.
 
 ## Crews in trouble
 
 - **Consent prompt** (`needs_consent`, `consent…`): press nothing, not "Yes", "No (recommended)", "Continue without", Esc; no workaround (configs, environment, `.envrc`, `.mcp.json`, another folder). `journal.py wait WO "consent prompt: <kind>"`, <kind> its glossary word; next WO; `api_key`: one urgent push. `needs_trust`: gate at once naming its pane: the customer runs `claude` there once, accepts, `/exit`s; a parent folder's trust never counts. On `consent_done WO KIND` never wait for chat or guess the choice: resume first (`start` again after `trust` or a start's dialog, same pane; a running crew: `crew.py state`), then, past the prompt, `journal.py consent done WO KIND`; one line to the customer.
 - **Delivery** only by `crew.py`, never `herdr agent prompt` or keys. `stalled`/`unconfirmed`: never send again (directly, after clearing, by restart), no Enter on an empty composer or a grey suggestion (nobody's input); `crew.py state NAME`: `consent` set: Consent prompt, else an incident, `journal.py wait WO "delivery unconfirmed"`, next WO. `blocked`: the same `state`.
 - **Limit screen** (`limit_screen`), no failure: `crew.py wait_limit NAME` (`unknown_limit_dialog`: a gate; never "Upgrade"), after the reset `resume`; session ended: `restart … limit_died`. `provider_error`: a gate at once, `provider error: <pattern>`.
+- **Login** (`login NAME`; `crew.py`: `login`, `needs_login`) is the customer's: never `/login`, `claude auth …` or `claude setup-token`, no key or text on a login screen, in any pane or your session; `journal.py wait WO "customer: login"`; one line to the customer, once; on their word, once: the stopped call again, else `resume` (`references/customer.md` "Logging in").
 - **Restart** (`crew.py restart`) only on `gone`/`hung`; a heavy-slot holder is never hung. `hung_unclear`: an incident note; no restart, Ctrl+C, Esc or slot release. `crew.py ask_predecessor`: by hand, for an unclear act, in the worktree, on its estimate.
 - **Push** only for `limit` (exhausted), `all_waiting`, `foreman_failure`, `api_key`: first `journal.py notify KEY --kind` that word, push only on `{"push": true}`; the rest: morning report, no reminders.
 - **`emergency_stop`**: issue, accept, answer, send, press nothing; tell the customer once what stands. `emergency_released`: name the paused crews; `resume` only on the customer's word.

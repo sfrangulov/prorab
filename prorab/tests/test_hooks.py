@@ -150,6 +150,14 @@ class TestGuard(HooksBase):
         self.assertEqual(self.decide("git   push\t--dry-run")[0], 2)  # whitespace folded
         self.assertEqual(self.decide("sudo  ls")[0], 2)
 
+    def test_guard_denies_logging_in(self):
+        for command in ("claude auth login", "claude /login", "claude setup-token",
+                        "claude logout", "claude login"):
+            code, message = self.decide(command)
+            self.assertEqual(code, 2, command)
+            self.assertTrue(message.startswith("prorab guard: claude "), command)
+            self.assertIn("is forbidden for crews", message)
+
     def test_guard_blocks_the_office_journal(self):
         office = os.path.expanduser("~/projects/prorab/.beads")
         for command in ("BEADS_DIR=%s bd list" % office, "bd --db ~/projects/prorab/.beads x",

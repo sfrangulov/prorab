@@ -26,14 +26,14 @@ import scheduler  # noqa: E402
 
 SETTLED = ("idle", "done", "blocked")
 SKIP_DIRS = frozenset((".git", "node_modules", ".venv", "__pycache__"))
-EVENT_ORDER = ("emergency_stop", "emergency_released", "gone", "consent", "provider_error",
+EVENT_ORDER = ("emergency_stop", "emergency_released", "gone", "login", "consent", "provider_error",
                "limit_screen", "limit", "blind", "blind_week", "budget", "due", "prorab_context",
                "compacted", "context_hard", "context_soft", "hung", "hung_unclear",
                "consent_done", "settled", "error")
 # What a poll under the emergency stop keeps of its own state: readings and spend are still
 # logged; every dedupe mark is dropped, so what happened meanwhile is raised after the release.
 STOP_KEEPS = ("last_reading", "spend", "rate", "week_burn", "poll_errors", "last_error",
-              "emergency", "due", "next_due")
+              "emergency", "due", "next_due", "awake", "awake_missing")
 
 
 # ---- log and state files --------------------------------------------------------------
@@ -119,6 +119,10 @@ def _own_context(d, listed=None):
     agents = herdr_cli.agents() if listed is None else listed
     me = next((a for a in agents if a.get("pane_id") == pane), None)
     sid = ((me or {}).get("agent_session") or {}).get("value")
+    if me and sid:
+        ctx = limits.sensor_context(sid, d)
+        if ctx:
+            return ctx
     if me and sid and me.get("cwd"):
         path = transcript.find_transcript(me["cwd"], sid)
         if path:
@@ -170,6 +174,11 @@ def _newest_age(worktree, now, max_files):
     return max(0.0, now - newest)
 
 
+def _hold_awake(seconds):
+    import shift    # `shift` imports `monitor`
+    return shift.start_caffeinate(timeout_s=seconds)
+
+
 def real_deps():
     import crew
     import journal
@@ -196,6 +205,8 @@ def real_deps():
         "crews": journal.crews,
         # the only deliveries a poll ever makes: the emergency stop's pauses
         "pause": crew.pause,
+        # a timed `caffeinate` (it ends by itself, nothing is ever killed)
+        "hold_awake": _hold_awake,
         # a file read in this process (the monitor's next poll reads again): no process
         "site_trust": lambda path: crew.site_trust(path, retry=False),
     }
@@ -298,6 +309,40 @@ def _exiting(mark, now, window_s):
         return 0 <= now - float(mark) < window_s
     except (TypeError, ValueError):
         return False
+
+
+def _pid_alive(pid):
+    """Whether process `pid` still exists. A child of this process that has exited is reaped
+    here (a zombie would still answer the signal)."""
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        return done == 0
+    except ChildProcessError:
+        pass        # not ours: ask the signal
+    except OSError:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:     # no permission to signal it: it exists
+        return True
+    return True
+
+
+def _awake_void(rec, now, min_left_s):
+    """Whether the awake hold recorded in `rec` must be started again: no usable record,
+    recorded before a reboot (its uptime clock is ahead of ours), little time left, or its
+    holder process is gone."""
+    if not isinstance(rec, dict):
+        return True
+    until, mono = rec.get("until"), rec.get("mono")
+    if not isinstance(until, (int, float)) or not isinstance(mono, (int, float)):
+        return True
+    if mono > time.monotonic() or until - now <= min_left_s:
+        return True
+    pid = rec.get("pid")
+    return isinstance(pid, int) and not isinstance(pid, bool) and not _pid_alive(pid)
 
 
 def _inside(path, root):
@@ -441,7 +486,8 @@ def _poll(crews, d, mem, now, dp, stopping=False):
     mon = d["monitor"]
     last = mem.setdefault("last", {})
     gone, settled, hung = (mem.setdefault(k, {}) for k in ("gone", "settled", "hung"))
-    ep = {k: mem.setdefault(k, {}) for k in ("consent", "provider_error", "limit_screen")}
+    ep = {k: mem.setdefault(k, {})
+          for k in ("consent", "provider_error", "limit_screen", "login")}
     ctx_mem = mem.setdefault("ctx", {})
     screens = {}        # pane id -> screen text read during this poll
     seen_crews = []     # (pane id, status) of every crew seen this poll
@@ -591,6 +637,18 @@ def _poll(crews, d, mem, now, dp, stopping=False):
                       "statusline": from_statusline or (prev.get("statusline", False)
                                                         and not read_now)}
 
+        # login: the error line (idle/done) or the login dialog (blocked), read on the status
+        # change; one event per episode, which a working crew ends
+        if status == "working":
+            ep["login"].pop(name, None)
+        elif read_now:
+            if st.get("login"):
+                if name not in ep["login"]:
+                    ep["login"][name] = True
+                    ev["login"].append("login %s" % name)
+            else:
+                ep["login"].pop(name, None)
+
         on_limit_screen = name in ep["limit_screen"]
         if status == "working":
             settled.pop(name, None)
@@ -620,12 +678,29 @@ def _poll(crews, d, mem, now, dp, stopping=False):
             hung.pop(name, None)
             if (status in SETTLED and (status == "blocked" or not bg or hook_stop)
                     and name not in ep["consent"] and name not in ep["provider_error"]
-                    and not on_limit_screen):
+                    and name not in ep["login"] and not on_limit_screen):
                 if hook_stop:   # the crew's own Stop event: no screen was needed
                     ev["settled"].append("settled %s done" % name)
                 elif settled.get(name) != status:
                     ev["settled"].append("settled %s %s" % (name, status))
                 settled[name] = status
+
+    # the machine stays awake while a crew is listed: a timed `caffeinate` the monitor renews
+    # when little is left, whichever process the monitor is (it ends on every event)
+    if seen_crews and not mem.get("awake_missing") and _awake_void(
+            mem.get("awake"), now, mon["awake_min_left_s"]):
+        try:
+            pid = dp["hold_awake"](mon["awake_hold_s"])
+        except FileNotFoundError as e:   # no caffeinate on this host: said once, never retried
+            mem["awake_missing"] = True
+            errors.setdefault("awake", "%s: %s" % (type(e).__name__, e))
+            ev["error"].append("error awake")
+        except Exception as e:
+            errors.setdefault("awake", "%s: %s" % (type(e).__name__, e))
+        else:
+            mem["awake"] = {"since": now, "until": now + mon["awake_hold_s"],
+                            "mono": time.monotonic(),
+                            "pid": pid if isinstance(pid, int) else None}
 
     # the limits come after the crews: a stale sensor falls back on the screens just read
     lim = guard("limits", dp["limits"], d, now, pane_texts=limit_texts)
@@ -838,6 +913,16 @@ def main(argv=None, *, deps=None):
         remove_mark(mark)
 
 
+def _stamped(entry, mono, mem):
+    """A log row with the uptime clock of its poll (a gap that this clock does not show is a
+    sleep) and, while an awake hold is recorded, its end."""
+    entry["mono"] = mono
+    rec = mem.get("awake")
+    if isinstance(rec, dict) and "until" in rec:
+        entry["awake_until"] = rec["until"]
+    return entry
+
+
 def _run(argv, deps):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--crew", action="append", default=[])
@@ -865,7 +950,7 @@ def _run(argv, deps):
         return names
 
     while True:
-        now = time.time()
+        now, mono = time.time(), time.monotonic()
         list_err = None
         sleep_for = mem.get("interval") or base
         try:
@@ -877,7 +962,8 @@ def _run(argv, deps):
             print("monitor: poll failed: %s" % e, file=sys.stderr)
             events = []
             mem["last_error"] = "poll"
-            append_log({"ts": now, "events": [], "errors": ["poll: %s" % e]})
+            append_log(_stamped({"ts": now, "events": [], "errors": ["poll: %s" % e]},
+                                mono, mem))
         else:
             if a.interval is not None:
                 sleep_for = a.interval
@@ -891,7 +977,7 @@ def _run(argv, deps):
             entry = dict(mem.get("last_reading") or {"ts": now}, events=events)
             if mem.get("poll_errors"):
                 entry["errors"] = mem["poll_errors"]
-            append_log(entry)
+            append_log(_stamped(entry, mono, mem))
         if events:
             for line in events:
                 print("EVENT %s" % line, flush=True)

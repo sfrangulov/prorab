@@ -1,0 +1,8 @@
+● Stage 1 is committed; waiting for the next message.
+> Continue
+  ⎿  Not logged in · Please run /login
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

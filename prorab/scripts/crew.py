@@ -42,12 +42,16 @@ DROP_MARKER = "[customer decision] drop"
 REPORT_SECTIONS = ("Summary", "Behaviour", "Changed files", "Verification", "Residual risks")
 CRITERION_STATUSES = ("done", "not applicable", "deferred", "blocked")
 OUTCOMES = ("delivered", "no changes", "blocked", "abandoned")
-RESTART_REASONS = ("gone", "hung", "limit_died")
+# `limit_died` and `login` (a restart that stopped at a login screen) are never counted
+RESTART_REASONS = ("gone", "hung", "limit_died", "login")
+UNCOUNTED_REASONS = ("limit_died", "login")
 
 
 def _consent_result(visible, pane):
-    """The start result for a consent screen (`needs_trust`, or `needs_consent` with the
-    kind), else None. Never sends keys."""
+    """The start result for a consent or login screen (`needs_login`, `needs_trust`, or
+    `needs_consent` with the kind), else None. Never sends keys."""
+    if herdr_cli.not_logged_in(visible):
+        return {"status": "needs_login", "pane_id": pane}
     kind = herdr_cli.consent_dialog(visible)
     if kind is None:
         return None
@@ -203,7 +207,7 @@ def deliver(name, text, work_order=None):
     """The only way a message reaches a crew. One line goes by `send`, several lines by a
     file named in one line. "stalled" is recovered without a second `prompt` (Enter only
     when the composer holds our line). Returns "accepted" | "blocked" | "stalled" |
-    "unconfirmed" | "consent:<kind>"."""
+    "unconfirmed" | "consent:<kind>" | "login"."""
     work_order = work_order or journal.kv_get(_kv(name, "work_order"))
     text = text.strip("\n")
     if "\n" in text:
@@ -214,7 +218,10 @@ def deliver(name, text, work_order=None):
     if result in ("blocked", "stalled", "unconfirmed"):
         # a consent prompt may be why the line did not land: name its kind (nothing is
         # pressed, nothing is re-sent)
-        kind = herdr_cli.consent_dialog(herdr_cli.agent_visible(name))
+        visible = herdr_cli.agent_visible(name)
+        if herdr_cli.not_logged_in(visible):
+            return "login"
+        kind = herdr_cli.consent_dialog(visible)
         if kind:
             return "consent:%s" % kind
     return result
@@ -569,11 +576,17 @@ def _transcript_for(name, a=None, kv=None):
     return _transcript_path(a) if a else None
 
 
+def _context(session_id, path, d):
+    """The session's context: the status-line tap's file first, else the transcript."""
+    return limits.sensor_context(session_id, d) or (
+        transcript.context_status(path, d) if path else None)
+
+
 def gone_state():
     """The state of a crew whose agent is not listed."""
     return {"status": "gone", "name_ok": False, "bg_shells": 0, "consent": None,
-            "limit_screen": None, "provider_error": None, "exit_dialog": None, "ctx": None,
-            "session_id": None, "cwd": None, "pane_id": None}
+            "limit_screen": None, "provider_error": None, "exit_dialog": None, "login": None,
+            "ctx": None, "session_id": None, "cwd": None, "pane_id": None}
 
 
 def state(name, a=None, *, read_screen=True, screen=None, kv=None):
@@ -590,11 +603,12 @@ def state(name, a=None, *, read_screen=True, screen=None, kv=None):
     if a is None:
         return gone_state()
     path = _transcript_for(name, a, kv)
+    session_id = (a.get("agent_session") or {}).get("value")
     out = {"status": a.get("agent_status"), "name_ok": a.get("name") == name,
            "bg_shells": None, "consent": None, "limit_screen": None, "provider_error": None,
-           "exit_dialog": None,
-           "ctx": transcript.context_status(path, _defaults.load()) if path else None,
-           "session_id": (a.get("agent_session") or {}).get("value"),
+           "exit_dialog": None, "login": None,
+           "ctx": _context(session_id, path, _defaults.load()),
+           "session_id": session_id,
            "cwd": a.get("cwd"), "pane_id": a.get("pane_id")}
     if screen is not None or read_screen:
         if screen is None:
@@ -605,7 +619,8 @@ def state(name, a=None, *, read_screen=True, screen=None, kv=None):
                    consent=herdr_cli.consent_dialog(screen),
                    limit_screen=limits.limit_screen(screen, d),
                    provider_error=limits.provider_error(screen, d),
-                   exit_dialog=exit_dialog(screen))
+                   exit_dialog=exit_dialog(screen),
+                   login=herdr_cli.not_logged_in(screen))
     return out
 
 
@@ -937,13 +952,14 @@ def restart(name, work_order, work_order_text, reason, caller_pane=None,
             timeout_s=60, poll_s=1):
     """Bring a crew back in its worktree: `--resume` the old session while its context is
     below soft, else a new session with the work order and every handover act. `limit_died`
-    (the session ended while waiting for a limit reset) is not counted as a restart."""
+    (the session ended while waiting for a limit reset) and `login` (the restart stopped at
+    a login screen) are not counted as restarts."""
     if emergency_stop():
         return {"status": _STOPPED}
     if reason not in RESTART_REASONS:
         raise ValueError("unknown restart reason %r (expected one of %s)"
                          % (reason, ", ".join(RESTART_REASONS)))
-    counted = reason != "limit_died"
+    counted = reason not in UNCOUNTED_REASONS
     if counted:
         n = int(journal.kv_get("restarts.%s" % work_order) or 0) + 1
         if n > _defaults.load()["monitor"]["max_restarts"]:
@@ -1003,7 +1019,7 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
 
     old = journal.kv_get(_kv(name, "session"))
     path = _transcript_for(name)
-    ctx = transcript.context_status(path, _defaults.load()) if path else None
+    ctx = _context(old, path, _defaults.load())
     files = ("--add-dir", _files_dir())
     if old and not (ctx and ctx["soft"]):
         failed, screen = _start_session(name, pane, (("--resume", old), files), True)
@@ -1105,6 +1121,8 @@ def answer(name, choice=None, text=None):
         return _STOPPED
     work_order = journal.kv_get(_kv(name, "work_order"))
     visible = herdr_cli.agent_visible(name)
+    if herdr_cli.not_logged_in(visible):
+        return "login"     # logging in is the customer's: nothing is sent or pressed
     kind = herdr_cli.consent_dialog(visible)
     if kind is not None:
         return "consent:%s" % kind

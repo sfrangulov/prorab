@@ -18,7 +18,9 @@ import _defaults  # noqa: E402
 import journal  # noqa: E402
 import monitor  # noqa: E402
 import transcript  # noqa: E402
-from prorab.tests.test_herdr_cli import FakeBase, ok  # noqa: E402
+import herdr_cli  # noqa: E402
+import limits  # noqa: E402
+from prorab.tests.test_herdr_cli import FakeBase, fixture, ok  # noqa: E402
 
 D = _defaults.load()
 D["week"]["calendar"]["days"] = []  # no working days: W = 0, projected = used + the off-hours work
@@ -71,7 +73,9 @@ class Stub:
         self.week_burn = burn()
         self.calls = {"agents": 0, "kv_all": 0, "visible": [], "limit_panes": None,
                       "spend": [], "rates": [], "week_burn": [], "pause": [],
-                      "site_trust": []}
+                      "site_trust": [], "awake": []}
+        self.awake_error = None    # an exception the hold raises
+        self.awake_pid = os.getpid()   # the process the hold "started": alive
         self.trust = False   # what `site_trust` answers: a value, or a dict by site path
         self.pause_error = {}   # crew name -> exception raised once by the pause
 
@@ -111,6 +115,20 @@ class Stub:
         self.calls["pause"].append(name)
         return "accepted"
 
+    def _hold_awake(self, seconds):
+        self.calls["awake"].append(seconds)
+        if self.awake_error:
+            raise self.awake_error
+        return self.awake_pid
+
+    def _state(self, name, a, read_screen=True, screen=None, kv=None):
+        if a is None:
+            return st("gone")
+        crew_state = self.crews[name]
+        if screen is not None and "login" not in crew_state:
+            crew_state = dict(crew_state, login=herdr_cli.not_logged_in(screen))
+        return crew_state
+
     def _site_trust(self, site):
         self.calls["site_trust"].append(site)
         return self.trust.get(site, False) if isinstance(self.trust, dict) else self.trust
@@ -122,8 +140,7 @@ class Stub:
 
     def deps(self):
         return {
-            "state": lambda n, a, read_screen=True, screen=None, kv=None: (
-                self.crews[n] if a is not None else st("gone")),
+            "state": self._state,
             "agents": self._agents,
             "kv_all": self._kv_all,
             "visible": self._visible,
@@ -143,6 +160,7 @@ class Stub:
             "crews": lambda kv=None: [],
             "pause": self._pause,
             "site_trust": self._site_trust,
+            "hold_awake": self._hold_awake,
         }
 
 
@@ -178,6 +196,11 @@ class PollBase(unittest.TestCase):
         return monitor.poll(list(names), self.d, self.mem, self.now if now is None else now,
                             deps=self.s.deps())
 
+
+
+def shutil_copy(src, dst):
+    with open(src, encoding="utf-8") as a, open(dst, "w", encoding="utf-8") as b:
+        b.write(a.read())
 
 
 class TestMonitorPoll(PollBase):
@@ -522,6 +545,18 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(), ["context_soft b1 65.0 (statusline)"])
         self.s.statusline["SL"] = 85.0
         self.assertEqual(self.poll(), ["context_hard b1 85.0 (statusline)"])
+
+    def test_statusline_context_reads_only_the_model_line(self):
+        deps = self.s.deps()
+        deps["statusline_ctx"] = limits.statusline_context
+        self.s.crews["b1"] = st(ctx=None)
+        self.s.screens["p"] = fixture("statusline_wrapped.txt")
+        out = monitor.poll(["b1"], self.d, self.mem, self.now, deps=deps)
+        self.assertEqual(out, ["context_soft b1 45.0 (statusline)"])
+        self.s.screens["p"] = fixture("statusline_wrapped_no_context.txt")   # its wk row: 81 %
+        self.mem.clear()
+        out = monitor.poll(["b1"], self.d, self.mem, self.now, deps=deps)
+        self.assertEqual(out, [])
 
     def test_prorab_context_once(self):
         self.s.own = ctx(61.0, soft=True)
@@ -1019,6 +1054,216 @@ class TestMonitorG(PollBase):
         self.assertEqual(json.loads(json.dumps(self.mem["last_reading"]))["seven_day"], None)
 
 
+class TestAwake(PollBase):
+    def awake(self):
+        return self.s.calls["awake"]
+
+    def test_awake_hold_starts_once_while_a_crew_is_listed(self):
+        for i in range(3):
+            self.poll(self.now + 90 * i)
+        self.assertEqual(self.awake(), [1200])
+        self.assertEqual(self.mem["awake"]["until"], self.now + 1200)
+        self.assertEqual(self.mem["awake"]["since"], self.now)
+
+    def test_awake_hold_renewed_when_little_is_left(self):
+        self.poll()
+        self.poll(self.now + 599)      # 601 s are left
+        self.assertEqual(self.awake(), [1200])
+        self.poll(self.now + 600)      # 600 s are left
+        self.assertEqual(self.awake(), [1200, 1200])
+        self.assertEqual(self.mem["awake"]["until"], self.now + 600 + 1200)
+        self.poll(self.now + 690)
+        self.assertEqual(self.awake(), [1200, 1200])
+
+    def test_awake_hold_void_after_a_reboot(self):
+        self.mem["awake"] = {"since": self.now - 300, "until": self.now + 900, "mono": 5000.0}
+        with mock.patch.object(monitor.time, "monotonic", return_value=100.0):
+            self.poll()
+        self.assertEqual(self.awake(), [1200])
+        self.assertEqual(self.mem["awake"]["mono"], 100.0)
+
+    def test_awake_hold_gone_with_its_process(self):
+        self.poll()
+        self.assertEqual(self.awake(), [1200])
+        self.poll(self.now + 90)        # its holder is alive (this process)
+        self.assertEqual(self.awake(), [1200])
+        self.assertEqual(self.mem["awake"]["pid"], os.getpid())
+        with mock.patch.object(monitor.os, "kill", side_effect=ProcessLookupError):
+            self.poll(self.now + 180)   # the holder was killed: renewed at once
+        self.assertEqual(self.awake(), [1200, 1200])
+
+    def test_awake_hold_for_an_idle_crew(self):
+        self.s.crews["b1"] = st("idle")
+        for i in range(3):
+            self.poll(self.now + 90 * i)
+        self.assertEqual(self.awake(), [1200])
+
+    def test_no_awake_hold_without_a_listed_crew(self):
+        self.poll(names=())
+        self.s.crews["b1"] = st("gone")
+        self.poll(self.now + 90)
+        self.s.crews["b1"] = st("working")
+        self.s.kv["crew.b1.exiting"] = str(self.now + 180)
+        self.poll(self.now + 180)
+        self.assertEqual(self.awake(), [])
+        self.assertNotIn("awake", self.mem)
+
+    def test_awake_hold_kept_through_the_emergency_stop(self):
+        with open(self.d["emergency"]["stop_path"], "w"):
+            pass
+        for i in range(3):
+            self.poll(self.now + 90 * i)
+        self.assertEqual(self.awake(), [1200])
+        self.assertEqual(self.mem["awake"]["until"], self.now + 1200)
+
+    def test_failed_awake_hold_is_a_failing_source(self):
+        self.s.awake_error = OSError("spawn failed")
+        self.assertEqual(self.poll(), [])
+        self.assertTrue(any(e.startswith("awake: OSError") for e in self.mem["poll_errors"]))
+        self.assertNotIn("awake", self.mem)
+        self.assertEqual(self.poll(self.now + 90), [])
+        self.assertEqual(self.poll(self.now + 180), ["error awake"])
+        self.assertEqual(self.poll(self.now + 270), [])
+        self.assertEqual(len(self.awake()), 4)    # tried again on every poll
+        self.s.awake_error = None
+        self.poll(self.now + 360)
+        self.assertEqual(self.mem["awake"]["until"], self.now + 360 + 1200)
+
+    def test_no_caffeinate_raises_error_awake_once(self):
+        self.s.awake_error = FileNotFoundError("caffeinate")
+        self.assertEqual(self.poll(), ["error awake"])
+        self.assertTrue(self.mem["awake_missing"])
+        for i in range(1, 6):
+            self.assertEqual(self.poll(self.now + 90 * i), [])
+        restarted = json.loads(json.dumps(self.mem))    # the state file, read by a new monitor
+        self.assertEqual(monitor.poll(["b1"], self.d, restarted, self.now + 900,
+                                      deps=self.s.deps()), [])
+        self.assertEqual(self.awake(), [1200])
+
+    def test_log_rows_carry_the_uptime_clock_and_the_hold(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        clock = {"t": 1_000_000.0, "m": 50_000.0}
+
+        def fake_sleep(sec):
+            clock["t"] += sec
+            clock["m"] += sec
+        with mock.patch.dict(os.environ, {"PRORAB_LOG_DIR": tmp.name, "HOME": tmp.name}), \
+                mock.patch.object(monitor.time, "sleep", fake_sleep), \
+                mock.patch.object(monitor.time, "time", lambda: clock["t"]), \
+                mock.patch.object(monitor.time, "monotonic", lambda: clock["m"]), \
+                redirect_stdout(io.StringIO()):
+            monitor.main(["--crew", "b1", "--interval", "2", "--heartbeat", "10"],
+                         deps=self.s.deps())
+            rows = monitor.readings()
+        self.assertGreaterEqual(len(rows), 4)
+        for i, r in enumerate(rows):
+            self.assertEqual(r["mono"], 50_000.0 + 2 * i)
+            self.assertEqual(r["awake_until"], 1_000_000.0 + 1200)
+        self.assertEqual(self.awake(), [1200])
+
+
+class TestLogin(PollBase):
+    def setUp(self):
+        super().setUp()
+        self.s.crews = {"a1": st("working", pane="p1", ctx=ctx(10.0))}
+        self.poll(names=("a1",))
+        self.t = 0
+
+    def go(self, status, screen=None, names=("a1",), **kw):
+        self.t += 90
+        self.s.crews["a1"] = st(status, pane="p1", ctx=ctx(10.0), **kw)
+        if screen is not None:
+            self.s.screens["p1"] = fixture(*screen.split("/"))
+        return self.poll(self.now + self.t, names=names)
+
+    def test_login_raises_one_event_per_episode(self):
+        self.assertEqual(self.go("idle", "login/not_logged_in.txt"), ["login a1"])
+        self.assertEqual(self.go("idle"), [])
+        self.assertEqual(self.go("idle"), [])
+
+    def test_login_presses_nothing(self):
+        self.s.calls["visible"].clear()
+        self.go("idle", "login/not_logged_in.txt")
+        self.assertEqual(self.s.calls["visible"], ["p1"])   # the read of the status change
+        self.assertEqual(self.s.calls["pause"], [])
+
+    def test_login_episode_ends_when_the_crew_works_again(self):
+        self.go("idle", "login/not_logged_in.txt")
+        self.assertEqual(self.go("working"), [])
+        self.assertEqual(self.go("idle", "login/after_resume.txt"), ["settled a1 idle"])
+
+    def test_login_again_after_a_failed_resume(self):
+        self.go("idle", "login/not_logged_in.txt")
+        self.go("working")
+        self.assertEqual(self.go("idle", "login/not_logged_in.txt"), ["login a1"])
+
+    def test_login_dialog_on_a_blocked_crew(self):
+        self.assertEqual(self.go("blocked", "login/select_method.txt"), ["login a1"])
+        self.assertEqual(self.go("blocked"), [])
+
+    def test_login_on_two_crews(self):
+        self.s.crews = {"a1": st("working", pane="p1", ctx=ctx(10.0)),
+                        "b1": st("working", pane="p2", ctx=ctx(10.0)),
+                        "c1": st("working", pane="p3", ctx=ctx(10.0)),
+                        "d1": st("gone", pane="p4")}
+        names = ("a1", "b1", "c1", "d1")
+        self.assertEqual(self.poll(self.now + 90, names=names), ["gone d1"])
+        for pane in ("p1", "p2"):
+            self.s.screens[pane] = fixture("login", "not_logged_in.txt")
+        self.s.screens["p3"] = fixture("consent", "mcp.txt")
+        self.s.crews["a1"] = st("idle", pane="p1", ctx=ctx(10.0))
+        self.s.crews["b1"] = st("idle", pane="p2", ctx=ctx(10.0))
+        self.s.crews["c1"] = st("blocked", pane="p3", ctx=ctx(10.0), consent="mcp")
+        self.assertEqual(self.poll(self.now + 180, names=names),
+                         ["login a1", "login b1", "consent c1 mcp"])
+
+    def test_login_with_hooks_still_reads_the_screen(self):
+        # a failed turn fires StopFailure, never Stop: no Stop record, the status change is read
+        self.s.kv.update({"hooks.enabled": "1",
+                          "crew.a1.session": "11111111-2222-3333-4444-555555555555"})
+        self.assertEqual(self.go("idle", "login/not_logged_in.txt"), ["login a1"])
+
+
+class TestOwnContext(unittest.TestCase):
+    SID = "sess-own"
+    CWD = "/home/user/projects/demo-app"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.d = json.loads(json.dumps(D))
+        self.sensor = os.path.join(self.tmp.name, "usage")
+        os.makedirs(self.sensor)
+        self.d["limits"]["sensor_dir"] = self.sensor
+        env = mock.patch.dict(os.environ, {"HOME": self.tmp.name, "HERDR_PANE_ID": "w:p1"})
+        env.start()
+        self.addCleanup(env.stop)
+        path = transcript.transcript_path(self.CWD, self.SID, self.tmp.name)
+        os.makedirs(os.path.dirname(path))
+        shutil_copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
+                                 "session_main.jsonl"), path)
+        self.listed = [{"name": "foreman", "pane_id": "w:p1", "cwd": self.CWD,
+                        "agent_session": {"value": self.SID}}]
+
+    def sensor_file(self, age=0):
+        path = os.path.join(self.sensor, self.SID + ".json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"context_window": {"context_window_size": 1000000, "current_usage": {
+                "input_tokens": 100000, "output_tokens": 0}}}, fh)
+        if age:
+            os.utime(path, (time.time() - age, time.time() - age))
+
+    def test_own_context_prefers_the_sensor(self):
+        self.sensor_file()
+        ctx_own = monitor._own_context(self.d, listed=self.listed)
+        self.assertEqual((ctx_own["source"], ctx_own["window"], ctx_own["pct"]),
+                         ("sensor", 1000000, 10.0))
+        self.sensor_file(age=self.d["limits"]["sensor_max_age_s"] + 60)
+        ctx_own = monitor._own_context(self.d, listed=self.listed)
+        self.assertEqual(ctx_own["source"], "transcript")
+
+
 class TestNewestAge(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1217,6 +1462,33 @@ class TestProcessBudget(FakeBase):
                 out.write(src.read())
             self.route("pane read w:p%d --source visible" % i, "screen %d\nno status line\n" % i)
         self.mem = {}
+        # a stub caffeinate that logs its arguments and stays up (never the real one)
+        self.caff_log = os.path.join(base, "caffeinate.log")
+        caff = os.path.join(bindir, "caffeinate")
+        with open(caff, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho \"$*\" >> \"%s\"\nexec sleep 30\n" % self.caff_log)
+        os.chmod(caff, 0o755)
+        self.addCleanup(self._reap_holders)
+
+    def _reap_holders(self):
+        import signal
+        pid = (self.mem.get("awake") or {}).get("pid")
+        if isinstance(pid, int):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+
+    def _caffeinate_calls(self):
+        deadline = time.time() + 5
+        while not os.path.exists(self.caff_log) and time.time() < deadline:
+            time.sleep(0.05)
+        try:
+            with open(self.caff_log, encoding="utf-8") as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
 
     def _agents(self, status):
         self.route("agent list", ok({"agents": [
@@ -1258,6 +1530,21 @@ class TestProcessBudget(FakeBase):
         self.assertEqual(self._procs() - before, 5)  # agents, kv, three screens
         self.assertIsNone(self.mem["last_reading"]["seven_day"])
 
+
+    def test_process_budget_awake_hold(self):
+        self._fresh_sensor()
+        self._agents("working")
+        monitor.poll(list(self.names), self.d, self.mem, time.time())
+        self.assertEqual(self._caffeinate_calls(), ["-is -t 1200"])
+        with open(os.path.join(self.dir, "calls.log"), encoding="utf-8") as fh:
+            self.assertIn("agent list", fh.read())
+        with open(self.bd_log, encoding="utf-8") as fh:
+            self.assertIn("kv list", fh.read())
+        for _ in range(2):
+            before = self._procs()
+            monitor.poll(list(self.names), self.d, self.mem, time.time())
+            self.assertEqual(self._procs() - before, 2)   # agent list + kv list only
+        self.assertEqual(self._caffeinate_calls(), ["-is -t 1200"])
 
     def test_process_budget_with_timers_and_a_trust_watch(self):
         site = "/home/user/projects/demo-app"

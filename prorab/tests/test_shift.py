@@ -233,6 +233,20 @@ class TestBegin(ShiftBase):
             self.assertEqual(fh.read().strip(), "-is -w 4242")
 
 
+    def test_start_caffeinate_argv(self):
+        with mock.patch.object(shift.os, "posix_spawnp", return_value=7) as spawn:
+            self.assertEqual(shift.start_caffeinate(timeout_s=1200), 7)
+            self.assertEqual(spawn.call_args[0][1], ["caffeinate", "-is", "-t", "1200"])
+            shift.start_caffeinate(pid=42)
+            self.assertEqual(spawn.call_args[0][1], ["caffeinate", "-is", "-w", "42"])
+            shift.start_caffeinate(42, 60.5)
+            self.assertEqual(spawn.call_args[0][1],
+                             ["caffeinate", "-is", "-w", "42", "-t", "60"])
+            with self.assertRaises(ValueError):   # never an unbounded hold
+                shift.start_caffeinate()
+            self.assertEqual(spawn.call_count, 3)
+
+
 class TestReport(ShiftBase):
     def test_report_never_copies_approval_words(self):
         self.start_shift()
@@ -317,6 +331,80 @@ class TestReport(ShiftBase):
         self.start_shift()
         self.write_log([{"ts": T0 + 60, "events": []}])
         self.assertNotIn("## Emergency stop", self.report_text())
+
+    def sleep_section(self, date="2026-10-22"):
+        text = self.report_text(date)
+        if "## Machine sleep" not in text:
+            return None
+        return text.split("## Machine sleep")[1].split("\n## ")[0]
+
+    def test_report_names_a_machine_sleep(self):
+        self.start_shift()
+        self.write_log([{"ts": T0, "mono": 1000, "events": []},
+                        {"ts": T0 + 90, "mono": 1090, "events": []},
+                        {"ts": T0 + 39780, "mono": 1180, "events": []},
+                        {"ts": T0 + 39870, "mono": 1270, "events": []}])
+        text = self.report_text()
+        section = text.split("## Machine sleep")[1].split("\n## ")[0]
+        self.assertGreater(text.index("## Machine sleep"), text.index("## Incidents"))
+        self.assertEqual([ln for ln in section.splitlines() if ln.startswith("- ")], [
+            "- slept about 11 h 00 min between the monitor's polls at %s and %s; "
+            "the monitor held no awake hold" % (shift._clock(T0 + 90), shift._clock(T0 + 39780))])
+
+    def test_report_sleep_after_the_emergency_stop_section(self):
+        self.start_shift()
+        self.write_log([{"ts": T0 + 600, "mono": 10, "events": ["emergency_stop a1"]},
+                        {"ts": T0 + 660, "mono": 70, "events": ["emergency_released a1"]},
+                        {"ts": T0 + 7260, "mono": 130, "events": []}])
+        text = self.report_text()
+        self.assertGreater(text.index("## Machine sleep"), text.index("## Emergency stop"))
+        self.assertIn("slept about 1 h 49 min", text)
+
+    def test_report_sleep_with_the_awake_hold_on(self):
+        self.start_shift()
+        self.write_log([{"ts": T0, "mono": 1000, "events": []},
+                        {"ts": T0 + 90, "mono": 1090, "awake_until": T0 + 1200, "events": []},
+                        {"ts": T0 + 39780, "mono": 1180, "events": []}])
+        self.assertIn("; the monitor's awake hold was on, so something put the machine to "
+                      "sleep (the lid, the power button or a sleep command)",
+                      self.sleep_section())
+
+    def test_report_short_sleep_is_named_in_minutes(self):
+        self.start_shift()
+        self.write_log([{"ts": T0, "mono": 1000, "events": []},
+                        {"ts": T0 + 1830, "mono": 1090, "events": []}])
+        self.assertIn("- slept about 29 min between", self.sleep_section())
+
+    def test_report_long_gap_without_sleep_is_no_sleep(self):
+        self.start_shift()
+        self.write_log([{"ts": T0, "mono": 1000, "events": []},
+                        {"ts": T0 + 10800, "mono": 1000 + 10800, "events": []}])
+        self.assertIsNone(self.sleep_section())
+
+    def test_report_sleep_needs_the_uptime_clock(self):
+        self.start_shift()
+        self.write_log([{"ts": T0, "events": []}, {"ts": T0 + 39780, "events": []}])
+        self.assertIsNone(self.sleep_section())
+        self.write_log([{"ts": T0, "mono": 5000, "events": []},
+                        {"ts": T0 + 39780, "mono": 100, "events": []}])   # a reboot
+        self.assertIsNone(self.sleep_section("2026-10-23"))
+
+    def test_report_merges_a_sleep_broken_by_short_wakes(self):
+        self.start_shift()
+        self.write_log([{"ts": T0, "mono": 0, "events": []},
+                        {"ts": T0 + 3690, "mono": 90, "events": []},
+                        {"ts": T0 + 3990, "mono": 390, "events": []},
+                        {"ts": T0 + 7680, "mono": 480, "events": []}])
+        lines = [ln for ln in self.sleep_section().splitlines() if ln.startswith("- ")]
+        self.assertEqual(lines, ["- slept about 2 h 00 min between the monitor's polls at %s "
+                                 "and %s; the monitor held no awake hold"
+                                 % (shift._clock(T0), shift._clock(T0 + 7680))])
+
+    def test_report_without_sleep_has_no_section(self):
+        self.start_shift()
+        self.write_log([{"ts": T0 + 60, "mono": 60, "events": []},
+                        {"ts": T0 + 150, "mono": 150, "events": []}])
+        self.assertNotIn("## Machine sleep", self.report_text())
 
     def test_second_report_of_a_date_never_overwrites_the_first(self):
         self.start_shift()

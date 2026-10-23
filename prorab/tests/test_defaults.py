@@ -76,7 +76,8 @@ class TestDefaults(unittest.TestCase):
             {"tail_lines": 15, "resume_failed": "no conversation found with session id",
              "worktree_exit": {"marker": "exiting worktree session",
                                "keep": "1. keep worktree"},
-             "exit_bg_work": "background work is running"},
+             "exit_bg_work": "background work is running",
+             "login": [["not logged in", "please run /login"], ["select login method"]]},
         )
         self.assertEqual(d["cycles"], {"approval": 6, "review": 10, "report_fix": 3})
         self.assertEqual(d["handover"], {"min_interval_s": 600})
@@ -122,14 +123,17 @@ class TestDefaults(unittest.TestCase):
             {"interval_s": 90, "heartbeat_s": 1200, "hung_s": 1800, "max_restarts": 2,
              "error_polls": 3, "interval_max_s": 300, "backoff_factor": 2,
              "hung_scan_max_files": 20000, "limit_panes": 2,
-             "spend_every_s": 300, "reset_grace_s": 120},
+             "spend_every_s": 300, "reset_grace_s": 120,
+             "awake_hold_s": 1200, "awake_min_left_s": 600, "sleep_gap_s": 120,
+             "sleep_merge_s": 600},
         )
         self.assertEqual(d["timeouts"], {"bd_s": 30, "git_s": 60, "herdr_s": 60})
         self.assertEqual(d["hooks"], {
             "deny": ["git push", "gh pr create", "gh pr merge", "gh release", "bd init",
                      "sudo ", "brew install", "git reset --hard", "git clean -f",
                      "git checkout main", "git checkout master", "git switch main",
-                     "git switch master"],
+                     "git switch master", "claude auth", "claude login", "claude logout",
+                     "claude setup-token", "claude /login"],
             "events_dir": os.path.expanduser("~/.cache/prorab/events"),
             "events_retention_s": 86400,
             "settings_path": os.path.expanduser("~/.cache/prorab/crew-settings.json"),
@@ -138,6 +142,29 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(d["emergency"],
                          {"stop_path": os.path.expanduser("~/.cache/prorab/STOP")})
         self.assertNotIn("polish_cmd", d)
+
+    def test_awake_and_login_defaults(self):
+        d = _defaults.load()
+        mon = d["monitor"]
+        self.assertEqual((mon["awake_hold_s"], mon["awake_min_left_s"], mon["sleep_gap_s"],
+                          mon["sleep_merge_s"]), (1200, 600, 120, 600))
+        self.assertEqual(d["screen"]["login"],
+                         [["not logged in", "please run /login"], ["select login method"]])
+        for entry in ("claude auth", "claude login", "claude logout", "claude setup-token",
+                      "claude /login"):
+            self.assertIn(entry, d["hooks"]["deny"])
+
+    def test_no_script_logs_in(self):
+        # a guard: no script ever comes to type a login; the markers live in defaults.json
+        scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "scripts")
+        for name in sorted(os.listdir(scripts)):
+            if not os.path.isfile(os.path.join(scripts, name)):
+                continue
+            with open(os.path.join(scripts, name), encoding="utf-8") as fh:
+                text = fh.read()
+            for word in ("/login", "auth login", "setup-token"):
+                self.assertNotIn(word, text, "%s holds %r" % (name, word))
 
     def test_price_table_families(self):
         prices = _defaults.load()["cost"]["prices"]

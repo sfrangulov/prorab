@@ -1,6 +1,6 @@
 # The foreman with the customer
 
-The detail of the section "The customer" of `SKILL.md`, and the offers of its step "Start and takeover" 4.
+The detail of the section "The customer" of `SKILL.md`, the offers of its step "Start and takeover" 4, and its "Login" item of "Crews in trouble".
 
 ## Promised times
 
@@ -84,6 +84,23 @@ When the customer changes the unit in which a budget or the estimates are counte
 ```
 The budget is now counted in US dollars at API prices: wo-12 has $7.40 of its $18.00 estimate left; report progress in dollars.
 ```
+
+## Logging in
+
+Logging in is the customer's own act on their own account, never yours or a crew's.
+
+- On `login NAME` from the monitor, or `login` or `needs_login` from `crew.py`, press, type and run nothing: no `/login`, `claude auth`, `claude login`, `claude logout` or `claude setup-token`, and no key or text on a login screen, in your own session, in a crew's pane or through a crew.
+- `journal.py wait WO "customer: login"` for each such work order: one gate each; a second `login` while its gate is open adds none. Keep the `"gate"` id of its answer: no watch closes this gate; you close it on the customer's word.
+- Tell the customer once, in one line, which crews stand and that logging in is theirs, for example:
+
+```
+docs-site-1 and api-service-2 stand: Claude Code is not logged in there. Logging in is yours; tell me when you have.
+```
+
+- No push of its own: a night where every work order waits is covered by `all_waiting`.
+- On the customer's word that they have logged in, first close each gate: `journal.py consent done WO login --by customer --gate GATE`. Then, once per work order, repeat the very call that stopped: after a start's `needs_login`, `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"` (it reuses its pane); after a restart's or a handover's, `crew.py restart NAME WO "$(cat FILE)" login`, FILE the work order (`login` is not counted as a restart); any other `crew.py` call that returned `login`, that call. `crew.py resume NAME` only for a crew that was already working on its work order (the event `login NAME`).
+- The customer's word is the trigger, never the screen: after a login made in another session the error line stays in a crew's pane until its next turn.
+- `login` or `needs_login` again after that means the gate again, with no second message.
 
 ## Offers
 

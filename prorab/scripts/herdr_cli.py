@@ -234,13 +234,40 @@ def composer_text(visible, tail_lines=None):
     marker (`❯`, or `>` in older versions) that sits directly between two horizontal
     rules; a choice-dialog row such as `❯ 1. Yes` is never a composer."""
     lines = bottom_block(visible, _tail_lines(tail_lines)).splitlines()
+    found = _find_composer(lines)
+    return None if found is None else found[1]
+
+
+def _find_composer(lines):
+    """(index of the composer line, its text) in the lines of a bottom block, else None."""
     for i in range(len(lines) - 2, 0, -1):
         if not (_COMPOSER_RULE.match(lines[i - 1]) and _COMPOSER_RULE.match(lines[i + 1])):
             continue
         m = _COMPOSER.match(lines[i].strip())
         if m and not _CHOICE_ROW.match(m.group(1) or ""):
-            return (m.group(1) or "").strip()
+            return i, (m.group(1) or "").strip()
     return None
+
+
+def status_rows(visible, tail_lines=None):
+    """The non-empty lines below the composer's lower rule in the bottom block (the status
+    line, which may wrap onto several rows, then the footer); [] with no composer."""
+    lines = bottom_block(visible, _tail_lines(tail_lines)).splitlines()
+    found = _find_composer(lines)
+    return [] if found is None else lines[found[0] + 2:]
+
+
+def not_logged_in(visible, tail_lines=None):
+    """Whether the bottom block shows a login screen: the last line holding every marker of
+    one group of `screen.login` (case-insensitive) with no line of Claude's own output (`●`)
+    below it, which would make it history."""
+    groups = _defaults.load()["screen"]["login"]
+    lines = bottom_block(visible, _tail_lines(tail_lines)).splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        low = lines[i].lower()
+        if any(all(m in low for m in group) for group in groups):
+            return not any(ln.strip().startswith("●") for ln in lines[i + 1:])
+    return False
 
 
 _OPTION = re.compile(r"^\s*(?:❯\s*)?(\d+)\.\s+(.*)$")
@@ -256,7 +283,7 @@ def choice_state(visible):
     before the last option), up to the footer hint. Numbered lines printed above
     the dialog do not become options.
     """
-    if consent_dialog(visible) is not None:
+    if consent_dialog(visible) is not None or not_logged_in(visible):
         return None
     if "Enter to select" not in visible or "↑/↓ to navigate" not in visible:
         return None

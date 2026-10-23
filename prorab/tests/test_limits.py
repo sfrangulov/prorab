@@ -276,10 +276,72 @@ class TestLimits(unittest.TestCase):
         self.assertEqual(r["five_hour"], 40.0)
         self.assertIsNone(r["seven_day"])
 
+    COMPOSER = "done\n" + "─" * 40 + "\n❯ \n" + "─" * 40 + "\n"
+
     def test_context_is_first_bar(self):
-        self.assertEqual(limits.statusline_context(self.CTX), 23.0)
+        self.assertEqual(limits.statusline_context(self.COMPOSER + self.CTX), 23.0)
+        self.assertIsNone(limits.statusline_context(self.CTX))  # no composer
         self.assertIsNone(limits.statusline_context("no bars here"))
         self.assertIsNone(limits.statusline_context(_read("statusline_wide.txt")))
+
+    def test_context_reads_the_model_line_of_a_wrapped_status_line(self):
+        text = _read("statusline_wrapped.txt")
+        self.assertEqual(limits.statusline_context(text), 45.0)  # not the 66 above the composer
+        r = limits.parse_statusline(text)
+        self.assertEqual((r["five_hour"], r["seven_day"]), (27.0, 81.0))
+        r = limits.get_limits([text], self.d)
+        self.assertEqual((r["five_hour"], r["seven_day"]), (27.0, 81.0))
+
+    def test_context_never_from_the_limit_row(self):
+        self.assertIsNone(limits.statusline_context(_read("statusline_wrapped_no_context.txt")))
+
+    def test_context_ignores_a_bar_split_from_its_label(self):
+        self.assertIsNone(limits.statusline_context(_read("statusline_wrapped_split.txt")))
+
+    # ---- the sensor's context -----------------------------------------------
+
+    def _session_file(self, sid, body, age=0):
+        folder = self.d["limits"]["sensor_dir"]
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, sid + ".json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(body, fh)
+        if age:
+            os.utime(path, (time.time() - age, time.time() - age))
+        return path
+
+    CONTEXT_WINDOW = {"model": {"id": "claude-opus-5-5"},
+                      "context_window": {"context_window_size": 1000000, "current_usage": {
+                          "input_tokens": 1000, "cache_creation_input_tokens": 50000,
+                          "cache_read_input_tokens": 300000, "output_tokens": 11873}}}
+
+    def test_sensor_context_from_the_session_file(self):
+        self._session_file("sess-1", self.CONTEXT_WINDOW)
+        r = limits.sensor_context("sess-1", self.d)
+        self.assertEqual((r["tokens"], r["window"], r["pct"], r["soft"], r["hard"]),
+                         (362873, 1000000, 36.3, False, False))
+        self.assertEqual((r["source"], r["model"], r["window_model"]),
+                         ("sensor", "claude-opus-5-5", "claude-opus-5-5"))
+
+    def test_sensor_context_none_cases(self):
+        self.assertIsNone(limits.sensor_context("absent", self.d))
+        self._session_file("old", self.CONTEXT_WINDOW,
+                           age=self.d["limits"]["sensor_max_age_s"] + 60)
+        self.assertIsNone(limits.sensor_context("old", self.d))
+        null = json.loads(json.dumps(self.CONTEXT_WINDOW))
+        null["context_window"]["current_usage"] = None
+        self._session_file("null", null)
+        self.assertIsNone(limits.sensor_context("null", self.d))
+        nowin = json.loads(json.dumps(self.CONTEXT_WINDOW))
+        del nowin["context_window"]["context_window_size"]
+        self._session_file("nowin", nowin)
+        self.assertIsNone(limits.sensor_context("nowin", self.d))
+        self._session_file("x", self.CONTEXT_WINDOW)
+        self.assertIsNone(limits.sensor_context("../x", self.d))
+        path = self._session_file("bad", {})
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertIsNone(limits.sensor_context("bad", self.d))
 
     def test_sensor_same_reset_takes_max(self):
         self._sess("a.json", 17.0, 1761060000)

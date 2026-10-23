@@ -80,7 +80,8 @@
       "marker": "exiting worktree session",
       "keep": "1. keep worktree"
     },
-    "exit_bg_work": "background work is running"
+    "exit_bg_work": "background work is running",
+    "login": [["not logged in", "please run /login"], ["select login method"]]
   },
   "cycles": {
     "approval": 6,
@@ -133,7 +134,8 @@
     "deny": [
       "git push", "gh pr create", "gh pr merge", "gh release", "bd init", "sudo ",
       "brew install", "git reset --hard", "git clean -f", "git checkout main",
-      "git checkout master", "git switch main", "git switch master"
+      "git checkout master", "git switch main", "git switch master",
+      "claude auth", "claude login", "claude logout", "claude setup-token", "claude /login"
     ],
     "events_dir": "~/.cache/prorab/events",
     "events_retention_s": 86400,
@@ -154,6 +156,10 @@
     "hung_scan_max_files": 20000,
     "limit_panes": 2,
     "spend_every_s": 300,
-    "reset_grace_s": 120
+    "reset_grace_s": 120,
+    "awake_hold_s": 1200,
+    "awake_min_left_s": 600,
+    "sleep_gap_s": 120,
+    "sleep_merge_s": 600
   }
 }

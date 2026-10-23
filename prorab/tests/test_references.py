@@ -186,6 +186,14 @@ class TestCustomerReferences(unittest.TestCase):
         self.assertIn("journal.py due set", text)
         self.assertIn("journal.py consent done", text)
 
+    def test_customer_md_login_section(self):
+        sections = split_sections(read("customer.md"))
+        self.assertIn("Logging in", sections)
+        body = sections["Logging in"]
+        self.assertIn("customer: login", body)
+        self.assertIn("resume", body)
+        self.assertIn("customer's word", body)
+
     def test_customer_approval_block(self):
         sections = split_sections(read("acts.md"))
         self.assertIn("Customer approval", sections)
@@ -227,6 +235,12 @@ class TestWorkOrder(unittest.TestCase):
         # the foreman's work order body is where check_report finds the criteria: the
         # template itself contributes no criterion id outside the criteria list
         self.assertEqual(crew.criteria_ids(t), ["C1", "C2"])
+
+    def test_work_order_forbids_logging_in(self):
+        constraints = self.template.split("## Constraints")[1].split("\n## ")[0]
+        line = next(ln for ln in constraints.splitlines() if "Never run `/login`" in ln)
+        self.assertIn("`claude auth", line)
+        self.assertIn("logging in is the customer's", line)
 
     def test_report_fix_loop(self):
         # the foreman's acceptance steps say what to do when the report check fails

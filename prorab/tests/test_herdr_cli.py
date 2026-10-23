@@ -365,8 +365,46 @@ class TestComposer(unittest.TestCase):
             "%s\n❯\xa01. Yes\n%s\n  2. No\n" % (rule, rule)))
 
 
+class TestStatusRows(unittest.TestCase):
+    def test_status_rows_below_the_composer(self):
+        rows = herdr_cli.status_rows(fixture("statusline_wrapped.txt"))
+        self.assertEqual(len(rows), 3)
+        self.assertIn("Opus 5.5", rows[0])
+        self.assertTrue(rows[1].lstrip().startswith("5h"))
+        self.assertIn("bypass permissions", rows[2])
+        self.assertEqual(herdr_cli.status_rows("● output\nmore\n"), [])
+        self.assertEqual(herdr_cli.status_rows(DIALOG), [])
+
+
+class TestLogin(unittest.TestCase):
+    def test_not_logged_in_in_the_bottom_block(self):
+        text = fixture("login", "not_logged_in.txt")
+        self.assertTrue(herdr_cli.not_logged_in(text))
+        self.assertIsNone(herdr_cli.consent_dialog(text))
+        self.assertIsNone(herdr_cli.choice_state(text))
+        self.assertEqual(herdr_cli.composer_text(text), "")
+
+    def test_old_login_line_is_not_read(self):
+        self.assertFalse(herdr_cli.not_logged_in(fixture("login", "after_resume.txt")))
+
+    def test_login_above_the_bottom_block_is_not_read(self):
+        text = ("  ⎿  Not logged in · Please run /login\n"
+                + "".join("line %d\n" % i for i in range(20)))
+        self.assertFalse(herdr_cli.not_logged_in(text))
+
+    def test_login_method_dialog_is_no_choice(self):
+        text = fixture("login", "select_method.txt")
+        self.assertTrue(herdr_cli.not_logged_in(text))
+        self.assertIsNone(herdr_cli.choice_state(text))
+
+    def test_one_marker_alone_is_no_login(self):
+        self.assertFalse(herdr_cli.not_logged_in(
+            '● The page shows "not logged in" to guests.\n'))
+        self.assertFalse(herdr_cli.not_logged_in("Please run /login to see more\n"))
+
+
 class TestRecoverStalled(FakeBase):
-    TEXT = "Read the work order in /home/user/.cache/prorab/work-orders/N1.md and start"
+    TEXT ="Read the work order in /home/user/.cache/prorab/work-orders/N1.md and start"
 
     def setup_agent(self, status, screen):
         self.route("agent get a1", ok({"agent": {"name": "a1", "agent_status": status}}))

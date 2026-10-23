@@ -1,0 +1,7 @@
+Select login method:
+
+❯ 1. Claude account with subscription
+  2. Anthropic Console account · API usage billing
+  3. 3rd-party platform
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

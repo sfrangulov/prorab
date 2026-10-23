@@ -124,13 +124,21 @@ def preflight(d, night=False):
     return out
 
 
-def start_caffeinate(pid):
-    """`caffeinate -is -w <pid>`: the machine stays awake while the foreman's process lives.
+def start_caffeinate(pid=None, timeout_s=None):
+    """`caffeinate -is`, tied to process `pid` (`-w`) and/or ended after `timeout_s` seconds
+    (`-t`); the machine stays awake meanwhile. One of the two is required: a hold is never
+    unbounded. Returns the process id of the caffeinate.
 
     Spawned without a Popen object (nothing to reap) and with its standard streams on
     /dev/null, so a caller that captures this script's output is not kept waiting."""
+    if pid is None and timeout_s is None:
+        raise ValueError("a hold needs a pid to follow or a timeout")
     actions = [(os.POSIX_SPAWN_OPEN, fd, os.devnull, os.O_RDWR, 0) for fd in (0, 1, 2)]
-    args = ["caffeinate", "-is", "-w", str(pid)]
+    args = ["caffeinate", "-is"]
+    if pid is not None:
+        args += ["-w", str(pid)]
+    if timeout_s is not None:
+        args += ["-t", str(int(timeout_s))]
     try:
         return os.posix_spawnp("caffeinate", args, os.environ, file_actions=actions, setsid=True)
     except (TypeError, NotImplementedError):  # no setsid before Python 3.13
@@ -598,6 +606,47 @@ def _emergency_lines(d, start):
     return lines
 
 
+def _duration_text(seconds):
+    minutes = int(round(seconds / 60.0))
+    if minutes < 60:
+        return "about %d min" % minutes
+    return "about %d h %02d min" % divmod(minutes, 60)
+
+
+def _sleep_lines(d, start):
+    """The stretches the machine slept, from the monitor's log rows. Two consecutive rows
+    whose wall-clock gap exceeds the gap of the uptime clock (`mono`, which stops while the
+    machine sleeps) by `sleep_gap_s` or more are a sleep of that difference; rows with no
+    `mono` and a clock that went back (a reboot) count nothing. Sleeps whose rows lie at most
+    `sleep_merge_s` apart are one stretch."""
+    mon = d["monitor"]
+
+    def number(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    rows = sorted(scheduler.readings(since=start), key=lambda r: r["ts"])
+    stretches = []      # [first row, last row, seconds slept]
+    for a, b in zip(rows, rows[1:]):
+        if not (number(a.get("mono")) and number(b.get("mono")) and b["mono"] >= a["mono"]):
+            continue
+        slept = (b["ts"] - a["ts"]) - (b["mono"] - a["mono"])
+        if slept < mon["sleep_gap_s"]:
+            continue
+        if stretches and a["ts"] - stretches[-1][1]["ts"] <= mon["sleep_merge_s"]:
+            stretches[-1][1] = b
+            stretches[-1][2] += slept
+        else:
+            stretches.append([a, b, slept])
+    lines = []
+    for first, last, slept in stretches:
+        until = first.get("awake_until")
+        hold = ("the monitor's awake hold was on, so something put the machine to sleep "
+                "(the lid, the power button or a sleep command)"
+                if number(until) and until > first["ts"] else "the monitor held no awake hold")
+        lines.append("- slept %s between the monitor's polls at %s and %s; %s"
+                     % (_duration_text(slept), _clock(first["ts"]), _clock(last["ts"]), hold))
+    return lines
+
+
 def _override_section(d, rec, now):
     since, until = float(rec["since"]), rec.get("until")
     end = now if until is None else float(until)
@@ -658,6 +707,9 @@ def report(date, out_dir):
     stop = _emergency_lines(d, start)
     if stop:
         section("Emergency stop", stop)
+    asleep = _sleep_lines(d, start)
+    if asleep:
+        section("Machine sleep", asleep)
     free = _without_limits(d, kv, start, now)
     if free:
         section("Without limits", free)

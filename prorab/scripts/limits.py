@@ -15,11 +15,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _defaults  # noqa: E402
 import herdr_cli  # noqa: E402
+import transcript  # noqa: E402
 
 _COUNTDOWN = r"(?:\s*\((?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?\))?"
 _FIVE = re.compile(r"5h\s+\S+\s+([\d.]+)%" + _COUNTDOWN)
 _WEEK = re.compile(r"wk\s+\S+\s+([\d.]+)%" + _COUNTDOWN)
-# a status-line bar: a label-less run of bar glyphs, then its percent
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
+# a status-line bar:a label-less run of bar glyphs, then its percent
 _BAR = re.compile(r"(?:(\S+)\s+)?[▓░█▒▌▏]+\s+([\d.]+)%")
 
 
@@ -140,12 +142,49 @@ def parse_statusline(text):
                  source="statusline", five_in=five[1] if five else None)
 
 
-def statusline_context(text):
-    """Percent of the FIRST bar on the status line (the session's context), else None."""
-    m = _BAR.search(text)
+def statusline_context(text, tail_lines=None):
+    """Percent of the first bar on the model line of the status line (the session's context),
+    else None. The model line is the first row below the composer; a later row (the wrapped
+    `5h`/`wk` bars), a line above the composer and a bar cut from its label never count."""
+    rows = herdr_cli.status_rows(text, tail_lines)
+    if not rows:
+        return None  # no composer, so no status line to read
+    m = _BAR.search(rows[0])
     if not m or m.group(1) in ("5h", "wk"):
-        return None  # no bars, or the line starts at a limit bar (no context shown)
+        return None  # no bar on the model line, or the line starts at a limit bar
     return float(m.group(2))
+
+
+def sensor_context(session_id, d, now=None):
+    """The session's context from the status-line tap: `<sensor_dir>/<session id>.json`
+    (fresher than `sensor_max_age_s`), from its `context_window`. None when the file is
+    missing, stale or unreadable, or holds no window or no `current_usage`."""
+    if not isinstance(session_id, str) or not _SESSION_ID.fullmatch(session_id):
+        return None
+    path = os.path.join(d["limits"]["sensor_dir"], session_id + ".json")
+    now = time.time() if now is None else now
+    try:
+        mtime = os.path.getmtime(path)
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if now - mtime > d["limits"]["sensor_max_age_s"] or not isinstance(data, dict):
+        return None
+    cw = data.get("context_window")
+    if not isinstance(cw, dict):
+        return None
+    window, usage = _num(cw.get("context_window_size")), cw.get("current_usage")
+    if window is None or window < 1 or not isinstance(usage, dict):
+        return None
+    window = int(window)
+    tokens = sum(_int(usage.get(k)) or 0 for k in (
+        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+        "output_tokens"))
+    model = data.get("model")
+    model = model.get("id") if isinstance(model, dict) else None
+    return dict({"tokens": tokens, "window": window, "model": model, "window_model": model,
+                 "source": "sensor"}, **transcript.levels(tokens, window, d))
 
 
 def detect_messages(text, patterns, tail_lines=None):

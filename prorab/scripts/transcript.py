@@ -75,6 +75,16 @@ def models(path):
     return seen
 
 
+def levels(tokens, window, d):
+    """{"pct", "soft", "hard"} of `tokens` against `window` by the context thresholds."""
+    c = d["context"]
+    return {
+        "pct": round(tokens * 100.0 / window, 1),
+        "soft": tokens >= min(window * c["soft_pct"] / 100, c["soft_max_tokens"]),
+        "hard": tokens >= window * c["hard_pct"] / 100,
+    }
+
+
 def context_status(path, d):
     last = last_usage(path)
     if last is None:
@@ -87,15 +97,9 @@ def context_status(path, d):
         w = c["windows"].get(m, c["unknown_window"])
         if best is None or w > best:
             best, window, window_model = w, w, m
-    return {
-        "tokens": tokens,
-        "model": model,
-        "window": window,
-        "window_model": window_model,
-        "pct": round(tokens * 100.0 / window, 1),
-        "soft": tokens >= min(window * c["soft_pct"] / 100, c["soft_max_tokens"]),
-        "hard": tokens >= window * c["hard_pct"] / 100,
-    }
+    return dict({"tokens": tokens, "model": model, "window": window,
+                 "window_model": window_model, "source": "transcript"},
+                **levels(tokens, window, d))
 
 
 def last_text(path):

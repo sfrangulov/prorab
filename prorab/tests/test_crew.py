@@ -318,6 +318,16 @@ class TestStart(CrewBase):
             self.assertNotIn("send", c)
             self.assertNotIn("prompt", c)
 
+    def test_start_on_the_login_screen_needs_login(self):
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start(not_ready=True)
+        self.route("pane read w:p9 --source visible", fixture("login", "select_method.txt"))
+        r = crew.start(SITE_DIR, "N1", "a1", "w:p1")
+        self.assertEqual(r, {"status": "needs_login", "pane_id": "w:p9"})
+        for c in self.calls():
+            self.assertNotIn("send", c)
+            self.assertNotIn("prompt", c)
+
     def test_split_down_when_pane_is_narrow(self):
         repo = self.make_repo()
         self.j.files = {"N1": ["x"]}
@@ -844,6 +854,56 @@ class TestSendState(CrewBase):
         self.route("agent read a1 --source visible", fixture("consent", "mcp.txt"))
         self.assertEqual(crew.deliver("a1", "t", "N1"), "consent:mcp")
         self.assertEqual([c for c in self.calls() if "send-keys" in c], [])
+
+    def test_deliver_names_the_login(self):
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
+        self.route("agent read a1 --source visible", fixture("login", "not_logged_in.txt"))
+        self.assertEqual(crew.deliver("a1", "t", "N1"), "login")
+        self.assertEqual([c for c in self.calls() if "send-keys" in c], [])
+        self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
+
+    def write_sensor(self, session, window=1000000, age=0):
+        folder = os.path.join(self.home, ".cache", "prorab", "usage")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, session + ".json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"model": {"id": "claude-opus-5-5"}, "context_window": {
+                "context_window_size": window,
+                "current_usage": {"input_tokens": 100, "cache_creation_input_tokens": 200,
+                                  "cache_read_input_tokens": 300, "output_tokens": 400}}}, fh)
+        if age:
+            os.utime(path, (time.time() - age, time.time() - age))
+
+    def test_state_prefers_the_sensor_context(self):
+        self.write_transcript("/work", "sess-1", "x")  # model "x": unknown to the defaults
+        self.write_sensor("sess-1")
+        self.route("agent list", ok({"agents": [agent_entry(status="working")]}))
+        self.route("agent read a1 --source visible", "text\n")
+        ctx = crew.state("a1")["ctx"]
+        self.assertEqual((ctx["source"], ctx["window"], ctx["tokens"]), ("sensor", 1000000, 1000))
+
+    def test_state_falls_back_to_the_transcript_context(self):
+        self.write_transcript("/work", "sess-1", "x")
+        self.write_sensor("sess-1", age=self.d_sensor_max_age() + 60)
+        self.route("agent list", ok({"agents": [agent_entry(status="working")]}))
+        self.route("agent read a1 --source visible", "text\n")
+        ctx = crew.state("a1")["ctx"]
+        self.assertEqual((ctx["source"], ctx["window"]), ("transcript", 200000))
+
+    @staticmethod
+    def d_sensor_max_age():
+        return _defaults.load()["limits"]["sensor_max_age_s"]
+
+    def test_state_reads_the_login_marker(self):
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        a = crew.herdr_cli.agents()[0]
+        st = crew.state("a1", a, read_screen=False, screen=fixture("login", "not_logged_in.txt"))
+        self.assertTrue(st["login"])
+        st = crew.state("a1", a, read_screen=False, screen="plain\n")
+        self.assertFalse(st["login"])
+        self.assertIsNone(crew.state("a1", a, read_screen=False)["login"])
+        self.route("agent list", ok({"agents": []}))
+        self.assertIsNone(crew.state("a1")["login"])
 
     def test_unconfirmed_without_consent_stays_unconfirmed(self):
         self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
@@ -1404,6 +1464,16 @@ class TestAnswer(CrewBase):
         self.route("agent read a1 --source visible", fixture("consent", "api_key.txt"))
         self.assertEqual(crew.answer("a1", choice=1), "consent:api_key")
 
+    def test_answer_presses_nothing_on_the_login_screen(self):
+        for screen in (fixture("login", "select_method.txt"),
+                       fixture("login", "not_logged_in.txt")):
+            self.route("agent read a1 --source visible", screen)
+            self.assertEqual(crew.answer("a1", choice=1), "login")
+            self.assertEqual(crew.answer("a1", text="go on"), "login")
+        for c in self.calls():
+            self.assertFalse(c.startswith(("agent send-keys", "agent prompt", "pane send-text")))
+        self.assertEqual(self.j.act_log, [])
+
     def test_answer_refuses_limit_screen(self):
         for screen in (fixture("limit_choice.txt"), fixture("limit_screen.txt")):
             self.route("agent read a1 --source visible", screen)
@@ -1638,6 +1708,17 @@ class TestRestart(CrewBase):
     def test_limit_death_restart_not_counted(self):
         self.assertEqual(self.go("limit_died")["status"], "resumed")
         self.assertEqual(self.j.restarts, {})
+
+    def test_login_restart_not_counted(self):
+        self.assertEqual(self.go("login")["status"], "resumed")
+        self.assertEqual(self.j.restarts, {})
+
+    def test_restart_stopping_at_a_login_screen(self):
+        self.route("agent start a1", err("agent_not_ready"), exit_code=1)
+        self.route("pane read w:p9 --source visible", fixture("login", "not_logged_in.txt"))
+        self.assertEqual(self.go("login"), {"status": "needs_login", "pane_id": "w:p9"})
+        self.assertEqual(self.j.restarts, {})
+        self.assertFalse([c for c in self.calls() if c.startswith("agent prompt")])
 
     def test_restart_over_limit_waits_customer(self):
         self.j.restarts["N1"] = _defaults.load()["monitor"]["max_restarts"]  # via kv_get

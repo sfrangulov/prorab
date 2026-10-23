@@ -931,6 +931,14 @@ class TestSendState(CrewBase):
         self.assertEqual(st["ctx"]["tokens"], 10 + 20 + 999 + 30)
         self.assertEqual(crew.summary("a1"), "done")
 
+    def test_state_names_its_transcript(self):
+        self.write_transcript("/work", "sess-1", "x")
+        path = crew.transcript.transcript_path("/work", "sess-1", self.home)
+        self.route("agent list", ok({"agents": [agent_entry(status="idle")]}))
+        self.route("agent read a1 --source visible", "idle\n")
+        self.assertEqual(crew.state("a1")["transcript"], path)
+        self.assertIsNone(crew.gone_state()["transcript"])
+
     def test_state_finds_agent_by_pane_and_reads_transcript_from_kv(self):
         self.write_transcript("/work", "sess-1", "x")
         path = crew.transcript.transcript_path("/work", "sess-1", self.home)
@@ -1003,6 +1011,13 @@ class TestHandover(CrewBase):
         self.j.kv["crew.a1.worktree"] = self.wt
         self.write_transcript("/work", "sess-1", "Act: done A\nHANDOVER READY")
         self.route("agent read a1 --source visible", "idle\n")
+
+    def test_complete_handover_with_shells_asks_nothing(self):
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.route("agent read a1 --source visible", "bar \u00b7 2 shells\n")
+        r = crew.complete_handover("a1", "N1", "work order", timeout_s=1, poll_s=0.01)
+        self.assertEqual(r["status"], "bg_shells")
+        self.assertEqual([c for c in self.calls() if c.startswith("agent prompt")], [])
 
     def test_complete_handover_refuses_with_bg_shells(self):
         self.route("agent list", ok({"agents": [agent_entry()]}))
@@ -2684,17 +2699,83 @@ class TestExitDialog(CrewBase):
         self.listed(True)
         self.screens("bar · 1 shell\n")
         self.route("pane get w:p9", self.shell)
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         r = crew.stop("a1", "N1", timeout_s=0.3, poll_s=0.01)
         self.assertEqual(r["status"], "bg_shells")
         self.assertEqual(self.j.active, ["a1"])
         self.assertEqual(self.j.kv["crew.a1.work_order"], "N1")
+        self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
+        self.assertNotIn("agent prompt a1 /exit", " ".join(self.calls()))
         r = crew.restart("a1", "N1", "t", "hung", caller_pane="w:p1", timeout_s=0.3,
                          poll_s=0.01)
         self.assertEqual(r["status"], "restart_failed")
         self.assertEqual(r["step"], "exit")
         for c in self.calls():
-            self.assertFalse(c.startswith(("agent prompt", "pane send-keys", "agent start")), c)
+            self.assertFalse(c.startswith(("pane send-keys", "agent start")), c)
+        self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
         self.assertNotIn("crew.a1.exiting", self.j.kv)
+
+    END_LINE = ("The foreman is closing this work order: stop every background shell you "
+                "started, start nothing new, and end your turn; if one cannot be stopped, "
+                "say which in one line.")
+
+    def prompts(self):
+        return [c for c in self.calls() if c.startswith("agent prompt")]
+
+    def test_stop_with_shells_asks_the_crew_to_end_them(self):
+        self.listed(True)
+        self.screens("bar \u00b7 2 shells\n")
+        self.route("pane get w:p9", self.shell)
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        r = crew.stop("a1", "N1", timeout_s=0.5, poll_s=0.01)
+        self.assertEqual(r, {"status": "bg_shells", "shells": 2, "asked": "accepted"})
+        self.assertEqual(len(self.prompts()), 1)
+        self.assertIn(self.END_LINE, self.prompts()[0])
+        self.assertNotIn("/exit", self.prompts()[0])
+        self.assertEqual(self.j.active, ["a1"])
+        self.assertEqual(self.j.closed_work_orders, [])
+        self.assertIn("crew.a1.work_order", self.j.kv)
+
+    def test_stop_bg_work_asks_too(self):
+        self.listed(True)
+        self.screens(self.composer, fixture("exit", "bg_work.txt"))
+        self.route("pane get w:p9", self.shell)
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        r = crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        self.assertEqual(r["status"], "bg_work")
+        self.assertEqual(r["asked"], "accepted")
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 esc"])
+        self.assertTrue(any(self.END_LINE in c for c in self.prompts()))
+        self.assertEqual(self.j.active, ["a1"])
+
+    def _session_with(self, entries):
+        d = os.path.join(self.home, ".claude", "projects", crew.transcript.project_slug("/work"))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "sess-1.jsonl"), "w", encoding="utf-8") as fh:
+            for e in entries:
+                fh.write(json.dumps(e) + "\n")
+
+    def test_stop_does_not_resend_the_line_the_crew_has_not_worked_on(self):
+        self._session_with([{"type": "user", "message": {"role": "user", "content": self.END_LINE}}])
+        self.listed(True)
+        self.screens("bar \u00b7 2 shells\n")
+        self.route("pane get w:p9", self.shell)
+        r = crew.stop("a1", "N1", timeout_s=0.5, poll_s=0.01)
+        self.assertEqual(r["status"], "bg_shells")
+        self.assertEqual(r["asked"], "already_asked")
+        self.assertEqual(self.prompts(), [])
+
+    def test_stop_resends_the_line_after_the_crew_worked(self):
+        self._session_with([
+            {"type": "user", "message": {"role": "user", "content": self.END_LINE}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}}])
+        self.listed(True)
+        self.screens("bar \u00b7 2 shells\n")
+        self.route("pane get w:p9", self.shell)
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        r = crew.stop("a1", "N1", timeout_s=0.5, poll_s=0.01)
+        self.assertEqual(r["asked"], "accepted")
+        self.assertEqual(len(self.prompts()), 1)
 
     def test_bg_work_dialog_cancelled_with_esc(self):
         self.listed(True)
@@ -2833,10 +2914,11 @@ class TestStopClosesPane(CrewBase):
 
     def test_stop_closes_nothing_while_the_agent_stays(self):
         self.route("agent list", ok({"agents": [agent_entry()]}))
-        self.route("pane read w:p9 --source visible", "1 shell\n")
+        self.route("pane read w:p9 --source visible", "bar \u00b7 1 shell\n")
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         with mock.patch.object(crew, "_exit", return_value="bg_shells"):
             r = crew.stop("a1", "N1", timeout_s=1, poll_s=0.01)
-        self.assertEqual(r, {"status": "bg_shells"})
+        self.assertEqual(r, {"status": "bg_shells", "shells": 1, "asked": "accepted"})
         self.assertNotIn("pane close w:p9", self.calls_or_empty())
         self.assertIn("crew.a1.pane", self.j.kv)
 
@@ -2873,9 +2955,10 @@ class TestStopClosesPane(CrewBase):
 
     def test_refused_stop_closes_nothing(self):
         self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         with mock.patch.object(crew, "_exit", return_value="bg_shells"):
             r = crew.stop("a1", "N1", timeout_s=1, poll_s=0.01)
-        self.assertEqual(r, {"status": "bg_shells"})
+        self.assertEqual(r["status"], "bg_shells")
         self.assertEqual(self.j.closed_work_orders, [])
 
     def test_stop_clears_the_delivered_fingerprint(self):

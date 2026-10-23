@@ -181,6 +181,7 @@ def _hold_awake(seconds):
 
 def real_deps():
     import crew
+    import transcript
     import journal
     import slots
     return {
@@ -209,6 +210,8 @@ def real_deps():
         "hold_awake": _hold_awake,
         # a file read in this process (the monitor's next poll reads again): no process
         "site_trust": lambda path: crew.site_trust(path, retry=False),
+        # one pass over the crew's transcript, in this process (cached by size and mtime)
+        "final_report": transcript.final_report,
     }
 
 
@@ -399,9 +402,13 @@ def _prune_events(folder, now, retention_s):
 def _event_facts(records):
     """What a crew's new hook events say: whether it stopped with no background task, asked
     for a tool permission, or compacted its context by itself."""
+    stops = [r.get("background_tasks") for r in records
+             if r.get("event") == "Stop" and isinstance(r.get("background_tasks"), list)]
     return {
         "stop": any(r.get("event") == "Stop" and r.get("background_tasks", 1) is not None
                     and not r.get("background_tasks", 1) for r in records),
+        # the background tasks of the latest Stop record that lists them (None: no such record)
+        "stop_bg": len(stops[-1]) if stops else None,
         "permission": any(r.get("event") == "Notification"
                           and r.get("notification_type") == "permission_prompt"
                           for r in records),
@@ -636,7 +643,14 @@ def _poll(crews, d, mem, now, dp, stopping=False):
                 kind = "context_hard" if lv == 2 else "context_soft"
                 ev[kind].append("%s %s %s%s" % (kind, name, c["pct"], suffix))
             ctx_mem[name] = lv
-        last[name] = {"status": status, "bg": bg,
+        # the count of one Stop event holds until the crew works again; a screen read after
+        # the event that lists no shell clears it (the read is the newer fact)
+        stop_bg = facts.get("stop_bg")
+        if status == "working":
+            stop_bg = None
+        elif stop_bg is None and not (read_now and not bg):
+            stop_bg = prev.get("stop_bg")
+        last[name] = {"status": status, "bg": bg, "stop_bg": stop_bg,
                       "shells": status in ("idle", "done") and bool(bg),
                       "statusline": from_statusline or (prev.get("statusline", False)
                                                         and not read_now)}
@@ -680,14 +694,24 @@ def _poll(crews, d, mem, now, dp, stopping=False):
                         ev["hung"].append("hung %s" % name)
         else:
             hung.pop(name, None)
-            if (status in SETTLED and (status == "blocked" or not bg or hook_stop)
-                    and name not in ep["consent"] and name not in ep["provider_error"]
-                    and name not in ep["login"] and not on_limit_screen):
+            shells = max(bg or 0, stop_bg or 0)
+            if (status in SETTLED and name not in ep["consent"]
+                    and name not in ep["provider_error"] and name not in ep["login"]
+                    and not on_limit_screen):
                 if hook_stop:   # the crew's own Stop event: no screen was needed
                     ev["settled"].append("settled %s done" % name)
-                elif settled.get(name) != status:
-                    ev["settled"].append("settled %s %s" % (name, status))
-                settled[name] = status
+                    settled[name] = status
+                elif status == "blocked" or not shells:
+                    if settled.get(name) != status:
+                        ev["settled"].append("settled %s %s" % (name, status))
+                    settled[name] = status
+                elif settled.get(name) != status + " shells":
+                    # shells listed: the crew's own final report decides; any other last text
+                    # is a crew waiting on its run
+                    if guard("final_report.%s" % name, dp["final_report"],
+                             st.get("transcript")):
+                        ev["settled"].append("settled %s %s shells:%d" % (name, status, shells))
+                        settled[name] = status + " shells"
 
     # the machine stays awake while a crew is listed: a timed `caffeinate` the monitor renews
     # when little is left, whichever process the monitor is (it ends on every event)

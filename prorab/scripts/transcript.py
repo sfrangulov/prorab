@@ -115,6 +115,101 @@ def last_text(path):
     return result
 
 
+_META = "is" + "Meta"   # Claude Code's flag on entries it writes itself (no message to the crew)
+_STAGE_REPORT = re.compile(r"^#\s*Stage\s+\S+\s+report:")
+_NOTICE = "<task-notification"   # a finished background task tells the crew, by a user entry
+_final_cache = {}
+
+
+def _delivered(entry):
+    """The text of a message delivered to the crew (a non-sidechain `user` entry that is no
+    tool result and no Claude Code meta entry), else None. A background-task notice counts
+    even when marked meta: it wakes the crew."""
+    if entry.get("type") != "user" or entry.get("isSidechain"):
+        return None
+    msg = entry.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return None
+        text = "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and b.get("type") == "text")
+    else:
+        return None
+    if not text.strip():
+        return None
+    if entry.get(_META) and not text.lstrip().startswith(_NOTICE):
+        return None
+    return text
+
+
+def _conversation(path):
+    """(role, text) of the main chain in order: "user" for a delivered message, "assistant"
+    for an entry with a text block."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            text = _delivered(entry)
+            if text is not None:
+                yield "user", text
+            elif entry.get("type") == "assistant" and not entry.get("isSidechain"):
+                msg = entry.get("message")
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if isinstance(content, list):
+                    parts = [b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text" and b.get("text")]
+                    if parts:
+                        yield "assistant", "\n".join(parts)
+
+
+def final_report(path):
+    """"stage_report" | "handover" | None: whether the last assistant text after the latest
+    message delivered to the crew is its stage report (first line `# Stage N report:`) or
+    its handover act (last line `HANDOVER READY`). One pass, in this process; the answer is
+    cached by the file's size and mtime, so a steady poll reads an unchanged file once."""
+    try:
+        st = os.stat(path)
+        key = (st.st_size, st.st_mtime_ns)
+        hit = _final_cache.get(path)
+        if hit and hit[0] == key:
+            return hit[1]
+        text = None
+        for role, body in _conversation(path):
+            text = body if role == "assistant" else None
+    except (OSError, TypeError, ValueError):
+        return None
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    result = None
+    if lines and _STAGE_REPORT.match(lines[0]):
+        result = "stage_report"
+    elif lines and lines[-1] == "HANDOVER READY":
+        result = "handover"
+    _final_cache[path] = (key, result)
+    return result
+
+
+def last_delivered(path):
+    """(text, worked): the latest message delivered to the crew and whether an assistant
+    entry follows it; (None, False) when there is none or the file cannot be read."""
+    text, worked = None, False
+    try:
+        for role, body in _conversation(path):
+            if role == "user":
+                text, worked = body, False
+            else:
+                worked = True
+    except (OSError, TypeError):
+        return None, False
+    return text, worked
+
+
 def usage_totals(path):
     """Sum usage once per API message: lines sharing message.id count once (last wins)."""
     by_id = {}

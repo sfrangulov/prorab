@@ -151,6 +151,89 @@ class TestTranscript(unittest.TestCase):
             self.assertEqual(transcript.find_transcript("/a/b", "sess1", home), p2)
 
 
+def _write_lines(path, entries):
+    with open(path, "w", encoding="utf-8") as fh:
+        for e in entries:
+            fh.write(json.dumps(e) + "\n")
+
+
+def _said(text, **kw):
+    return dict({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}, **kw)
+
+
+def _told(content, **kw):
+    return dict({"type": "user", "message": {"content": content}}, **kw)
+
+
+class TestFinalReport(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "t.jsonl")
+
+    def check(self, entries):
+        _write_lines(self.path, entries)
+        return transcript.final_report(self.path)
+
+    def test_final_report_stage_report(self):
+        self.assertEqual(self.check([
+            _told("Do stage 2."), _said("# Stage 2 report: CSV export\n\nDone.")]),
+            "stage_report")
+
+    def test_final_report_handover_act(self):
+        self.assertEqual(self.check([
+            _told("Hand over."), _said("Act: done A\n\nHANDOVER READY\n")]), "handover")
+
+    def test_final_report_other_text(self):
+        self.assertIsNone(self.check([
+            _told("Run it."), _said("Waiting for the test run to finish.")]))
+
+    def test_final_report_older_report_then_a_newer_message(self):
+        self.assertIsNone(self.check([
+            _told("Do stage 1."), _said("# Stage 1 report: demo\nDone."),
+            _told("Now stage 2.")]))
+
+    def test_final_report_tool_results_and_meta_are_no_message(self):
+        meta = "is" + "Meta"
+        self.assertEqual(self.check([
+            _told("Do stage 1."), _said("# Stage 1 report: demo\nDone."),
+            _told([{"type": "tool_result", "tool_use_id": "x", "content": "ok"}]),
+            _told("caveat text", **{meta: True})]), "stage_report")
+
+    def test_final_report_background_notice_is_a_message(self):
+        self.assertIsNone(self.check([
+            _told("Do stage 1."), _said("# Stage 1 report: demo\nDone."),
+            _told("<task-notification>shell finished</task-notification>")]))
+
+    def test_final_report_ignores_sidechain(self):
+        self.assertEqual(self.check([
+            _told("Go."), _said("# Stage 1 report: demo\nDone."),
+            _said("Waiting for the run.", isSidechain=True)]), "stage_report")
+        self.assertIsNone(self.check([
+            _told("Go."), _said("Waiting for the run."),
+            _said("# Stage 1 report: demo\nDone.", isSidechain=True)]))
+
+    def test_final_report_missing_file_is_none(self):
+        self.assertIsNone(transcript.final_report(os.path.join(self.tmp.name, "none.jsonl")))
+        self.assertIsNone(transcript.final_report(None))
+
+    def test_final_report_rereads_only_a_changed_file(self):
+        _write_lines(self.path, [_told("Go."), _said("# Stage 1 report: demo\nDone.")])
+        self.assertEqual(transcript.final_report(self.path), "stage_report")
+        with unittest.mock.patch.object(transcript, "_conversation",
+                                        side_effect=AssertionError("read again")):
+            self.assertEqual(transcript.final_report(self.path), "stage_report")
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_told("Next.")) + "\n")
+        self.assertIsNone(transcript.final_report(self.path))
+
+    def test_last_delivered_tells_whether_the_crew_worked_since(self):
+        _write_lines(self.path, [_told("one"), _said("ok"), _told("two")])
+        self.assertEqual(transcript.last_delivered(self.path), ("two", False))
+        _write_lines(self.path, [_told("one"), _said("ok")])
+        self.assertEqual(transcript.last_delivered(self.path), ("one", True))
+
+
 class TestCost(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

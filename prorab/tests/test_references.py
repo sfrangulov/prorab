@@ -125,12 +125,31 @@ class TestActs(unittest.TestCase):
         self.assertLess(self.acts.index("## Pause"), self.acts.index("## Emergency pause"))
         self.assertLess(self.acts.index("## Emergency pause"), self.acts.index("## Continue"))
 
+    def test_end_background_shells_block(self):
+        self.assertIn("End background shells", self.sections)
+        own = block("acts.md", "End background shells")
+        self.assertNotIn("\n", own.strip())
+        self.assertIn("stop every background shell", own)
+        self.assertIn("end your turn", own)
+        self.assertNotIn("is closed", own)
+        first = self.acts.split("\n\n", 2)[1]
+        self.assertIn("End background shells", first)
+        self.assertLess(self.acts.index("## Changed work order"),
+                        self.acts.index("## End background shells"))
+        self.assertLess(self.acts.index("## End background shells"),
+                        self.acts.index("## Message by file"))
+        section = self.acts[self.acts.index("## End background shells"):
+                            self.acts.index("## Message by file")]
+        self.assertIn("one monitor heartbeat", section)
+        self.assertIn("incident", section)
+
     def test_acts_sections_for_crew(self):
         with open(os.path.join(SCRIPTS_DIR, "crew.py"), encoding="utf-8") as fh:
             source = fh.read()
         read_by_crew = set(re.findall(r'_template\("([^"]+)"\)', source))
         self.assertEqual(read_by_crew, {"Handover request", "Pause", "Emergency pause",
-                                        "Continue", "Changed work order", "Message by file", "Fix the report"})
+                                        "Continue", "Changed work order", "End background shells",
+                                        "Message by file", "Fix the report"})
         for heading in read_by_crew:
             own = block("acts.md", heading)
             self.assertTrue(own.strip(), heading)

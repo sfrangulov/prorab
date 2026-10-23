@@ -47,8 +47,8 @@ def burn(pp_per_h=None, resets_at=None):
 
 
 def st(status="working", bg=0, ctx=None, size=100, pane="p", cwd="/w", consent=None,
-       limit_screen=None, provider_error=None):
-    return {"status": status, "bg_shells": bg, "ctx": ctx, "session_id": "s", "cwd": cwd,
+       limit_screen=None, provider_error=None, transcript=None):
+    return {"status": status, "transcript": transcript, "bg_shells": bg, "ctx": ctx, "session_id": "s", "cwd": cwd,
             "pane_id": pane, "_size": size, "consent": consent, "limit_screen": limit_screen,
             "provider_error": provider_error}
 
@@ -73,7 +73,8 @@ class Stub:
         self.week_burn = burn()
         self.calls = {"agents": 0, "kv_all": 0, "visible": [], "limit_panes": None,
                       "spend": [], "rates": [], "week_burn": [], "pause": [],
-                      "site_trust": [], "awake": []}
+                      "site_trust": [], "awake": [], "final_report": []}
+        self.reports = {}   # transcript path -> "stage_report" | "handover" | None
         self.awake_error = None    # an exception the hold raises
         self.awake_pid = os.getpid()   # the process the hold "started": alive
         self.trust = False   # what `site_trust` answers: a value, or a dict by site path
@@ -129,6 +130,10 @@ class Stub:
             crew_state = dict(crew_state, login=herdr_cli.not_logged_in(screen))
         return crew_state
 
+    def _final_report(self, path):
+        self.calls["final_report"].append(path)
+        return self.reports.get(path)
+
     def _site_trust(self, site):
         self.calls["site_trust"].append(site)
         return self.trust.get(site, False) if isinstance(self.trust, dict) else self.trust
@@ -161,6 +166,7 @@ class Stub:
             "pause": self._pause,
             "site_trust": self._site_trust,
             "hold_awake": self._hold_awake,
+            "final_report": self._final_report,
         }
 
 
@@ -209,6 +215,61 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(), [])
         self.s.crews["b1"] = st("idle", bg=0)
         self.assertEqual(self.poll(), ["settled b1 idle"])
+
+    def test_settled_with_shells_and_a_stage_report(self):
+        self.s.reports["t1"] = "stage_report"
+        self.s.crews["b1"] = st("idle", bg=2, transcript="t1")
+        self.assertEqual(self.poll(), ["settled b1 idle shells:2"])
+        self.assertEqual(self.poll(), [])
+        self.s.crews["b1"] = st("idle", bg=0, transcript="t1")
+        self.assertEqual(self.poll(), ["settled b1 idle"])
+        self.assertEqual(self.poll(), [])
+
+    def test_shells_without_a_final_report_are_not_settled(self):
+        self.s.reports["t1"] = None   # "waiting for the run"
+        self.s.crews["b1"] = st("idle", bg=2, transcript="t1")
+        for _ in range(3):
+            self.assertEqual(self.poll(), [])
+
+    def test_shells_and_an_older_report_before_a_newer_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.jsonl")
+            with open(path, "w", encoding="utf-8") as fh:
+                for e in ({"type": "assistant", "message": {"content": [
+                              {"type": "text", "text": "# Stage 1 report: demo\nbody"}]}},
+                          {"type": "user", "message": {"content": "Go on with stage 2."}}):
+                    fh.write(json.dumps(e) + "\n")
+            self.s.crews["b1"] = st("idle", bg=2, transcript=path)
+            deps = self.s.deps()
+            deps["final_report"] = transcript.final_report
+            for _ in range(3):
+                self.assertEqual(monitor.poll(["b1"], self.d, self.mem, self.now, deps=deps), [])
+
+    def test_settled_with_shells_and_handover_ready(self):
+        self.s.reports["t1"] = "handover"
+        self.s.crews["b1"] = st("idle", bg=1, transcript="t1")
+        self.assertEqual(self.poll(), ["settled b1 idle shells:1"])
+
+    def test_final_report_read_only_for_idle_crews_with_shells(self):
+        self.s.crews = {"w": st("working", bg=1, transcript="tw", pane="p1"),
+                        "i": st("idle", bg=0, transcript="ti", pane="p2"),
+                        "k": st("blocked", bg=1, transcript="tk", pane="p3")}
+        self.poll(names=("w", "i", "k"))
+        self.assertEqual(self.s.calls["final_report"], [])
+        self.s.crews["s"] = st("idle", bg=2, transcript="ts", pane="p4")
+        self.poll(names=("w", "i", "k", "s"))
+        self.poll(names=("w", "i", "k", "s"))
+        self.assertEqual(self.s.calls["final_report"], ["ts", "ts"])
+
+    def test_final_report_failure_is_a_failing_source(self):
+        self.s.crews["b1"] = st("idle", bg=2, transcript="t1")
+        deps = self.s.deps()
+
+        def boom(path):
+            raise OSError("disk")
+        deps["final_report"] = boom
+        out = monitor.poll(["b1"], self.d, self.mem, self.now, deps=deps)
+        self.assertFalse([e for e in out if e.startswith("settled")])
 
     def test_blocked_always_settled(self):
         self.s.crews["b1"] = st("blocked", bg=2)
@@ -769,6 +830,28 @@ class TestHookEvents(PollBase):
         self.s.crews["a1"] = st("idle", pane="p1", bg=1, ctx=ctx(10.0))
         self.s.screens["p1"] = "screen"
         self.assertEqual(self.poll(self.now + 90, names=("a1",)), [])
+
+    def test_stop_event_with_background_tasks_and_a_report_settles(self):
+        self.s.reports["t1"] = "stage_report"
+        self.prime()
+        self.write_event("Stop", background_tasks=["npm run dev"])
+        self.s.crews["a1"] = st("idle", pane="p1", bg=0, ctx=ctx(10.0), transcript="t1")
+        self.s.screens["p1"] = "screen"
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), ["settled a1 idle shells:1"])
+        # the event's count holds: no plain settled while the crew has not worked again
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)), [])
+        self.assertEqual(self.poll(self.now + 270, names=("a1",)), [])
+
+    def test_a_screen_read_after_the_stop_event_clears_its_shell_count(self):
+        self.s.reports["t1"] = "stage_report"
+        self.prime()
+        self.write_event("Stop", background_tasks=["npm run dev"])
+        self.s.crews["a1"] = st("idle", pane="p1", bg=0, ctx=ctx(10.0), transcript="t1")
+        self.s.screens["p1"] = "screen"
+        self.assertEqual(self.poll(self.now + 90, names=("a1",)), ["settled a1 idle shells:1"])
+        # a later read (the status changed) shows no shell: the plain settled may follow
+        self.s.crews["a1"] = st("done", pane="p1", bg=0, ctx=ctx(10.0), transcript="t1")
+        self.assertEqual(self.poll(self.now + 180, names=("a1",)), ["settled a1 done"])
 
     def test_stop_event_of_a_working_crew_is_ignored(self):
         self.prime()
@@ -1561,6 +1644,31 @@ class TestProcessBudget(FakeBase):
         self.assertEqual(self._procs() - before, 5)  # agents, kv, three screens
         self.assertIsNone(self.mem["last_reading"]["seven_day"])
 
+
+    def test_process_budget_settled_with_shells(self):
+        self._fresh_sensor()
+        counts = []
+        for tail, expect in (("# Stage 1 report: demo\nall done", True),
+                             ("Waiting for the run.", False)):
+            for i, n in enumerate(self.names, 1):
+                path = transcript.transcript_path("/home/user/projects/demo-app-%d" % i,
+                                                  "sess-%d" % i, self.home)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"type": "user", "message": {"content": "go"}}) + "\n")
+                    fh.write(json.dumps({"type": "assistant", "message": {"content": [
+                        {"type": "text", "text": tail}]}}) + "\n")
+                self.route("pane read w:p%d --source visible" % i, "run \u00b7 2 shells\n")
+            self.mem = {}
+            self._agents("working")
+            monitor.poll(list(self.names), self.d, self.mem, time.time())
+            self._agents("idle")
+            before = self._procs()
+            out = monitor.poll(list(self.names), self.d, self.mem, time.time())
+            counts.append(self._procs() - before)
+            self.assertEqual(
+                [e for e in out if e.startswith("settled")],
+                ["settled %s idle shells:2" % n for n in self.names] if expect else [])
+        self.assertEqual(counts[0], counts[1])
 
     def test_process_budget_awake_hold(self):
         self._fresh_sensor()

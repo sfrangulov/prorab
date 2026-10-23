@@ -586,7 +586,8 @@ def gone_state():
     """The state of a crew whose agent is not listed."""
     return {"status": "gone", "name_ok": False, "bg_shells": 0, "consent": None,
             "limit_screen": None, "provider_error": None, "exit_dialog": None, "login": None,
-            "ctx": None, "session_id": None, "cwd": None, "pane_id": None}
+            "ctx": None, "session_id": None, "cwd": None, "pane_id": None,
+            "transcript": None}
 
 
 def state(name, a=None, *, read_screen=True, screen=None, kv=None):
@@ -608,7 +609,7 @@ def state(name, a=None, *, read_screen=True, screen=None, kv=None):
            "bg_shells": None, "consent": None, "limit_screen": None, "provider_error": None,
            "exit_dialog": None, "login": None,
            "ctx": _context(session_id, path, _defaults.load()),
-           "session_id": session_id,
+           "session_id": session_id, "transcript": path,
            "cwd": a.get("cwd"), "pane_id": a.get("pane_id")}
     if screen is not None or read_screen:
         if screen is None:
@@ -1235,9 +1236,21 @@ def _close_work_order(work_order, reason):
     return {"work_order_closed": True}
 
 
+def _ask_end_shells(name, work_order, path):
+    """Ask the crew to end its background shells: the `End background shells` line, once per
+    call; not again while it is the crew's last delivered text and the crew has not worked
+    since ("already_asked")."""
+    line = _template("End background shells")
+    text, worked = transcript.last_delivered(path) if path else (None, False)
+    if text is not None and text.strip() == line.strip() and not worked:
+        return "already_asked"
+    return deliver(name, line, work_order)
+
+
 def stop(name, work_order, timeout_s=60, poll_s=1):
     """Exit the crew and unregister it: {"status": "stopped", ...}. When the agent does not
-    leave ("bg_shells", "bg_work", "not_exited") the result is {"status": <that>}, and the
+    leave ("bg_shells", "bg_work", "not_exited") the result is {"status": <that>}; with shells or
+    background work the crew is asked to end them ({"shells": <n>, "asked": <delivery>}). The
     crew stays registered with its kv in place: nothing is unregistered while its agent runs."""
     if emergency_stop():
         return {"status": _STOPPED}
@@ -1248,6 +1261,9 @@ def stop(name, work_order, timeout_s=60, poll_s=1):
     if a is not None:
         pane = a.get("pane_id") or journal.kv_get(_kv(name, "pane"))
         left = _exit(name, pane, timeout_s, poll_s)
+        if left in ("bg_shells", "bg_work"):
+            return {"status": left, "shells": herdr_cli.bg_shells(_screen_of(pane)),
+                    "asked": _ask_end_shells(name, work_order, _transcript_for(name, a))}
         if left != "exited":
             return {"status": left}
     journal.unregister_crew(name)

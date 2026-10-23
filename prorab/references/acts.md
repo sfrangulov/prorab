@@ -1,6 +1,6 @@
 # Act texts and messages to crews
 
-`crew.py` sends the first fenced block under the headings Handover request, Pause, Emergency pause, Continue, Changed work order, Message by file and Fix the report; the block under Customer decision to drop the branch equals the marker `crew.DROP_MARKER`. Do not rename these headings and keep each block in its own section. The act templates show the form of each act, with every `<...>` to fill in; each section names who writes the act and the command that records it.
+`crew.py` sends the first fenced block under the headings Handover request, Pause, Emergency pause, Continue, Changed work order, End background shells, Message by file and Fix the report; the block under Customer decision to drop the branch equals the marker `crew.DROP_MARKER`. Do not rename these headings and keep each block in its own section. The act templates show the form of each act, with every `<...>` to fill in; each section names who writes the act and the command that records it.
 
 ## Acceptance act
 
@@ -105,6 +105,14 @@ Sent by `crew.py restart` after a `--resume` when the work order differs from th
 
 ```
 The work order changed since you last read it: read the file {path}, then continue from where you stopped.
+```
+
+## End background shells
+
+Sent by `crew.py stop` when the crew still lists background shells at the close, or `/exit` met "Background work is running", so the script sends no `/exit` (it would offer to stop them). The crew ends its own shells; the foreman waits for the crew's next `settled` for at most one monitor heartbeat, then runs `stop` again. If shells are still listed then, the foreman reads `crew.py summary NAME`, records an incident and gates the work order. A crew settled with `shells:<n>` is accepted as usual; its handover waits for the shells.
+
+```
+The foreman is closing this work order: stop every background shell you started, start nothing new, and end your turn; if one cannot be stopped, say which in one line.
 ```
 
 ## Message by file

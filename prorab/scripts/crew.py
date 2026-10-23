@@ -1960,6 +1960,24 @@ def _items(lines):
     return [(m.group(1) or "").strip() for m in (_ITEM.match(ln) for ln in lines) if m]
 
 
+def _blocks(lines):
+    """List items with their continuation: lines indented deeper than the item's marker
+    (sub-bullets, wrapped text, blank lines between them) belong to it; the next line at its
+    indent or lower ends it. ``[[first line, continuation lines...]]``, markers stripped."""
+    out, indent = [], None
+    for ln in lines:
+        m = _ITEM.match(ln)
+        depth = len(ln) - len(ln.lstrip())
+        if indent is not None and ln.strip() and depth > indent:
+            out[-1].append(((m.group(1) or "") if m else ln).strip())
+        elif m:
+            out.append([(m.group(1) or "").strip()])
+            indent = depth
+        elif ln.strip():
+            indent = None
+    return out
+
+
 def _listed_path(item):
     ticks = _TICKS.search(item)
     return (ticks.group(1) if ticks else item.split()[0]).strip()
@@ -2004,9 +2022,14 @@ def _check_guard(text, counted, unverifiable=None):
 
 
 def _live_field(item, cid):
-    """True when the Verification item ends in the field `LIVE <cid>`: after a ` - `."""
-    fields = item.split(" - ")
-    return len(fields) > 1 and fields[-1].strip(" *_`.") == "LIVE %s" % cid
+    """True when a line of the Verification item (a block: see `_blocks`) ends in the field
+    `LIVE <cid>`: after a ` - ` on its first line, alone or after one on a later line."""
+    lines = [item] if isinstance(item, str) else item
+    for i, line in enumerate(lines):
+        fields = line.split(" - ")
+        if (len(fields) > 1 or i > 0) and fields[-1].strip(" *_`.") == "LIVE %s" % cid:
+            return True
+    return False
 
 
 def _check_passport(sections):
@@ -2051,7 +2074,7 @@ def _check_stubs(sections, rows, criteria, live):
             problems.append("criterion %s: done but backed by a stub: %s" % (cid, backed[cid]))
         elif status == "stub" and cid not in backed and "Stubs" in sections:
             problems.append("criterion %s: status stub but no Stubs item names it" % cid)
-    checks = _items(sections.get("Verification", []))
+    checks = _blocks(sections.get("Verification", []))
     for cid in live:
         if cid in rows and rows[cid][0] == "done" and not any(
                 _live_field(it, cid) for it in checks):
@@ -2106,7 +2129,8 @@ def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, c
     sha = m.group(1) if m else None
 
     checks = 0
-    for item in _items(sections.get("Verification", [])):
+    for block in _blocks(sections.get("Verification", [])):
+        item = " ".join(block)  # the command, SKIP: <n> and LIVE are looked for in the whole block
         if not _TICKS.search(item):
             problems.append("verification item without a command in backticks: %s" % item)
             continue

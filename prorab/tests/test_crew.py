@@ -2730,6 +2730,62 @@ class TestCheckReport(CrewBase):
                            tail="\nResult: delivered\nCommit: %s\n" % self.sha)
         self.has(self.problems(text=none), "no check command")
 
+    def verification_report(self, body):
+        return make_report(sections={"Verification": "## Verification\n" + body},
+                           tail="\nResult: delivered\nCommit: %s\n" % self.sha)
+
+    def test_verification_item_may_span_indented_lines(self):
+        block = ("- Browser check of the rates screen:\n"
+                 "  - `npx playwright test rates.spec.ts` - 3 passed\n"
+                 "  - SKIP: 0\n"
+                 "- `python3 -m unittest` - OK SKIP: 0\n")
+        r = self.check(text=self.verification_report(block))
+        self.assertEqual(r["problems"], [])
+        self.assertTrue(r["ok"])
+        wrapped = ("- `python3 -m unittest discover -s tests`\n"
+                   "    - 14 tests OK - SKIP: 0\n")
+        self.assertTrue(self.check(text=self.verification_report(wrapped))["ok"])
+
+    def test_verification_block_without_a_command_fails(self):
+        block = ("- Browser check of the rates screen:\n"
+                 "  - opened the screen, the rates are live\n"
+                 "  - SKIP: 0\n")
+        self.has(self.problems(text=self.verification_report(block)),
+                 "verification item without a command")
+        self.has(self.problems(text=self.verification_report(block)), "no check command")
+
+    def test_verification_block_without_skip_fails(self):
+        block = "- `make test`:\n  - 14 passed\n"
+        self.has(self.problems(text=self.verification_report(block)), "without SKIP")
+
+    def test_two_separate_verification_items_stay_two(self):
+        block = ("- `make test` SKIP: 0\n"
+                 "- opened the screen by hand\n")
+        problems = self.problems(text=self.verification_report(block))
+        self.has(problems, "verification item without a command")
+        self.assertEqual(len(problems), 1)
+        both = "- `make test`\n- `make lint` SKIP: 0\n"
+        problems = self.problems(text=self.verification_report(both))
+        self.has(problems, "check command without SKIP: <n>: `make test`")
+        self.assertEqual(len(problems), 1)
+
+    def test_a_block_after_a_blank_line_and_lower_text_ends_the_item(self):
+        block = ("- `make test` SKIP: 0\n"
+                 "  - wrapped note\n"
+                 "\n"
+                 "Nothing else was run.\n")
+        r = self.check(text=self.verification_report(block))
+        self.assertTrue(r["ok"], r["problems"])
+        self.assertEqual(r["warnings"], [])
+
+    def test_live_marker_on_a_sub_bullet_of_a_block_counts(self):
+        block = ("- `curl -s https://rates.example/api` - 200 - SKIP: 0\n"
+                 "  - LIVE C1\n")
+        text = make_report(sections={"Verification": "## Verification\n" + block},
+                           tail="\nResult: delivered\nCommit: %s\n" % self.sha)
+        r = crew.check_report(text, ["C1", "C2"], ["src/"], self.wt, live=["C1"])
+        self.assertTrue(r["ok"], r["problems"])
+
     def test_check_report_skip_is_warning(self):
         text = make_report(
             sections={"Verification": "## Verification\n- `make test` SKIP: 3\n"},

@@ -3481,14 +3481,57 @@ class TestNewSiteTrust(CrewBase):
             self.assertEqual(self.trust(), {"status": crew._STOPPED})
         self.assertEqual(self.calls_or_empty(), [])
 
-    def test_new_site_trust_failed_key_is_not_an_acceptance(self):
+    def test_new_site_trust_unconfirmed_key_is_recorded_and_stops(self):
+        # a failed or timed-out send-keys may still have delivered the Enter
         self.screens(self.dialog(), self.dialog(), self.composer)
-        self.route("pane send-keys w:p9", err("pane_not_found"), exit_code=1)
+        self.route("pane send-keys w:p9", err("cli_timeout"), exit_code=1)
         r = self.trust()
-        self.assertEqual(r["status"], "needs_trust")
-        (line,) = self.keys_lines()
+        self.assertEqual((r["status"], r["pane_id"]), ("needs_trust", "w:p9"))
+        self.assertIn("delivery is not confirmed", r["reason"])
+        (text,) = self.j.acts("N1", "answer")
+        self.assertTrue(text.startswith(
+            "[site] folder trust: Enter sent to w:p9 for %s but its delivery is not "
+            "confirmed (" % self.site), text)
+        self.assertIn(r["reason"], text)
+        self.assertIn("(commit %s)" % self.commit, text)
+        self.assertFalse([c for c in self.calls() if c.startswith("agent prompt")])
+        (line,) = self.keys_lines()  # one attempt, no retry
         self.assertFalse(line["ok"])
-        self.assertEqual(self.j.acts("N1"), [])
+        self.assertEqual(len(self.keys()), 1)
+
+    def test_new_site_trust_act_failure_after_the_key_still_returns_a_result(self):
+        self.screens(self.dialog(), self.dialog(), self.composer)
+        with mock.patch.object(self.j, "add_act", side_effect=real_journal.JournalError("bd")):
+            self.assertEqual(self.trust()["status"], "trusted")
+        self.assertEqual(len(self.keys()), 1)
+
+    def test_new_site_trust_path_only_in_scrollback_presses_nothing(self):
+        # the site's path stands above the bottom block; the dialog at the bottom is another's
+        old = "\n".join(["history line %d" % i for i in range(3)] + [self.site]
+                        + ["more history %d" % i for i in range(20)])
+        self.screens(old + "\n" + self.dialog(site="/home/user/projects/other"))
+        self.assertEqual(self.trust()["status"], "needs_trust")
+        self.assert_no_key()
+
+    def test_new_site_trust_real_paths_decide(self):
+        link = os.path.join(self.dir, "projects-link")
+        os.symlink(self.projects, link)
+        # a linked parent that resolves to the projects folder is accepted
+        self.assertIsNone(crew._new_site_eligible(os.path.join(link, "site-x"), "N1"))
+        # the site path itself a link is refused, even when its target qualifies
+        own = os.path.join(self.projects, "own-link")
+        os.symlink(self.site, own)
+        self.record(own)
+        self.assertTrue(crew._new_site_eligible(own, "N1"))
+
+    def test_new_site_trust_with_an_ignored_file_not_eligible(self):
+        with open(os.path.join(self.site, ".git", "info", "exclude"), "a") as fh:
+            fh.write(".claude/\n")
+        os.makedirs(os.path.join(self.site, ".claude"))
+        with open(os.path.join(self.site, ".claude", "settings.local.json"), "w") as fh:
+            fh.write("{}\n")
+        self.assertEqual(git(self.site, "status", "--porcelain", "--untracked-files=all"), "")
+        self.assertTrue(crew._new_site_eligible(self.site, "N1"))
 
     # the outcome
 

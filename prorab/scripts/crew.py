@@ -640,7 +640,7 @@ def _new_site_eligible(site_path, work_order):
     if rec is None:
         return "no record that new_site made this folder"
     recorded = rec.get("path")
-    if not isinstance(recorded, str) or recorded.rstrip("/") not in (path, real):
+    if not isinstance(recorded, str) or os.path.realpath(recorded) != real:
         return "the record is for another path"
     if rec.get("work_order") != work_order:
         return "the record is for another work order"
@@ -659,9 +659,10 @@ def _new_site_eligible(site_path, work_order):
     remotes = _git_soft(["remote"], real)
     if remotes.returncode != 0 or remotes.stdout.strip():
         return "the repository has a remote"
-    status = _git_soft(["status", "--porcelain", "--untracked-files=all"], real)
+    # ignored files count too: an exclude rule must not hide a hooks or MCP config
+    status = _git_soft(["status", "--porcelain", "--untracked-files=all", "--ignored"], real)
     if status.returncode != 0 or status.stdout.strip():
-        return "the repository has changes or untracked files"
+        return "the repository has changes, untracked or ignored files"
     return None
 
 
@@ -696,6 +697,14 @@ def _trust_screen_problem(screen, site_path):
 
 def _trust_needs(pane, reason):
     return {"status": "needs_trust", "pane_id": pane, "reason": reason}
+
+
+def _record_trust_act(work_order, text):
+    """The act of a pressed Enter; a journal failure never hides the result that follows."""
+    try:
+        journal.add_act(work_order, "answer", text)
+    except JournalError:
+        pass
 
 
 def _new_site_trust(site_path, work_order, pane):
@@ -735,17 +744,23 @@ def _new_site_trust(site_path, work_order, pane):
                    or ("the emergency stop is set" if emergency_stop() else None))
         if problem:
             return _trust_needs(pane, problem)
+        now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         try:
             herdr_cli.run_ack(["pane", "send-keys", pane, "enter"])
         except herdr_cli.HerdrError as err:
+            # a failed or timed-out send may still have delivered the Enter: record it as
+            # sent, press nothing more, and leave the pane to the customer
             herdr_cli.log_keys(pane, ["enter"], "new-site trust", crew=name, ok=False,
                                error=str(err))
-            return _trust_needs(pane, "the key was not delivered")
+            reason = ("Enter sent to %s for %s but its delivery is not confirmed (%s)"
+                      % (pane, site_path, err))
+            _record_trust_act(work_order, "[site] folder trust: %s; created empty by new_site "
+                              "(commit %s), %s" % (reason, commit, now))
+            return _trust_needs(pane, reason)
         herdr_cli.log_keys(pane, ["enter"], "new-site trust", crew=name)
-        journal.add_act(work_order, "answer",
-                        "[site] folder trust accepted by the foreman: %s, created empty by "
-                        "new_site (commit %s), pane %s, %s"
-                        % (site_path, commit, pane, time.strftime("%Y-%m-%dT%H:%M:%S%z")))
+        _record_trust_act(work_order,
+                          "[site] folder trust accepted by the foreman: %s, created empty by "
+                          "new_site (commit %s), pane %s, %s" % (site_path, commit, pane, now))
         try:
             ready = herdr_cli.wait_ready(name)
         except herdr_cli.HerdrError:

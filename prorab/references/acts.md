@@ -39,7 +39,7 @@ Evidence checked: <command and output, files read>
 
 ## Handover act
 
-The crew writes it as its last message, at the foreman's request (section Handover request), and ends it with the line HANDOVER READY. `crew.py complete_handover` saves it as a `handover` act on the work order without the marker line and appends two blocks the crew does not write: "Facts at handover" (`git status --short`, the branch's commits since the base, the open stages' statuses) and `Spend:` (`journal.spend_block`).
+The crew writes it as its last message, at the foreman's request (section Handover request), and ends it with the line HANDOVER READY. `crew.py complete_handover` saves it as a `handover` act on the work order without the marker line and appends two blocks the crew does not write: "Facts at handover" (`git status --short`, the branch's commits since the base, the open stages' statuses) and `Spend:` (`journal.spend_block`). If the last message is only the marker and a path, the script reads that file instead, but only from the crew's worktree or `~/.cache/prorab/work-orders`, a regular file of at most 64 KB; any other path is `act_missing`.
 
 ```
 Goal: <the work order's goal in one or two sentences>
@@ -93,7 +93,7 @@ The foreman writes this `answer` act when the customer answers its recommendatio
 ## Handover request
 
 ```
-Finish the current step. Do not start new long runs. Write a handover act with the fields: the work order's goal; done (commits); in progress (background tasks, where their output is, how to check it); next steps; agreements (estimate, clearances, constraints); important paths; open questions. When the act is written, answer with the line HANDOVER READY.
+Finish the current step. Do not start new long runs. Write a handover act with the fields: the work order's goal; done (commits); in progress (background tasks, where their output is, how to check it); next steps; agreements (estimate, clearances, constraints); important paths; open questions. The act is your last message, in the chat, not in a file; end it with the line HANDOVER READY.
 ```
 
 ## Pause

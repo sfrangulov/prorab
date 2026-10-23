@@ -1348,6 +1348,36 @@ def _facts(worktree, work_order, base):
         "Open stages (bd show):", _open_stage_statuses(work_order)])
 
 
+ACT_FILE_MAX = 64 * 1024
+
+
+def _named_paths(line):
+    return re.findall(r"`([^`\n]+)`", line) + re.findall(r"[^\s`]+\.md\b", line)
+
+
+def _act_file(message, worktree):
+    """The act a last message points at (no line of it without a named path): the first
+    path in backticks or word ending in .md whose real path (links resolved) lies inside the
+    worktree or the work-orders directory and is a regular file of at most ACT_FILE_MAX
+    bytes. Else None."""
+    roots = [os.path.realpath(r) for r in (worktree, _files_dir())]
+    for raw in _named_paths(message):
+        path = os.path.expanduser(raw.strip())
+        real = os.path.realpath(path if os.path.isabs(path) else os.path.join(worktree, path))
+        if not any(real == r or real.startswith(r + os.sep) for r in roots):
+            continue
+        try:
+            if not os.path.isfile(real) or os.path.getsize(real) > ACT_FILE_MAX:
+                continue
+            with open(real, encoding="utf-8") as fh:
+                text = fh.read(ACT_FILE_MAX + 1).strip()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if text:
+            return "%s\n\n(read from %s)" % (text, real)
+    return None
+
+
 def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1, base=None):
     if emergency_stop():
         return {"status": _STOPPED}
@@ -1366,6 +1396,11 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
     worktree = journal.kv_get(_kv(name, "worktree"))
     if not worktree:
         return {"status": "restart_failed", "reason": "worktree of the crew is unknown"}
+    act = "\n".join(ln for ln in lines if ln.strip() != HANDOVER_MARKER).strip()
+    if all(_named_paths(ln) for ln in act.splitlines() if ln.strip()):  # no act text, only a pointer
+        act = _act_file(act, worktree)
+        if act is None:
+            return {"status": "act_missing"}
     failed = _settings_failure(name, work_order, pane)  # before the act is saved, before /exit
     if failed:
         return failed
@@ -1378,7 +1413,6 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
     if looping:
         journal.wait_customer(work_order, "handover loop")
         return {"status": "handover_loop"}
-    act = "\n".join(ln for ln in lines if ln.strip() != HANDOVER_MARKER).strip()
     act = "%s\n\n%s" % (act, _facts(worktree, work_order, base))
     spend = _spend_of(work_order, worktree)
     act = "%s\n\n%s" % (act, _spend_block(work_order, spend))

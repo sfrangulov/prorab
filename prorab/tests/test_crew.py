@@ -1179,6 +1179,67 @@ class TestHandover(CrewBase):
         for c in self.calls():
             self.assertFalse(c.startswith(("agent prompt", "pane run")))
 
+    def named_act(self, message, path=None, text="Act: done B\nNext: C", size=None):
+        """The last message names an act file; the file is written at `path` when given."""
+        if path:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text if size is None else "x" * size)
+        self.write_transcript("/work", "sess-1", message)
+        self.restart_routes()
+        self.route("agent start a1", ok({}))
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+
+    def assert_act_missing(self):
+        self.assertEqual(self.go(), {"status": "act_missing"})
+        self.assertEqual(self.j.act_log, [])
+        self.assertEqual(self.j.spent, [])
+        for c in self.calls():
+            self.assertFalse(c.startswith(("agent prompt", "pane run", "agent start")))
+
+    def test_handover_act_named_file_in_the_worktree_is_read(self):
+        path = os.path.join(self.wt, "notes", "act.md")
+        self.named_act("The act is in `%s`.\nHANDOVER READY" % path, path)
+        self.assertEqual(self.go()["status"], "restarted")
+        act = self.j.act_log[0][2]
+        self.assertTrue(act.startswith("Act: done B\nNext: C"))
+        self.assertIn("(read from %s)" % os.path.realpath(path), act)
+
+    def test_handover_act_named_file_in_the_work_orders_dir_is_read(self):
+        path = os.path.join(crew._files_dir(), "N1-act.md")
+        self.named_act("Written to %s\nHANDOVER READY" % path, path)
+        self.assertEqual(self.go()["status"], "restarted")
+        self.assertIn("Act: done B", self.j.act_log[0][2])
+
+    def test_handover_act_named_file_outside_is_act_missing(self):
+        path = os.path.join(self.dir, "elsewhere", "act.md")
+        self.named_act("See `%s`\nHANDOVER READY" % path, path)
+        self.assert_act_missing()
+
+    def test_handover_act_link_pointing_outside_is_act_missing(self):
+        target = os.path.join(self.dir, "elsewhere", "act.md")
+        os.makedirs(os.path.dirname(target))
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("secret")
+        link = os.path.join(self.wt, "act.md")
+        os.symlink(target, link)
+        self.named_act("See `%s`\nHANDOVER READY" % link)
+        self.assert_act_missing()
+
+    def test_handover_marker_alone_names_no_file_is_act_missing(self):
+        self.named_act("HANDOVER READY")
+        self.assert_act_missing()
+
+    def test_handover_act_oversized_file_is_act_missing(self):
+        path = os.path.join(self.wt, "act.md")
+        self.named_act("`%s`\nHANDOVER READY" % path, path, size=64 * 1024 + 1)
+        self.assert_act_missing()
+
+    def test_handover_act_file_of_64k_is_read(self):
+        path = os.path.join(self.wt, "act.md")
+        self.named_act("`%s`\nHANDOVER READY" % path, path, size=64 * 1024)
+        self.assertEqual(self.go()["status"], "restarted")
+
     def test_unknown_worktree_never_restarts_in_cwd(self):
         del self.j.kv["crew.a1.worktree"]
         self.route("agent list", ok({"agents": [agent_entry()]}))

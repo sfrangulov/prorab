@@ -80,6 +80,7 @@ class Stub:
         self.awake_pid = os.getpid()   # the process the hold "started": alive
         self.trust = False   # what `site_trust` answers: a value, or a dict by site path
         self.pause_error = {}   # crew name -> exception raised once by the pause
+        self.pause_results = {}  # crew name -> deliveries returned by its next pauses
 
     def _agents(self):
         self.calls["agents"] += 1
@@ -115,7 +116,8 @@ class Stub:
         if err:
             raise err
         self.calls["pause"].append(name)
-        return "accepted"
+        results = self.pause_results.get(name)
+        return results.pop(0) if results else "accepted"
 
     def _hold_awake(self, seconds):
         self.calls["awake"].append(seconds)
@@ -815,6 +817,22 @@ class TestEmergencyStop(PollBase):
         self.assertEqual(self.poll(self.now + 90, names=self.names), [])
         self.assertEqual(self.s.calls["pause"], ["a2", "a1"])
         self.assertEqual(self.mem["emergency"]["paused"], ["a2", "a1"])
+
+    def test_emergency_refused_pause_is_not_counted_and_is_sent_again_each_poll(self):
+        self.s.pause_results["a1"] = ["blocked", "stalled"]
+        self.touch_stop()
+        self.assertEqual(self.poll(names=self.names), ["emergency_stop a2"])
+        self.assertEqual(self.mem["emergency"]["paused"], ["a2"])
+        self.assertEqual(self.poll(self.now + 90, names=self.names), [])  # refused again
+        self.assertEqual(self.mem["emergency"]["paused"], ["a2"])
+        self.assertEqual(self.poll(self.now + 180, names=self.names), [])  # accepted now
+        self.assertEqual(self.mem["emergency"]["paused"], ["a2", "a1"])
+        self.assertEqual(self.s.calls["pause"], ["a1", "a2", "a1", "a1"])  # once per poll
+        self.assertEqual(self.poll(self.now + 270, names=self.names), [])
+        self.assertEqual(self.s.calls["pause"], ["a1", "a2", "a1", "a1"])
+        self.release()
+        self.assertEqual(self.poll(self.now + 360, names=self.names),
+                         ["emergency_released a2,a1"])
 
     def test_emergency_check_uses_the_stop_path_of_the_defaults(self):
         self.d["emergency"]["stop_path"] = os.path.join(self.tmp.name, "other", "STOP")

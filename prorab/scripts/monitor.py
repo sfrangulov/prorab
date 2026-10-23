@@ -479,7 +479,8 @@ def _poll(crews, d, mem, now, dp, stopping=False):
         for name in crews:
             if name in emergency["paused"] or _find_agent(name, listed, kv) is None:
                 continue
-            if guard("pause.%s" % name, dp["pause"], name, default=_FAILED) is not _FAILED:
+            # only an accepted delivery counts as paused; any other is sent again next poll
+            if guard("pause.%s" % name, dp["pause"], name, default=_FAILED) == "accepted":
                 emergency["paused"].append(name)
                 newly.append(name)
         if first:

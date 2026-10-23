@@ -53,5 +53,41 @@ class TestJournalCliArguments(unittest.TestCase):
                          ("limit", "all_waiting", "foreman_failure", "api_key"))
 
 
+class TestLockAndMainsErrors(unittest.TestCase):
+    """Fix wave 1, 15.10: the lock's OSError and the mains' JSON errors."""
+
+    def test_an_unusable_lock_file_is_a_journal_error_naming_it(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = os.path.join(tmp, "blocker")
+            with open(blocker, "w"):
+                pass
+            with mock.patch.dict(os.environ, {"PRORAB_CACHE": os.path.join(blocker, "sub")}):
+                with self.assertRaises(journal.JournalError) as cm:
+                    with journal._locked():
+                        pass
+            self.assertIn("journal.lock", str(cm.exception))
+            self.assertEqual(journal._HELD[0], 0)
+
+    def test_the_journal_main_prints_a_json_error_for_an_oserror(self):
+        out = io.StringIO()
+        with mock.patch.object(journal, "ensure_db"), \
+                mock.patch.object(journal, "kv_get", side_effect=OSError("disk full")), \
+                contextlib.redirect_stdout(out):
+            rc = journal.main(["kv", "get", "k"])
+        self.assertEqual(rc, 1)
+        self.assertIn("disk full", json.loads(out.getvalue())["error"])
+
+    def test_the_shift_main_prints_a_json_error_for_a_journal_error(self):
+        import shift
+        out = io.StringIO()
+        with mock.patch.object(shift.journal, "ensure_db",
+                               side_effect=journal.JournalError("lock gone")), \
+                contextlib.redirect_stdout(out):
+            rc = shift.main(["reconcile"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out.getvalue()), {"error": "lock gone"})
+
+
 if __name__ == "__main__":
     unittest.main()

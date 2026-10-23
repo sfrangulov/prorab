@@ -829,6 +829,14 @@ def _default_reports_dir():
 
 
 def main(argv=None):
+    try:
+        return _main(argv)
+    except Exception as e:  # a JSON error, not a traceback (argument errors exit through argparse)
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        return 1
+
+
+def _main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("preflight").add_argument("--night", action="store_true")

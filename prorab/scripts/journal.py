@@ -43,13 +43,16 @@ def _locked():
     with _THREAD_LOCK:
         if _HELD[0] == 0:
             path = lock_path()
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            except BaseException:
-                os.close(fd)
-                raise
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                except BaseException:
+                    os.close(fd)
+                    raise
+            except OSError as e:
+                raise JournalError("cannot take the journal lock %s: %s" % (path, e))
             _HELD[1] = fd
         _HELD[0] += 1
         try:
@@ -1338,6 +1341,18 @@ URGENT_KINDS = ("limit", "all_waiting", "foreman_failure", "api_key")
 
 
 def main(argv=None):
+    try:
+        return _main(argv)
+    except Exception as e:  # a JSON error, not a traceback (argument errors exit through argparse)
+        return _emit_error(e)
+
+
+def _emit_error(e):
+    print(json.dumps({"error": str(e)}, ensure_ascii=False))
+    return 1
+
+
+def _main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ensure")

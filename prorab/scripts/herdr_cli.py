@@ -128,7 +128,10 @@ def check_env():
 
 
 def agents():
-    return run(["agent", "list"])["result"]["agents"]
+    listed = (run(["agent", "list"]).get("result") or {}).get("agents")
+    if not isinstance(listed, list):  # an error the monitor guards, not a bare KeyError
+        raise HerdrError("cli_error", "herdr agent list: no result.agents list in the answer")
+    return listed
 
 
 def agent(name):

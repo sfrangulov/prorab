@@ -250,6 +250,15 @@ class TestRun(FakeBase):
         self.assertEqual(cm.exception.code, "cli_error")
         self.assertIn("syntax error", str(cm.exception))
 
+    def test_agents_without_a_list_is_a_herdr_error(self):
+        # not a bare KeyError: the monitor guards a HerdrError and skips the poll's crews
+        for body in (ok({}), ok({"agents": None}), json.dumps({"id": "cli:x"})):
+            self.route("agent list", body)
+            with self.assertRaises(herdr_cli.HerdrError) as cm:
+                herdr_cli.agents()
+            self.assertEqual(cm.exception.code, "cli_error")
+            self.assertIn("agent list", str(cm.exception))
+
     def test_seq_route(self):
         self.route_seq("agent list", [ok({"agents": [{"name": "a1"}]}), ok({"agents": []})])
         self.assertEqual(len(herdr_cli.agents()), 1)

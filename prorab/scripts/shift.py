@@ -180,15 +180,25 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
     `prorab:handoff` (`{from, to, bead, ts}`) names the new pane before the new foreman starts,
     so its first lock attempt succeeds. On a timeout the handoff is withdrawn and the old
     foreman keeps working. A repeated call (the first was killed) while that handoff names a
-    pane with a live agent resumes waiting for it: no second pane, no second successor."""
+    pane with a live agent resumes waiting for it: no second pane, no second successor. The
+    takeover clears that record, so a retry after a completed takeover reads the shift bead's
+    metadata instead (`from`, `pane`) and reports it; a caller that is not the lock holder gets
+    `not_holder` before any pane is read or closed."""
     d = _defaults.load()
     now = time.time()
+    done = _completed_takeover(caller_pane)
+    if done:
+        return done
+    holder = journal.kv_get("prorab:active")
+    if holder is not None and holder != caller_pane:
+        return {"status": "not_holder", "holder": holder}
     pending = journal.handoff()
     if pending and pending.get("to"):
         if pending.get("from") == caller_pane and pending.get("bead") \
                 and any(a.get("pane_id") == pending["to"] for a in herdr_cli.agents()):
+            delivery = _resend_prompt(pending)
             return _await_takeover(caller_pane, pending["to"], pending["bead"],
-                                   float(pending.get("ts") or now), "resumed", timeout_s, poll_s)
+                                   float(pending.get("ts") or now), delivery, timeout_s, poll_s)
         crew._close_pane(pending["to"])  # a stale handoff: its pane has no agent
         journal.kv_clear(journal.HANDOFF_KEY)
     spend = journal.shift_spend(d, now)
@@ -213,14 +223,53 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
         crew._close_pane(pane)  # a retry must not leave an empty pane behind
         return {"status": "start_failed", "reason": str(e), "new_pane": pane, "bead": bead}
     journal.bd(["update", bead, "--metadata", json.dumps({"session_id": session_id,
-                                                           "name": name, "pane": pane})])
+                                                           "name": name, "pane": pane,
+                                                           "from": caller_pane})])
     journal.add_foreman_session(session_id)
+    delivery = _send_prompt(name, bead)
+    return _await_takeover(caller_pane, pane, bead, now, delivery, timeout_s, poll_s)
+
+
+def _send_prompt(name, bead):
+    """The take-over prompt, once: `sent` goes on the bead right before it is sent."""
+    journal.bd(["update", bead, "--metadata", json.dumps({"sent": time.time()})])
     try:
         # the skill is command-only (disable-model-invocation): only its command loads it
-        delivery = herdr_cli.send(name, "/prorab take over the shift from bead %s." % bead)
+        return herdr_cli.send(name, "/prorab take over the shift from bead %s." % bead)
     except herdr_cli.HerdrError as e:
-        delivery = "error: %s" % e
-    return _await_takeover(caller_pane, pane, bead, now, delivery, timeout_s, poll_s)
+        return "error: %s" % e
+
+
+def _completed_takeover(caller_pane):
+    """The result of an earlier handoff of `caller_pane` whose successor now holds the lock
+    (the latest shift bead whose `from` is the caller), else None. Reads the journal only."""
+    beads = journal.bd(["list", "--label", SHIFT_LABEL, "--all", "--limit", "0"])
+    mine = [b for b in beads if (b.get("metadata") or {}).get("from") == caller_pane]
+    if not mine:
+        return None
+    last = max(mine, key=lambda b: b.get("created_at") or "")
+    pane = last["metadata"].get("pane")
+    if pane and journal.kv_get("prorab:active") == pane:
+        return {"status": "handed_over", "new_pane": pane, "bead": last["id"],
+                "delivery": "resumed"}
+    return None
+
+
+def _resend_prompt(pending):
+    """A resumed handoff (the caller still holds the lock, so the successor holds none): the
+    prompt goes out once when the first call never reached it (no `sent` on the bead) and
+    the successor's composer is empty. "resumed" otherwise."""
+    name = pending.get("name")
+    if not name:
+        return "resumed"
+    if (journal.bd(["show", pending["bead"]])[0].get("metadata") or {}).get("sent"):
+        return "resumed"
+    try:
+        if herdr_cli.composer_text(herdr_cli.agent_visible(name)) != "":
+            return "resumed"
+    except herdr_cli.HerdrError:
+        return "resumed"
+    return _send_prompt(name, pending["bead"])
 
 
 def _await_takeover(caller_pane, pane, bead, now, delivery, timeout_s, poll_s):

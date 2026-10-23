@@ -27,7 +27,7 @@ import _defaults  # noqa: E402
 import journal  # noqa: E402
 import monitor  # noqa: E402
 import shift  # noqa: E402
-from prorab.tests.test_herdr_cli import err, ok  # noqa: E402
+from prorab.tests.test_herdr_cli import err, fixture, ok  # noqa: E402
 from prorab.tests.test_journal import JournalBase, new_work_order  # noqa: E402
 
 T0 = 1790000000.0
@@ -741,6 +741,20 @@ class TestHandoff(ShiftBase):
                 json.dump({"pid": os.getpid() if pid is None else pid, "pane": pane,
                            "started_at": at}, fh)
 
+    def lock_moves_at_prompt(self):
+        """The caller holds the lock until the take-over prompt is sent; the successor holds
+        it right after (a takeover that needs no wait)."""
+        journal.kv_set("prorab:active", "w:p1")
+        real = shift.herdr_cli.send
+
+        def send(name, text, timeout_ms=None):
+            res = real(name, text)
+            journal.kv_set("prorab:active", "w:p9")
+            return res
+        patch = mock.patch.object(shift.herdr_cli, "send", send)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_handoff_prorab_waits_for_lock(self):
         self.routes_for_handoff()
         journal.kv_set("prorab:active", "w:p1")
@@ -784,7 +798,7 @@ class TestHandoff(ShiftBase):
 
     def test_handoff_lock_without_monitor_is_unconfirmed(self):
         self.routes_for_handoff()
-        journal.kv_set("prorab:active", "w:p9")
+        self.lock_moves_at_prompt()
         self.confirm(monitor_file=False)
         res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
         self.assertEqual(res["status"], "handed_over")
@@ -793,21 +807,21 @@ class TestHandoff(ShiftBase):
 
     def test_handoff_lock_alone_names_both_missing_facts(self):
         self.routes_for_handoff()
-        journal.kv_set("prorab:active", "w:p9")
+        self.lock_moves_at_prompt()
         res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
         self.assertEqual(res["status"], "handed_over")
         self.assertEqual(res["unconfirmed"], ["reconcile", "monitor"])
 
     def test_handoff_old_records_do_not_count(self):
         self.routes_for_handoff()
-        journal.kv_set("prorab:active", "w:p9")
+        self.lock_moves_at_prompt()
         self.confirm(at=time.time() - 3600)  # left by an earlier foreman in this pane
         res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
         self.assertEqual(res["unconfirmed"], ["reconcile", "monitor"])
 
     def test_handoff_records_of_another_pane_or_a_dead_pid_do_not_count(self):
         self.routes_for_handoff()
-        journal.kv_set("prorab:active", "w:p9")
+        self.lock_moves_at_prompt()
         self.confirm(pane="w:p5", monitor_file=False)  # reconcile run by another pane
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
@@ -874,13 +888,108 @@ class TestHandoff(ShiftBase):
         self.assertEqual(journal.handoff()["to"], "w:p9")
         self.route("agent list", ok({"agents": [agent_entry("prorab-2", "w:p9")]}))
         self.confirm()
-        journal.kv_set("prorab:active", "w:p9")
-        res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
+
+        def sleeper(s):
+            journal.kv_set("prorab:active", "w:p9")
+        with mock.patch.object(shift.time, "sleep", sleeper):
+            res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
         self.assertEqual((res["status"], res["new_pane"], res["delivery"]),
                          ("handed_over", "w:p9", "resumed"))
         self.assertEqual(len([c for c in self.calls() if c.startswith("pane split")]), 1)
         self.assertEqual(len([c for c in self.calls() if c.startswith("agent start")]), 1)
+        self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
         self.assertEqual(journal.bd(["show", res["bead"]])[0]["status"], "closed")
+
+    def finished_handoff(self):
+        """A handoff that completed: the successor holds the lock, the record is cleared (as
+        `acquire_active` does) and the bead is closed."""
+        self.routes_for_handoff()
+        self.route("pane close", ok({}))
+        self.lock_moves_at_prompt()
+        self.confirm()
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
+        self.assertEqual(res["status"], "handed_over")
+        journal.kv_clear(journal.HANDOFF_KEY)
+        self.route("agent list", ok({"agents": [agent_entry("prorab-2", "w:p9")]}))
+        return res
+
+    def test_a_retry_after_a_completed_takeover_reports_and_starts_nothing(self):
+        first = self.finished_handoff()  # the old foreman is no longer the holder
+        before = self.calls()
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
+        self.assertEqual((res["status"], res["new_pane"], res["bead"]),
+                         ("handed_over", "w:p9", first["bead"]))
+        self.assertEqual(self.calls(), before)  # no pane, no agent, no prompt, no read
+        self.assertEqual(len(journal.bd(["list", "--label", shift.SHIFT_LABEL, "--all"])), 1)
+
+    def test_a_retry_reports_the_latest_bead_of_the_caller_only(self):
+        self.finished_handoff()
+        journal.kv_set("prorab:active", "w:p5")  # the lock moved on again
+        before = self.calls()
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
+        self.assertEqual(res["status"], "not_holder")
+        self.assertEqual(self.calls(), before)
+
+    def test_a_caller_that_is_not_the_holder_touches_no_pending_pane(self):
+        self.routes_for_handoff()
+        self.route("pane close", ok({}))
+        journal.kv_set("prorab:active", "w:p5")
+        journal.handoff_set("w:p5", "w:p7", bead="old", name="prorab-2", ts=1.0)
+        self.route("agent list", ok({"agents": [agent_entry("prorab-2", "w:p7")]}))
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
+        self.assertEqual(res["status"], "not_holder")
+        self.assertEqual(journal.handoff()["to"], "w:p7")
+        self.assertEqual(self.calls(), [])
+
+    def killed_before_the_prompt(self):
+        """A first call killed after the successor started, before its prompt was sent."""
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p1")
+        with mock.patch.object(journal, "add_foreman_session", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                shift.handoff_prorab("w:p1", "state", timeout_s=600, poll_s=1)
+        self.route("agent list", ok({"agents": [agent_entry("prorab-2", "w:p9")]}))
+        self.assertEqual([c for c in self.calls() if c.startswith("agent prompt")], [])
+
+    def retry_with_lock_at_the_wait(self):
+        def sleeper(s):
+            journal.kv_set("prorab:active", "w:p9")
+        with mock.patch.object(shift.time, "sleep", sleeper):
+            return shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
+
+    def test_a_retry_sends_the_prompt_the_first_call_never_sent(self):
+        self.killed_before_the_prompt()
+        self.route("agent read prorab-2 --source visible", fixture("composer", "empty.txt"))
+        self.confirm()
+        res = self.retry_with_lock_at_the_wait()
+        self.assertEqual(res["status"], "handed_over")
+        prompts = [c for c in self.calls() if c.startswith("agent prompt")]
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("take over the shift from bead %s." % res["bead"], prompts[0])
+        reads = [i for i, c in enumerate(self.calls()) if c.startswith("agent read")]
+        self.assertLess(reads[0], self.calls().index(prompts[0]))  # read first
+        self.assertTrue(journal.bd(["show", res["bead"]])[0]["metadata"]["sent"])
+        self.assertEqual(len([c for c in self.calls() if c.startswith("pane split")]), 1)
+
+    def test_a_retry_leaves_a_busy_composer_alone(self):
+        self.killed_before_the_prompt()
+        self.route("agent read prorab-2 --source visible", fixture("composer", "ours.txt"))
+        self.confirm()
+        self.retry_with_lock_at_the_wait()
+        self.assertEqual([c for c in self.calls() if c.startswith("agent prompt")], [])
+
+    def test_a_retry_after_the_prompt_was_sent_sends_no_second_one(self):
+        self.routes_for_handoff()
+        journal.kv_set("prorab:active", "w:p1")
+        with mock.patch.object(shift, "_await_takeover", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                shift.handoff_prorab("w:p1", "state", timeout_s=600, poll_s=1)
+        self.route("agent list", ok({"agents": [agent_entry("prorab-2", "w:p9")]}))
+        self.route("agent read prorab-2 --source visible", fixture("composer", "empty.txt"))
+        self.confirm()
+        self.retry_with_lock_at_the_wait()
+        self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
+        self.assertFalse([c for c in self.calls() if c.startswith("agent read")])
 
     def test_a_stale_handoff_without_a_live_agent_is_replaced(self):
         self.routes_for_handoff()
@@ -895,7 +1004,7 @@ class TestHandoff(ShiftBase):
 
     def test_handoff_prorab_assigns_session_id(self):
         self.routes_for_handoff()
-        journal.kv_set("prorab:active", "w:p9")  # already taken over
+        self.lock_moves_at_prompt()  # taken over right after the prompt
         res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
         self.assertEqual(res["status"], "handed_over")
         start = [c for c in self.calls() if c.startswith("agent start prorab-2")][0]
@@ -913,7 +1022,7 @@ class TestHandoff(ShiftBase):
 
     def test_handoff_prorab_sets_the_handoff_before_the_start(self):
         self.routes_for_handoff()
-        journal.kv_set("prorab:active", "w:p9")
+        self.lock_moves_at_prompt()
         seen = []
         real = shift.herdr_cli.run
 
@@ -927,7 +1036,7 @@ class TestHandoff(ShiftBase):
 
     def test_handoff_act_has_spend_and_rate(self):
         self.routes_for_handoff()
-        journal.kv_set("prorab:active", "w:p9")
+        self.lock_moves_at_prompt()
         n = journal.create_work_order("o", "Importer", "b", {"usd": 10})
         wt = "/home/user/projects/demo-app-a"
         journal.issue_set(n, "issued", worktree=wt)

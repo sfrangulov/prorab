@@ -798,27 +798,46 @@ def new_site(site_path, work_order, caller_pane):
     if not _SITE_NAME.match(os.path.basename(path)):
         return {"status": "bad_name", "name": os.path.basename(path)}
     try:
+        shown = journal.bd(["show", work_order])
+    except JournalError:
+        shown = None
+    if not shown or shown[0].get("status") == "closed":
+        return {"status": "no_work_order", "work_order": work_order}
+    try:
         os.mkdir(path)
     except FileExistsError:
         return {"status": "exists", "site": path}
-    steps = (["init", "-q", "-b", "main"],
-             ["commit", "-q", "--allow-empty", "-m", "Start the site"],
-             ["rev-parse", "HEAD"])
-    commit = ""
-    for step in steps:
-        p = _git_soft(step, path)
-        if p.returncode != 0:
-            shutil.rmtree(path, ignore_errors=True)
-            return {"status": "git_failed",
-                    "detail": "git %s: %s" % (step[0], (p.stderr or p.stdout).strip())}
-        commit = p.stdout.strip()
-    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    journal.kv_set(_site_key(os.path.realpath(path)),
-                   json.dumps({"path": path, "commit": commit, "work_order": work_order,
-                               "at": now}))
-    journal.add_act(work_order, "answer", "[site] created %s empty: git init -b main, commit %s"
-                    % (path, commit))
-    pane = _take_pane(work_order, path, caller_pane)
+    except OSError as e:
+        return {"status": "mkdir_failed", "detail": str(e)}
+    # from here the folder is this call's: any failure before the trust step removes it (and
+    # its record), so a rerun can succeed
+    key = _site_key(os.path.realpath(path))
+    step = "git"
+    try:
+        commit = ""
+        for args in (["init", "-q", "-b", "main"],
+                     ["commit", "-q", "--allow-empty", "-m", "Start the site"],
+                     ["rev-parse", "HEAD"]):
+            p = _git_soft(args, path)
+            if p.returncode != 0:
+                raise RuntimeError("git %s: %s" % (args[0], (p.stderr or p.stdout).strip()))
+            commit = p.stdout.strip()
+        step = "record"
+        journal.kv_set(key, json.dumps({"path": path, "commit": commit,
+                                        "work_order": work_order,
+                                        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}))
+        step = "act"
+        journal.add_act(work_order, "answer",
+                        "[site] created %s empty: git init -b main, commit %s" % (path, commit))
+        step = "pane"
+        pane = _take_pane(work_order, path, caller_pane)
+    except Exception as e:  # noqa: BLE001  (every failure leaves nothing behind)
+        shutil.rmtree(path, ignore_errors=True)
+        try:
+            journal.kv_clear(key)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"status": "%s_failed" % step, "detail": str(e)}
     return {"status": "created", "site": path, "commit": commit,
             "trust": _new_site_trust(path, work_order, pane), "pane_id": pane}
 

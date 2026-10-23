@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -3774,6 +3775,132 @@ class TestNewSite(CrewBase):
         self.assertEqual(self.j.kv_all().keys() & {k for k in self.j.kv if k.startswith("site.")},
                          set())
         self.trust.assert_not_called()
+
+    # round 1: nothing is left behind on a failure before the trust step
+
+    def assert_nothing_left(self):
+        self.assertFalse(os.path.exists(self.site))
+        self.assertEqual([k for k in self.j.kv if k.startswith("site.")], [])
+        self.trust.assert_not_called()
+
+    def assert_rerun_succeeds(self):
+        self.assertEqual(self.make()["status"], "created")
+
+    def git_fails_at(self, verb):
+        real = crew._git_soft
+
+        def broken(args, cwd=None):
+            if args[0] == verb:
+                return subprocess.CompletedProcess(["git"], 1, "", "boom " + verb)
+            return real(args, cwd)
+        return mock.patch.object(crew, "_git_soft", broken)
+
+    def test_new_site_missing_projects_dir_is_mkdir_failed(self):
+        shutil.rmtree(self.projects)
+        r = self.make()
+        self.assertEqual(r["status"], "mkdir_failed")
+        self.assertIn("detail", r)
+        self.assertFalse(os.path.exists(self.projects))
+        self.trust.assert_not_called()
+
+    def test_new_site_unknown_work_order_makes_nothing(self):
+        with mock.patch.object(self.j, "bd", side_effect=real_journal.JournalError("no such")):
+            self.assertEqual(self.make()["status"], "no_work_order")
+        self.assertEqual(os.listdir(self.projects), [])
+        with mock.patch.object(self.j, "bd", return_value=[]):
+            self.assertEqual(self.make()["status"], "no_work_order")
+        with mock.patch.object(self.j, "bd", return_value=[{"id": "N1", "status": "closed"}]):
+            self.assertEqual(self.make()["status"], "no_work_order")
+        self.assertEqual(os.listdir(self.projects), [])
+
+    def test_new_site_init_failure_leaves_nothing(self):
+        with self.git_fails_at("init"):
+            r = self.make()
+        self.assertEqual(r["status"], "git_failed")
+        self.assertIn("boom init", r["detail"])
+        self.assert_nothing_left()
+        self.assert_rerun_succeeds()
+
+    def test_new_site_rev_parse_failure_leaves_nothing(self):
+        with self.git_fails_at("rev-parse"):
+            r = self.make()
+        self.assertEqual(r["status"], "git_failed")
+        self.assert_nothing_left()
+        self.assert_rerun_succeeds()
+
+    def test_new_site_missing_git_binary_leaves_nothing(self):
+        with mock.patch.object(crew.subprocess, "run", side_effect=FileNotFoundError("git")):
+            r = self.make()
+        self.assertEqual(r["status"], "git_failed")
+        self.assert_nothing_left()
+        self.assert_rerun_succeeds()
+
+    def test_new_site_failing_act_leaves_nothing(self):
+        with mock.patch.object(self.j, "add_act", side_effect=real_journal.JournalError("closed")):
+            r = self.make()
+        self.assertEqual(r["status"], "act_failed")
+        self.assertIn("closed", r["detail"])
+        self.assert_nothing_left()
+        self.take.assert_not_called()
+        self.assert_rerun_succeeds()
+
+    def test_new_site_kv_failure_leaves_nothing(self):
+        with mock.patch.object(self.j, "kv_set", side_effect=real_journal.JournalError("bd")):
+            r = self.make()
+        self.assertEqual(r["status"], "record_failed")
+        self.assert_nothing_left()
+        self.assert_rerun_succeeds()
+
+    def test_new_site_take_pane_failure_leaves_nothing(self):
+        self.take.side_effect = herdr_cli.HerdrError("no pane")
+        r = self.make()
+        self.assertEqual(r["status"], "pane_failed")
+        self.assert_nothing_left()
+        self.take.side_effect = None
+        self.assert_rerun_succeeds()
+
+    # confinement
+
+    def test_new_site_relative_path_resolves_against_cwd(self):
+        old = os.getcwd()
+        os.chdir(self.projects)
+        self.addCleanup(os.chdir, old)
+        self.assertEqual(crew.new_site("rel-site", "N1", "w:p1")["status"], "created")
+        self.assertTrue(os.path.isdir(os.path.join(self.projects, "rel-site", ".git")))
+
+    def test_new_site_dotdot_cannot_leave_projects_dir(self):
+        other = os.path.join(self.dir, "other")
+        os.makedirs(other)
+        r = self.make(os.path.join(self.projects, "..", "other", "site"))
+        self.assertEqual(r["status"], "outside_projects")
+        self.assertEqual(os.listdir(other), [])
+        r = self.make(os.path.join(self.projects, "..", "projects", "site2"))
+        self.assertEqual(r["status"], "created")
+        self.assertTrue(os.path.isdir(os.path.join(self.projects, "site2", ".git")))
+
+    def test_new_site_trailing_slash(self):
+        r = self.make(self.site + "/")
+        self.assertEqual(r["status"], "created")
+        self.assertEqual(r["site"], self.site)
+
+    def test_new_site_symlinked_parent(self):
+        link = os.path.join(self.dir, "plink")
+        os.symlink(self.projects, link)
+        r = self.make(os.path.join(link, "via-link"))
+        self.assertEqual(r["status"], "created")
+        self.assertTrue(os.path.isdir(os.path.join(self.projects, "via-link", ".git")))
+        elsewhere = os.path.join(self.dir, "elsewhere")
+        os.makedirs(elsewhere)
+        bad = os.path.join(self.dir, "blink")
+        os.symlink(elsewhere, bad)
+        self.assertEqual(self.make(os.path.join(bad, "x"))["status"], "outside_projects")
+        self.assertEqual(os.listdir(elsewhere), [])
+
+    def test_new_site_dangling_symlink_name_is_exists(self):
+        os.symlink(os.path.join(self.dir, "nowhere"), self.site)
+        self.assertEqual(self.make()["status"], "exists")
+        self.assertTrue(os.path.islink(self.site))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "nowhere")))
 
     def test_cli_new_site(self):
         with mock.patch.object(crew, "new_site", return_value={"status": "created"}) as n, \

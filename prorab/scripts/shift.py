@@ -173,10 +173,20 @@ def _free_foreman_name():
 def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
     """Start a new foreman in a new pane and wait until it holds `prorab:active`.
 
-    `prorab:handoff` names the new pane before the new foreman starts, so its first lock
-    attempt succeeds. On a timeout the handoff is withdrawn and the old foreman keeps working."""
+    `prorab:handoff` (`{from, to, bead, ts}`) names the new pane before the new foreman starts,
+    so its first lock attempt succeeds. On a timeout the handoff is withdrawn and the old
+    foreman keeps working. A repeated call (the first was killed) while that handoff names a
+    pane with a live agent resumes waiting for it: no second pane, no second successor."""
     d = _defaults.load()
     now = time.time()
+    pending = journal.handoff()
+    if pending and pending.get("to"):
+        if pending.get("from") == caller_pane and pending.get("bead") \
+                and any(a.get("pane_id") == pending["to"] for a in herdr_cli.agents()):
+            return _await_takeover(caller_pane, pending["to"], pending["bead"],
+                                   float(pending.get("ts") or now), "resumed", timeout_s, poll_s)
+        crew._close_pane(pending["to"])  # a stale handoff: its pane has no agent
+        journal.kv_clear(journal.HANDOFF_KEY)
     spend = journal.shift_spend(d, now)
     rates = limits.rates(scheduler.readings(), d, now)
     bead = journal.bd(["create", "Shift handover %s" % time.strftime("%Y-%m-%d %H:%M"),
@@ -190,12 +200,13 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
     pane = herdr_cli.run(["pane", "split", caller_pane, "--direction",
                           crew._split_direction(caller_pane), "--no-focus", "--cwd",
                           os.path.expanduser("~/projects/prorab")])["result"]["pane"]["pane_id"]
-    journal.kv_set("prorab:handoff", pane)
+    journal.handoff_set(caller_pane, pane, bead=bead, name=name, ts=now)
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
                       + crew._claude_args(("--session-id", session_id)), timeout_s=90)
     except herdr_cli.HerdrError as e:
-        journal.kv_clear("prorab:handoff")
+        journal.kv_clear(journal.HANDOFF_KEY)
+        crew._close_pane(pane)  # a retry must not leave an empty pane behind
         return {"status": "start_failed", "reason": str(e), "new_pane": pane, "bead": bead}
     journal.bd(["update", bead, "--metadata", json.dumps({"session_id": session_id,
                                                            "name": name, "pane": pane})])
@@ -205,6 +216,11 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
                                         "bead %s." % bead)
     except herdr_cli.HerdrError as e:
         delivery = "error: %s" % e
+    return _await_takeover(caller_pane, pane, bead, now, delivery, timeout_s, poll_s)
+
+
+def _await_takeover(caller_pane, pane, bead, now, delivery, timeout_s, poll_s):
+    """Wait until the foreman in `pane` holds the lock and its takeover is confirmed."""
     deadline = time.monotonic() + timeout_s
     alive = []  # the new monitor's pid, once seen alive
     while True:
@@ -218,8 +234,9 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
         if time.monotonic() >= deadline:
             # the new foreman may take the lock between the read above and the withdrawal:
             # a consumed handoff or a changed holder after the withdrawal is a handover
-            consumed = journal.kv_get("prorab:handoff") != pane
-            journal.kv_clear("prorab:handoff")
+            h = journal.handoff()
+            consumed = h is None or h["to"] != pane
+            journal.kv_clear(journal.HANDOFF_KEY)
             holder = journal.kv_get("prorab:active")
             status = ("handed_over" if consumed or (holder is not None and holder != caller_pane)
                       else "timeout")

@@ -201,6 +201,23 @@ class TestJournal(JournalBase):
         self.assertEqual(journal.kv_get("prorab:active"), "p-c")
         self.assertIsNone(journal.kv_get("prorab:handoff"))
 
+    def test_lock_handoff_is_honoured_only_from_the_pane_that_set_it(self):
+        self.set_panes("p-a", "p-b", "p-c")
+        self.assertTrue(journal.acquire_active("p-a"))
+        journal.handoff_set("p-a", "p-c")
+        self.assertFalse(journal.acquire_active("p-b"))  # not the named pane
+        self.assertTrue(journal.acquire_active("p-c"))
+        self.assertEqual(journal.kv_get("prorab:active"), "p-c")
+        self.assertIsNone(journal.kv_get("prorab:handoff"))
+
+    def test_a_stale_handoff_of_another_holder_is_not_honoured(self):
+        self.set_panes("p-a", "p-b", "p-c")  # p-b holds the lock, p-a (gone) set the handoff
+        journal.kv_set("prorab:active", "p-b")
+        journal.handoff_set("p-a", "p-c")
+        self.assertFalse(journal.acquire_active("p-c"))
+        self.assertEqual(journal.kv_get("prorab:active"), "p-b")
+        self.assertEqual(journal.handoff()["to"], "p-c")  # left as it was
+
     def test_wait_customer_blocks(self):
         n = new_work_order()
         gate = journal.wait_customer(n, "a choice is needed")

@@ -716,7 +716,7 @@ class TestHandoff(ShiftBase):
         self.assertEqual(len(sleeps), 2)
         self.assertIn("pane split w:p1 --direction right --no-focus --cwd %s"
                       % os.path.expanduser("~/projects/prorab"), self.calls())
-        self.assertEqual(journal.kv_get("prorab:handoff"), "w:p9")  # the new foreman clears it
+        self.assertEqual(journal.handoff()["to"], "w:p9")  # the new foreman clears it
         self.assertEqual(journal.bd(["show", res["bead"]])[0]["status"], "closed")
 
     def test_handoff_waits_for_lock_reconcile_and_monitor(self):
@@ -819,6 +819,36 @@ class TestHandoff(ShiftBase):
         res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
         self.assertEqual(res["status"], "start_failed")
         self.assertIsNone(journal.kv_get("prorab:handoff"))
+        self.assertIn("pane close w:p9", self.calls())  # the split pane does not stay behind
+
+    def test_a_killed_then_retried_handoff_makes_no_second_split(self):
+        self.routes_for_handoff()
+        self.route("pane close", ok({}))
+        journal.kv_set("prorab:active", "w:p1")
+        with mock.patch.object(shift, "_await_takeover", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):  # the tool call was killed mid-wait
+                shift.handoff_prorab("w:p1", "state", timeout_s=600, poll_s=1)
+        self.assertEqual(journal.handoff()["to"], "w:p9")
+        self.route("agent list", ok({"agents": [agent_entry("prorab-2", "w:p9")]}))
+        self.confirm()
+        journal.kv_set("prorab:active", "w:p9")
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
+        self.assertEqual((res["status"], res["new_pane"], res["delivery"]),
+                         ("handed_over", "w:p9", "resumed"))
+        self.assertEqual(len([c for c in self.calls() if c.startswith("pane split")]), 1)
+        self.assertEqual(len([c for c in self.calls() if c.startswith("agent start")]), 1)
+        self.assertEqual(journal.bd(["show", res["bead"]])[0]["status"], "closed")
+
+    def test_a_stale_handoff_without_a_live_agent_is_replaced(self):
+        self.routes_for_handoff()
+        self.route("pane close", ok({}))
+        journal.kv_set("prorab:active", "w:p1")
+        journal.handoff_set("w:p1", "w:p7", bead="old", name="prorab-2", ts=1.0)
+        self.route("agent list", ok({"agents": []}))
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=0.05, poll_s=0.01)
+        self.assertEqual(res["new_pane"], "w:p9")
+        self.assertIn("pane close w:p7", self.calls())
+        self.assertEqual(len([c for c in self.calls() if c.startswith("pane split")]), 1)
 
     def test_handoff_prorab_assigns_session_id(self):
         self.routes_for_handoff()
@@ -844,7 +874,7 @@ class TestHandoff(ShiftBase):
 
         def spy(args, *a, **kw):
             if args[:2] == ["agent", "start"]:
-                seen.append(journal.kv_get("prorab:handoff"))
+                seen.append((journal.handoff() or {}).get("to"))
             return real(args, *a, **kw)
         with mock.patch.object(shift.herdr_cli, "run", spy):
             shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)

@@ -938,15 +938,42 @@ def issues(state=None, kv=None):
 
 # ---- active-foreman lock -----------------------------------------------------
 
+HANDOFF_KEY = "prorab:handoff"
+
+
+def handoff():
+    """The pending handoff, ``{"from", "to", ...}``, or None; an older record that is just the
+    new pane's id reads as ``{"from": None, "to": <pane>}``."""
+    v = kv_get(HANDOFF_KEY)
+    if v is None:
+        return None
+    try:
+        rec = json.loads(v)
+    except ValueError:
+        rec = None
+    if isinstance(rec, dict) and rec.get("to"):
+        return rec
+    return {"from": None, "to": v}
+
+
+def handoff_set(from_pane, to_pane, **fields):
+    kv_set(HANDOFF_KEY, json.dumps(dict(fields, **{"from": from_pane, "to": to_pane}),
+                                   ensure_ascii=False))
+
+
+@_serialized
 def acquire_active(pane_id):
-    """Take the active-foreman lock if free, own, handed off to us, or held by a dead pane."""
+    """Take the active-foreman lock if free, own, handed off to us by its current holder, or
+    held by a dead pane. A handoff whose `from` is not the current holder is stale (the
+    holder changed since) and is not honoured."""
     holder = kv_get("prorab:active")
     if holder is None or holder == pane_id:
         kv_set("prorab:active", pane_id)
         return True
-    if kv_get("prorab:handoff") == pane_id:
+    h = handoff()
+    if h is not None and h["to"] == pane_id and h.get("from") in (None, holder):
         kv_set("prorab:active", pane_id)
-        kv_clear("prorab:handoff")
+        kv_clear(HANDOFF_KEY)
         return True
     import herdr_cli  # lazy: only lock checks need herdr
     if holder not in {a.get("pane_id") for a in herdr_cli.agents()}:

@@ -933,6 +933,15 @@ class TestCloseWorkOrder(JournalBase):
         sp = journal.shift_spend(_defaults.load(), kv=journal.kv_all(), home=self.home)
         self.assertNotIn(n, sp["work_orders"])
 
+    def test_close_work_order_failure_names_what_was_closed(self):
+        n, _done, todo = self.two_stages()
+        journal.wait_customer(n, "a question")  # bd refuses to close a gated work order
+        with self.assertRaises(journal.JournalError) as cm:
+            journal.close_work_order(n, "the branch merged")
+        self.assertEqual(cm.exception.closed, [todo])
+        self.assertEqual(self.status(todo), "closed")
+        self.assertEqual(self.status(n), "open")
+
     def test_has_open_gate(self):
         n = new_work_order()
         self.assertFalse(journal.has_open_gate(n))

@@ -26,6 +26,7 @@ import _defaults  # noqa: E402
 import herdr_cli  # noqa: E402
 import hooks  # noqa: E402
 import journal  # noqa: E402
+from journal import JournalError  # noqa: E402  (stays real when tests patch `journal`)
 import limits  # noqa: E402
 import scheduler  # noqa: E402
 import slots  # noqa: E402
@@ -1205,6 +1206,16 @@ def _close_crew_pane(name):
     return _close_pane(pane)
 
 
+def _close_work_order(work_order, reason):
+    """The fields a result gains from closing the work order; a refused close is reported,
+    never raised (the effects before it are already done)."""
+    try:
+        journal.close_work_order(work_order, reason)
+    except JournalError as e:
+        return {"work_order_closed": False, "close_error": str(e)}
+    return {"work_order_closed": True}
+
+
 def stop(name, work_order, timeout_s=60, poll_s=1):
     """Exit the crew and unregister it: {"status": "stopped", ...}. When the agent does not
     leave ("bg_shells", "bg_work", "not_exited") the result is {"status": <that>}, and the
@@ -1229,12 +1240,11 @@ def stop(name, work_order, timeout_s=60, poll_s=1):
     for field in ("work_order", "site", "pane", "pane_identity", "worktree", "branch", "session",
                   "transcript", "limit_until", "exiting", "handover_act", "delivered"):
         journal.kv_clear(_kv(name, field))
-    closed = False
+    res = {"status": "stopped", "tokens": tokens, "pane_closed": pane_closed,
+           "work_order_closed": False}
     if not journal.open_stages(work_order) and not journal.has_open_gate(work_order):
-        journal.close_work_order(work_order, "every stage accepted")
-        closed = True
-    return {"status": "stopped", "tokens": tokens, "pane_closed": pane_closed,
-            "work_order_closed": closed}
+        res.update(_close_work_order(work_order, "every stage accepted"))
+    return res
 
 
 def _default_branch(site_path):
@@ -1252,10 +1262,10 @@ def cleanup(site_path, work_order):
     wt = _find_worktree(site_path, work_order)
     dropped = any(a.startswith(DROP_MARKER) for a in journal.acts(work_order, "answer"))
     if wt is None:
-        closed = dropped
-        if closed:
-            journal.close_work_order(work_order, "dropped by the customer")
-        return {"status": "absent", "work_order_closed": closed}
+        res = {"status": "absent", "work_order_closed": False}
+        if dropped:
+            res.update(_close_work_order(work_order, "dropped by the customer"))
+        return res
     branch = wt["branch"]
     merged = False
     if branch:
@@ -1274,9 +1284,10 @@ def cleanup(site_path, work_order):
     rec = journal.issue(work_order)
     if rec:
         journal.issue_set(work_order, rec.get("state") or "issued", decided=decided)
-    journal.close_work_order(work_order, "the branch merged" if merged else "dropped by the customer")
-    return {"status": "removed", "worktree": wt["path"], "branch": branch,
-            "work_order_closed": True}
+    res = {"status": "removed", "worktree": wt["path"], "branch": branch}
+    res.update(_close_work_order(
+        work_order, "the branch merged" if merged else "dropped by the customer"))
+    return res
 
 
 # ---- stage report check -------------------------------------------------------

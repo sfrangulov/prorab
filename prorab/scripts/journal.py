@@ -24,7 +24,7 @@ ESTIMATE_KEYS = ("usd", "heavy_runs_per_stage")
 
 
 class JournalError(Exception):
-    pass
+    closed = ()  # close_work_order: the beads it closed before it failed
 
 
 def beads_dir():
@@ -296,7 +296,11 @@ def close_work_order(work_order, reason):
     already = _show(work_order).get("status") == "closed"
     closed = []
     for bead in open_stages(work_order) + ([] if already else [work_order]):
-        _run(["close", bead, "--reason", reason])
+        try:
+            _run(["close", bead, "--reason", reason])
+        except JournalError as e:
+            e.closed = closed  # what this call closed before the failure
+            raise
         closed.append(bead)
     return {"work_order": work_order, "closed": closed, "already": already}
 

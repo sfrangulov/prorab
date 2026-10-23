@@ -51,6 +51,7 @@ class FakeJournal:
         self.accepted = []
         self.closed_work_orders = []
         self.open_gates = set()
+        self.close_fails = False
         self.shift = {"usd": 0.0, "work_orders": {}, "research": {}, "foreman_usd": 0.0}
 
     def bump_restarts(self, work_order):
@@ -83,6 +84,8 @@ class FakeJournal:
         return list(self.stages.get(work_order, []))
 
     def close_work_order(self, work_order, reason):
+        if self.close_fails:
+            raise real_journal.JournalError("bd close failed: open gate")
         self.closed_work_orders.append((work_order, reason))
         return {"work_order": work_order, "closed": [], "already": False}
 
@@ -1247,6 +1250,26 @@ class TestGit(CrewBase):
         r = crew.cleanup(repo, "N1")
         self.assertEqual(r["status"], "absent")
         self.assertEqual(self.j.closed_work_orders, [])
+
+    def test_cleanup_reports_a_refused_close(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.j.close_fails = True
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "removed")
+        self.assertFalse(r["work_order_closed"])
+        self.assertIn("open gate", r["close_error"])
+        self.assertFalse(os.path.exists(wt))
+        self.assertEqual(r["branch"], "prorab/N1")
+
+    def test_cleanup_absent_reports_a_refused_close(self):
+        repo = self.make_repo()
+        self.j.add_act("N1", "answer", crew.DROP_MARKER)
+        self.j.close_fails = True
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "absent")
+        self.assertFalse(r["work_order_closed"])
+        self.assertIn("open gate", r["close_error"])
 
     def test_cleanup_kept_closes_nothing(self):
         repo = self.make_repo()
@@ -2752,6 +2775,15 @@ class TestStopClosesPane(CrewBase):
         r = self.stop_n1()
         self.assertEqual(self.j.closed_work_orders, [])
         self.assertFalse(r["work_order_closed"])
+
+    def test_stop_reports_a_refused_close(self):
+        self.j.close_fails = True
+        self.j.kv["crew.a1.work_order"] = "N1"
+        r = self.stop_n1()
+        self.assertEqual(r["status"], "stopped")
+        self.assertFalse(r["work_order_closed"])
+        self.assertIn("open gate", r["close_error"])
+        self.assertNotIn("crew.a1.work_order", self.j.kv)
 
     def test_refused_stop_closes_nothing(self):
         self.route("agent list", ok({"agents": [agent_entry()]}))

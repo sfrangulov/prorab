@@ -21,7 +21,7 @@ _COUNTDOWN = r"(?:\s*\((?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?\))?"
 _FIVE = re.compile(r"5h\s+\S+\s+([\d.]+)%" + _COUNTDOWN)
 _WEEK = re.compile(r"wk\s+\S+\s+([\d.]+)%" + _COUNTDOWN)
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
-# a status-line bar:a label-less run of bar glyphs, then its percent
+# a status-line bar: a label-less run of bar glyphs, then its percent
 _BAR = re.compile(r"(?:(\S+)\s+)?[▓░█▒▌▏]+\s+([\d.]+)%")
 
 

@@ -1140,6 +1140,19 @@ class TestAwake(PollBase):
                                       deps=self.s.deps()), [])
         self.assertEqual(self.awake(), [1200])
 
+    def test_no_caffeinate_under_the_emergency_stop_is_raised_after_the_release(self):
+        self.s.awake_error = FileNotFoundError("caffeinate")
+        stop = self.d["emergency"]["stop_path"]
+        with open(stop, "w"):
+            pass
+        out = self.poll()
+        self.assertNotIn("error awake", out)
+        self.assertNotIn("awake_missing", self.mem)
+        os.remove(stop)
+        self.assertEqual(self.poll(self.now + 90), ["emergency_released b1", "error awake"])
+        self.assertEqual(self.poll(self.now + 180), [])
+        self.assertEqual(len(self.awake()), 2)
+
     def test_log_rows_carry_the_uptime_clock_and_the_hold(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

@@ -26,8 +26,8 @@ import scheduler  # noqa: E402
 
 SETTLED = ("idle", "done", "blocked")
 SKIP_DIRS = frozenset((".git", "node_modules", ".venv", "__pycache__"))
-EVENT_ORDER = ("emergency_stop", "emergency_released", "gone", "login", "consent", "provider_error",
-               "limit_screen", "limit", "blind", "blind_week", "budget", "due", "prorab_context",
+EVENT_ORDER = ("emergency_stop", "emergency_released", "gone", "login", "consent",
+               "provider_error", "limit_screen", "limit", "blind", "blind_week", "budget", "due", "prorab_context",
                "compacted", "context_hard", "context_soft", "hung", "hung_unclear",
                "consent_done", "settled", "error")
 # What a poll under the emergency stop keeps of its own state: readings and spend are still
@@ -692,9 +692,10 @@ def _poll(crews, d, mem, now, dp, stopping=False):
         try:
             pid = dp["hold_awake"](mon["awake_hold_s"])
         except FileNotFoundError as e:   # no caffeinate on this host: said once, never retried
-            mem["awake_missing"] = True
             errors.setdefault("awake", "%s: %s" % (type(e).__name__, e))
-            ev["error"].append("error awake")
+            if not stopping:    # under the stop the line would be dropped: try again after it
+                mem["awake_missing"] = True
+                ev["error"].append("error awake")
         except Exception as e:
             errors.setdefault("awake", "%s: %s" % (type(e).__name__, e))
         else:

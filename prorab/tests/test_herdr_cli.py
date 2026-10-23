@@ -404,7 +404,7 @@ class TestLogin(unittest.TestCase):
 
 
 class TestRecoverStalled(FakeBase):
-    TEXT ="Read the work order in /home/user/.cache/prorab/work-orders/N1.md and start"
+    TEXT = "Read the work order in /home/user/.cache/prorab/work-orders/N1.md and start"
 
     def setup_agent(self, status, screen):
         self.route("agent get a1", ok({"agent": {"name": "a1", "agent_status": status}}))

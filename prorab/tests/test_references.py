@@ -113,12 +113,24 @@ class TestActs(unittest.TestCase):
             crew.request_handover("a1")
         self.assertEqual(deliver.call_args[0], ("a1", text))
 
+    def test_emergency_pause_block(self):
+        self.assertIn("Emergency pause", self.sections)
+        first = self.acts.split("\n\n", 2)[1]
+        self.assertIn("Emergency pause", first)
+        own = block("acts.md", "Emergency pause")
+        self.assertNotIn("\n", own)
+        self.assertIn("make no tool call", own)
+        self.assertIn("do not retry", own)
+        self.assertNotIn("finish", own.lower())
+        self.assertLess(self.acts.index("## Pause"), self.acts.index("## Emergency pause"))
+        self.assertLess(self.acts.index("## Emergency pause"), self.acts.index("## Continue"))
+
     def test_acts_sections_for_crew(self):
         with open(os.path.join(SCRIPTS_DIR, "crew.py"), encoding="utf-8") as fh:
             source = fh.read()
         read_by_crew = set(re.findall(r'_template\("([^"]+)"\)', source))
-        self.assertEqual(read_by_crew, {"Handover request", "Pause", "Continue",
-                                        "Changed work order", "Message by file", "Fix the report"})
+        self.assertEqual(read_by_crew, {"Handover request", "Pause", "Emergency pause",
+                                        "Continue", "Changed work order", "Message by file", "Fix the report"})
         for heading in read_by_crew:
             own = block("acts.md", heading)
             self.assertTrue(own.strip(), heading)

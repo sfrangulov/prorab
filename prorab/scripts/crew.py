@@ -760,6 +760,8 @@ def request_handover(name):
 
 
 def pause(name):
+    if emergency_stop():
+        return deliver(name, _template("Emergency pause"))
     return deliver(name, _template("Pause"))
 
 

@@ -1,6 +1,6 @@
 # Act texts and messages to crews
 
-`crew.py` sends the first fenced block under the headings Handover request, Pause, Continue, Changed work order, Message by file and Fix the report; the block under Customer decision to drop the branch equals the marker `crew.DROP_MARKER`. Do not rename these headings and keep each block in its own section. The act templates show the form of each act, with every `<...>` to fill in; each section names who writes the act and the command that records it.
+`crew.py` sends the first fenced block under the headings Handover request, Pause, Emergency pause, Continue, Changed work order, Message by file and Fix the report; the block under Customer decision to drop the branch equals the marker `crew.DROP_MARKER`. Do not rename these headings and keep each block in its own section. The act templates show the form of each act, with every `<...>` to fill in; each section names who writes the act and the command that records it.
 
 ## Acceptance act
 
@@ -85,6 +85,12 @@ Finish the current step. Do not start new long runs. Write a handover act with t
 
 ```
 Finish the current step, start nothing new, wait for the foreman's message.
+```
+
+## Emergency pause
+
+```
+The customer's emergency stop is on: make no tool call and do not retry any step that was denied. End your turn now and wait for the foreman's message.
 ```
 
 ## Continue

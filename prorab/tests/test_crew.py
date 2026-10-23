@@ -1814,6 +1814,26 @@ class TestEmergencyStop(CrewBase):
                                                      "work-orders")))
         self.assertEqual(self.j.active, [])
 
+    def test_pause_during_the_emergency_stop_sends_the_emergency_line(self):
+        self.touch_stop()
+        self.j.kv["crew.a1.work_order"] = "N1"
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        self.assertEqual(crew.pause("a1"), "accepted")
+        prompts = [c for c in self.calls() if c.startswith("agent prompt a1")]
+        self.assertEqual(len(prompts), 1)
+        self.assertIn(crew._template("Emergency pause"), prompts[0])
+        self.assertIn("do not retry", prompts[0])
+        self.assertNotIn("Finish the current step", prompts[0])
+
+    def test_pause_without_the_stop_keeps_the_pause_line(self):
+        self.j.kv["crew.a1.work_order"] = "N1"
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        self.assertEqual(crew.pause("a1"), "accepted")
+        prompts = [c for c in self.calls() if c.startswith("agent prompt a1")]
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Finish the current step", prompts[0])
+        self.assertNotIn("do not retry", prompts[0])
+
     def test_emergency_stop_still_pauses(self):
         self.touch_stop()
         self.j.kv["crew.a1.work_order"] = "N1"

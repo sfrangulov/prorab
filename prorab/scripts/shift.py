@@ -699,7 +699,7 @@ def main(argv=None):
     p = sub.add_parser("report")
     p.add_argument("--date", default=datetime.date.today().isoformat())
     p.add_argument("--out-dir")
-    a = ap.parse_args(argv)
+    a = ap.parse_args(_defaults.cli_argv(sys.argv[1:] if argv is None else argv))
     d = _defaults.load()
     journal.ensure_db()
     if a.cmd == "preflight":

@@ -311,7 +311,7 @@ def main(argv=None):
     p = sub.add_parser("cap")
     p.add_argument("--now", type=float)
     p.add_argument("--resets-at", type=float)
-    a = ap.parse_args(argv)
+    a = ap.parse_args(_defaults.cli_argv(sys.argv[1:] if argv is None else argv))
     d = _defaults.load()
     now = a.now if a.now is not None else time.time()
     if a.cmd == "cap":

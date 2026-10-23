@@ -1563,7 +1563,7 @@ def main(argv=None):
     cmd("ask_predecessor", "work_order", "session_id", "cwd", "question")
     cmd("stop", "name", "work_order")
     cmd("cleanup", "site_path", "work_order")
-    args = vars(ap.parse_args(argv))
+    args = vars(ap.parse_args(_defaults.cli_argv(sys.argv[1:] if argv is None else argv)))
     c = args.pop("cmd")
     if c == "merge_check":
         args["accepted"] = [x for x in args["accepted"].split(",") if x]

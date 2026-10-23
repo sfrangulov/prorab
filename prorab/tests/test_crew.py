@@ -2800,5 +2800,15 @@ class TestStopClosesPane(CrewBase):
         self.assertNotIn("crew.a1.delivered", self.j.kv)
 
 
+class TestCli(unittest.TestCase):
+    def test_cli_restart_takes_both_spellings(self):
+        for flag in ("--caller_pane", "--caller-pane"):
+            with mock.patch.object(crew, "restart", return_value={"status": "restarted"}) as r, \
+                    mock.patch("builtins.print"):
+                code = crew.main(["restart", "a1", "N1", "T", "gone", flag, "w:p1"])
+            self.assertEqual(code, 0, flag)
+            self.assertEqual(r.call_args.kwargs["caller_pane"], "w:p1", flag)
+
+
 if __name__ == "__main__":
     unittest.main()

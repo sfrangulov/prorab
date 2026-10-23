@@ -163,6 +163,22 @@ class TestDefaults(unittest.TestCase):
         self.assertTrue(d["a_path"].startswith("/") and d["b_dir"].startswith("/"))
         self.assertEqual(d["c"], "~/z")
 
+    def test_cli_argv_spells_options_with_hyphens(self):
+        f = _defaults.cli_argv
+        self.assertEqual(f(["restart", "--caller_pane", "w:p1"]), ["restart", "--caller-pane", "w:p1"])
+        self.assertEqual(f(["--act_file=x"]), ["--act-file=x"])
+        self.assertEqual(f(["--text=--a_b"]), ["--text=--a_b"])
+        self.assertEqual(f(["a_b", "-x_y", "--a-b", "--Bad_x", "--9_x"]),
+                         ["a_b", "-x_y", "--a-b", "--Bad_x", "--9_x"])
+        self.assertEqual(f(["run", "--kind_x", "h", "--", "cmd", "--a_b", "--"]),
+                         ["run", "--kind-x", "h", "--", "cmd", "--a_b", "--"])
+        self.assertEqual(f([]), [])
+
+    def test_every_cli_with_hyphenated_options_rewrites_its_argv(self):
+        for name in ("crew", "journal", "shift", "scheduler", "limits"):
+            with open(os.path.join(SCRIPTS_DIR, name + ".py"), encoding="utf-8") as fh:
+                self.assertIn("_defaults.cli_argv(", fh.read(), name)
+
 
 if __name__ == "__main__":
     unittest.main()

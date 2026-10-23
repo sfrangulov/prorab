@@ -1278,7 +1278,7 @@ def main(argv=None):
     ksub = p.add_subparsers(dest="kvcmd", required=True)
     g = ksub.add_parser("get"); g.add_argument("key")
     s = ksub.add_parser("set"); s.add_argument("key"); s.add_argument("value")
-    a = ap.parse_args(argv)
+    a = ap.parse_args(_defaults.cli_argv(sys.argv[1:] if argv is None else argv))
     if a.cmd == "due" and a.duecmd == "set":
         if a.in_min is not None and not a.in_min > 0:
             ap.error("--in needs minutes above 0")

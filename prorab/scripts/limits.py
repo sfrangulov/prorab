@@ -514,7 +514,7 @@ def main(argv=None):
     ap.add_argument("--log")
     ap.add_argument("--now", type=float)
     ap.add_argument("--pane-text-file", action="append", default=[])
-    args = ap.parse_args(argv)
+    args = ap.parse_args(_defaults.cli_argv(sys.argv[1:] if argv is None else argv))
     if args.cmd == "rate":
         import scheduler  # lazy: scheduler imports journal
         print(json.dumps(rates(scheduler.readings(args.log), _defaults.load(), time.time())))

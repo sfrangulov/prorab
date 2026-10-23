@@ -76,7 +76,7 @@ The foreman logs an incident as an `answer` act on the work order or stage whose
 
 ## Customer decision to drop the branch
 
-The foreman writes this `answer` act only after the customer's explicit words dropping the work order's branch. Only a line that starts with this marker lets `cleanup` delete a branch with unmerged commits.
+The foreman writes this `answer` act only after the customer's explicit words dropping the work order's branch. Only a line that starts with this marker lets `cleanup` delete a branch with unmerged commits. Write it on the work order itself (`journal.py act WO answer TEXT`), never on a stage: `cleanup` reads the work order's acts only, so a drop written on a stage keeps the branch. Run `crew.py stop NAME WO` first: `cleanup` refuses while a crew of the work order is registered or under the emergency stop.
 
 ```
 [customer decision] drop

@@ -97,6 +97,7 @@ Logging in is the customer's own act on their own account, never yours or a crew
 docs-site-1 and api-service-2 stand: Claude Code is not logged in there. Logging in is yours; tell me when you have.
 ```
 
+- A session stopped at "Select login method" stays in its pane as a blocked agent, and a repeated `start` or `restart` meets the same screen. Name that pane in the same message ("the login choice is open in w1:p5"), as for a trust gate: the dialog is answered there, by the customer.
 - No push of its own: a night where every work order waits is covered by `all_waiting`.
 - On the customer's word that they have logged in, first close each gate: `journal.py consent done WO login --by customer --gate GATE`. Then, once per work order, repeat the very call that stopped: after a start's `needs_login`, `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"` (it reuses its pane); after a restart's or a handover's, `crew.py restart NAME WO "$(cat FILE)" login`, FILE the work order (`login` is not counted as a restart); any other `crew.py` call that returned `login`, that call. `crew.py resume NAME` only for a crew that was already working on its work order (the event `login NAME`).
 - The customer's word is the trigger, never the screen: after a login made in another session the error line stays in a crew's pane until its next turn.

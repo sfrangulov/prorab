@@ -219,6 +219,20 @@ def cleared(j, work_order):
     return bool(stages) and CLEARANCE in j.labels(stages[0])
 
 
+def split_stale(j, work_orders):
+    """``(live, stale)``: `stale` is ``[(id, site path)]`` of the work orders whose site path
+    (the issue record's, else the body's `- Path:` line) no longer exists. A work order with
+    no known site path is not stale."""
+    live, stale = [], []
+    for n in work_orders:
+        path = j.work_order_site(n)
+        if path and not os.path.exists(path):
+            stale.append((n, path))
+        else:
+            live.append(n)
+    return live, stale
+
+
 def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None, week_burn=None):
     night = j.kv_get("shift.night") == "1"
     ov = j.override()
@@ -236,7 +250,7 @@ def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None, week_burn=N
     if unknown and ov:
         used = 0.0  # the customer's command 'ignore limits and finish': usage does not bound the crews
     graph = j.graph()
-    ready = [n for n in j.ready_work_orders()]
+    ready, stale = split_stale(j, j.ready_work_orders())  # a gone site is never offered
     order = [n for n in critical_order(graph, work_order_durations(j, d, list(graph)))
              if n in ready]
     order += [n for n in ready if n not in order]
@@ -277,7 +291,7 @@ def build_plan(j, d, now, lim, log, load, *, spend=None, rates=None, week_burn=N
                                   bool(ov), gate and not cleared(j, n)))
     return {"order": order, "allowed": allowed, "active": active,
             "new": max(0, allowed - active), "cap": cap, "override": ov,
-            "hold": hold, "limits_unknown": unknown,
+            "hold": hold, "limits_unknown": unknown, "stale": [n for n, _p in stale],
             "budget": {"usd": b["usd"], "spent_usd": spend["usd"], "left_usd": left,
                        "week_pp": b["week_pp"], "week_rise_pp": rise},
             "rates": rates, "week": dict(week, pause=pause), "fits": plan_fits}

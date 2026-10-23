@@ -158,6 +158,29 @@ class TestPreflight(ShiftBase):
         ok_one = new_work_order("With estimate")
         self.assertFalse(any(ok_one in p and "estimate" in p for p in problems))
 
+    def site_work_order(self, path, title):
+        body = "# Work order: %s\n- Path: %s. You work in its worktree.\n" % (title, path)
+        return journal.create_work_order("o", title, body, {"usd": 5})
+
+    def test_preflight_lists_a_work_order_of_a_removed_site_as_stale(self):
+        here = os.path.join(self.tmp.name, "site")
+        os.makedirs(here)
+        gone = self.site_work_order("/home/user/projects/gone-site", "Gone")
+        live = self.site_work_order(here, "Live")
+        problems = shift.preflight(self.d)
+        stale = [p for p in problems if gone in p]
+        self.assertEqual(len(stale), 1, problems)
+        self.assertIn("stale", stale[0])
+        self.assertIn("/home/user/projects/gone-site", stale[0])
+        self.assertFalse(any(live in p for p in problems), problems)
+
+    def test_preflight_stale_is_read_from_the_issue_record_first(self):
+        here = os.path.join(self.tmp.name, "site")
+        os.makedirs(here)
+        n = self.site_work_order(here, "Moved")
+        journal.issue_set(n, "issued", site="/home/user/projects/moved-away")
+        self.assertTrue(any(n in p and "stale" in p for p in shift.preflight(self.d)))
+
     def test_preflight_clearance(self):
         n = new_work_order()
         s = self.stage(n)

@@ -99,7 +99,11 @@ def preflight(d, night=False):
     elif mains is None:
         out.append("note: the power source could not be checked (pmset is unavailable)")
     kv = journal.kv_all()
-    for n in journal.ready_work_orders():
+    ready, stale = scheduler.split_stale(journal, journal.ready_work_orders())
+    for n, path in stale:
+        out.append("note: stale work order %s: its site %s no longer exists; it is not offered "
+                   "(close it with the customer's leave)" % (n, path))
+    for n in ready:
         if journal.estimate(n, kv)["usd"] is None:
             out.append("work order %s has no estimate in dollars" % n)
     for bead in _missing_clearances():

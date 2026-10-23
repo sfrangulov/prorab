@@ -490,6 +490,19 @@ def working_work_orders():
     return out
 
 
+_BODY_PATH = re.compile(r"^[ \t]*-[ \t]+Path:[ \t]*`?(/\S*?)`?(?:\.(?=\s|$)|\s|$)", re.M)
+
+
+def work_order_site(work_order):
+    """The site path of a work order: the issue record's `site`, else the body's `- Path:`
+    line; None when neither names one."""
+    site = (issue(work_order) or {}).get("site")
+    if site:
+        return site
+    m = _BODY_PATH.search((_show(work_order).get("description") or ""))
+    return m.group(1) if m else None
+
+
 def ready_work_orders():
     """Work orders with a ready stage (or ready themselves) and no crew working on them."""
     busy = set(working_work_orders())

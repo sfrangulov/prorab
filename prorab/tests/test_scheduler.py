@@ -187,6 +187,7 @@ class TestScheduler(unittest.TestCase):
                                   "s4": {"duration_min": 5, "kind": "code"}}[s],
             durations=lambda kind: [],
             ready_work_orders=lambda: ["n1", "n3"],
+            work_order_site=lambda n: kw.get("sites", {}).get(n),
             crews=lambda: kw.get("crews", ["b1"]),
             labels=lambda b: kw["label_calls"].append(b) or kw.get("labels", {}).get(b, []),
             kv_get=lambda k: kw.get("kv", {}).get(k),
@@ -217,6 +218,30 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(plan["new"], 2)
         self.assertEqual(plan["cap"]["mode"], "day")
         self.assertIsNone(plan["override"])
+
+    def stale_plan(self, sites):
+        now = at(14)
+        lim = {"five_hour": 30.0, "seven_day": 20.0, "five_hour_resets_at": now + 3600,
+               "five_hour_resets_in_s": 3600}
+        log = os.path.join(self.tmp.name, "monitor.log")
+        return scheduler.build_plan(self._journal(sites=sites), D, now, lim, log, (1.0, 8))
+
+    def test_build_plan_lists_a_work_order_of_a_removed_site_as_stale(self):
+        here = os.path.join(self.tmp.name, "site")
+        os.makedirs(here)
+        plan = self.stale_plan({"n1": os.path.join(self.tmp.name, "gone"), "n3": here})
+        self.assertEqual(plan["stale"], ["n1"])
+        self.assertEqual(plan["order"], ["n3"])
+        self.assertNotIn("n1", plan["fits"])
+        self.assertEqual(plan["allowed"], 2)  # active 1 + the one offered
+        self.assertEqual(plan["new"], 1)
+
+    def test_build_plan_stale_leaves_existing_and_unknown_sites_alone(self):
+        here = os.path.join(self.tmp.name, "site")
+        os.makedirs(here)
+        plan = self.stale_plan({"n1": here})  # n3's site is not known: not stale
+        self.assertEqual(plan["stale"], [])
+        self.assertEqual(plan["order"], ["n1", "n3"])
 
     def test_build_plan_uses_kv_ceiling(self):
         log = os.path.join(self.tmp.name, "monitor.log")

@@ -85,7 +85,9 @@ class FakeJournal:
 
     def close_work_order(self, work_order, reason):
         if self.close_fails:
-            raise real_journal.JournalError("bd close failed: open gate")
+            err = real_journal.JournalError("bd close failed: open gate")
+            err.closed = ["N1.2"]
+            raise err
         self.closed_work_orders.append((work_order, reason))
         return {"work_order": work_order, "closed": [], "already": False}
 
@@ -1319,6 +1321,7 @@ class TestGit(CrewBase):
         self.assertEqual(r["status"], "removed")
         self.assertFalse(r["work_order_closed"])
         self.assertIn("open gate", r["close_error"])
+        self.assertEqual(r["closed"], ["N1.2"])
         self.assertFalse(os.path.exists(wt))
         self.assertEqual(r["branch"], "prorab/N1")
 
@@ -1330,6 +1333,7 @@ class TestGit(CrewBase):
         self.assertEqual(r["status"], "absent")
         self.assertFalse(r["work_order_closed"])
         self.assertIn("open gate", r["close_error"])
+        self.assertEqual(r["closed"], ["N1.2"])
 
     def test_cleanup_kept_closes_nothing(self):
         repo = self.make_repo()
@@ -2864,6 +2868,7 @@ class TestStopClosesPane(CrewBase):
         self.assertEqual(r["status"], "stopped")
         self.assertFalse(r["work_order_closed"])
         self.assertIn("open gate", r["close_error"])
+        self.assertEqual(r["closed"], ["N1.2"])
         self.assertNotIn("crew.a1.work_order", self.j.kv)
 
     def test_refused_stop_closes_nothing(self):

@@ -1230,7 +1230,8 @@ def _close_work_order(work_order, reason):
     try:
         journal.close_work_order(work_order, reason)
     except JournalError as e:
-        return {"work_order_closed": False, "close_error": str(e)}
+        return {"work_order_closed": False, "close_error": str(e),
+                "closed": list(e.closed or [])}  # the beads closed before the failure
     return {"work_order_closed": True}
 
 

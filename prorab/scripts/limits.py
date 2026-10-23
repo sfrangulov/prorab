@@ -502,6 +502,18 @@ def week_projection(lim, burn, d, now, tz=None, off_hours=None):
     return out
 
 
+def week_now(lim, readings, d, now, *, night, budget, week_rise_pp, shift_usd,
+             week_usd_per_pp, burn=None, tz=None):
+    """The one reading of the week, for the monitor and for ``scheduler.py plan``: the burn
+    (measured from `readings`, unless the caller holds one it already measured), the off-hours
+    work of an active night shift and the projection over both. `readings` is not read when
+    `burn` is given."""
+    if burn is None:
+        burn = week_burn(readings, d, now, tz)
+    off = off_hours(night, budget, week_rise_pp, shift_usd, week_usd_per_pp)
+    return week_projection(lim, burn, d, now, tz, off)
+
+
 def estimate_rate(readings, spend_between, d, now, window="five_hour"):
     """Dollars per percentage point of `window`: the sum of dollars over the sum of pp of the
     counted intervals; without an interval, the window's default (source "default") or, when
@@ -565,17 +577,19 @@ def main(argv=None):
         now = time.time() if args.now is None else args.now
         lim = get_limits(_live_pane_texts, d, now)  # the panes are read only when the sensor gives nothing
         log = scheduler.readings(args.log)
-        burn = week_burn(log, d, now)
         kv = journal.kv_all()
         night = kv.get("shift.night") == "1"
-        off = None
+        rise = usd_per_pp = budget = None
+        spent = 0.0
         if night:  # the spend and the rate are read only for a night shift
             start, week = kv.get("shift.week_start"), lim.get("seven_day")
             rise = None if start in (None, "") or week is None else float(week) - float(start)
             usd_per_pp = rates(log, d, now)["seven_day"]["usd_per_pp"]
-            off = off_hours(night, journal.budget(kv), rise,
-                            journal.shift_spend(d, now, kv=kv)["usd"], usd_per_pp)
-        print(json.dumps(week_projection(lim, burn, d, now, off_hours=off)))
+            budget = journal.budget(kv)
+            spent = journal.shift_spend(d, now, kv=kv)["usd"]
+        print(json.dumps(week_now(lim, log, d, now, night=night, budget=budget,
+                                  week_rise_pp=rise, shift_usd=spent,
+                                  week_usd_per_pp=usd_per_pp)))
         return 0
     if args.pane_text_file:
         texts = []

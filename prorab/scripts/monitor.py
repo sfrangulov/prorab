@@ -257,18 +257,19 @@ def _week_notice(mem, proj):
     return fire
 
 
-def _off_hours(mem, kv_get, week, get_budget):
-    """N for the projection from what the poll already holds: the kv snapshot, the cached
-    spend and the cached seven-day rate. Nothing is read here."""
+def _week_inputs(mem, kv_get, week, get_budget):
+    """The off-hours inputs of `limits.week_now` from what the poll already holds: the kv
+    snapshot, the cached spend and the cached seven-day rate. Nothing is read here."""
     night = kv_get("shift.night") == "1"
     budget = get_budget() if night else None
     if budget is None:  # no night shift, or its budget unreadable
-        return limits.off_hours(False, {}, None, 0.0, None)
+        return {"night": False, "budget": {}, "week_rise_pp": None, "shift_usd": 0.0,
+                "week_usd_per_pp": None}
     start = kv_get("shift.week_start")
     rise = None if week is None or start in (None, "") else float(week) - float(start)
     spent = ((mem.get("spend") or {}).get("value") or {}).get("usd", 0.0)
-    return limits.off_hours(night, budget, rise, spent,
-                            (mem.get("rate") or {}).get("week_usd_per_pp"))
+    return {"night": night, "budget": budget, "week_rise_pp": rise, "shift_usd": spent,
+            "week_usd_per_pp": (mem.get("rate") or {}).get("week_usd_per_pp")}
 
 
 def _budget_item(item, spend, budget, week, kv):
@@ -545,11 +546,16 @@ def _poll(crews, d, mem, now, dp, stopping=False):
             mem["rate"] = {"at": now,
                            "week_usd_per_pp": (fresh.get("seven_day") or {}).get("usd_per_pp")}
             extras["rate"] = fresh
+    unmeasured = None   # a burn that could not be measured: used by this poll, never kept
     if due("week_burn", d["rate"]["every_s"]):
         fresh = guard("week_burn", dp["week_burn"], d, now)
         if fresh is not None:
-            mem["week_burn"] = {"at": now, "value": fresh}
             extras["week_burn"] = fresh
+            if fresh.get("pp_per_h") is not None:
+                mem["week_burn"] = {"at": now, "value": fresh}
+            else:
+                mem.pop("week_burn", None)  # measured again on the next poll
+                unmeasured = fresh
     spend = (mem.get("spend") or {}).get("value")
     if hooks_on and due("events_prune", d["rate"]["every_s"]):
         mem["events_prune"] = {"at": now}
@@ -760,14 +766,16 @@ def _poll(crews, d, mem, now, dp, stopping=False):
         prev = mem.get("limit")
         if not isinstance(prev, list) or len(prev) != len(cur):
             prev = [0, False]  # the state of an older form reads as empty
-        proj = guard("week", limits.week_projection, lim,
-                     (mem.get("week_burn") or {}).get("value"), d, now,
-                     off_hours=_off_hours(mem, kv_get, week,
-                                          lambda: guard("budget", dp["budget"], kv=kv_arg)))
+        proj = guard("week", limits.week_now, lim, None, d, now,
+                     burn=unmeasured or (mem.get("week_burn") or {}).get("value") or {},
+                     **_week_inputs(mem, kv_get, week,
+                                    lambda: guard("budget", dp["budget"], kv=kv_arg)))
         notice = proj is not None and _week_notice(mem, proj)
         if notice or any(c > p for c, p in zip(cur, prev)):
             line = "limit %s %s %s %s" % (_fmt(five), _fmt(week), source, cap["mode"])
-            ev["limit"].append(line + (" week:%s" % proj["allows"] if notice else ""))
+            ev["limit"].append(line + (" week:%s%s" % (proj["allows"], " fallback"
+                                                       if proj["basis"] == "fallback" else "")
+                                       if notice else ""))
         mem["limit"] = cur
 
     # blind: the source is unknown twice in a row, but not right after a 5h reset: then the

@@ -1,4 +1,5 @@
 import io
+import datetime
 import json
 import os
 import sys
@@ -343,7 +344,7 @@ class TestMonitorPoll(PollBase):
         self.s.limits = lim(80.0, 10.0)
         self.assertEqual(self.poll(), ["limit 80 10 sensor day"])  # band changed
         self.s.limits = lim(20.0, 50.0)
-        self.assertEqual(self.poll(), ["limit 20 50 sensor day week:notify"])  # no reset: fallback
+        self.assertEqual(self.poll(), ["limit 20 50 sensor day week:notify fallback"])  # no reset: fallback
         self.s.limits = lim(None, None, source="messages", reached=True)
         self.assertEqual(self.poll(), ["limit - - messages day"])
 
@@ -369,7 +370,7 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(), [])
         self.assertEqual(self.mem["last_reading"]["five_hour"], 90.0)
         self.s.override = None
-        self.assertEqual(self.poll(), ["limit 90 60 sensor day week:notify", "budget sessions"])
+        self.assertEqual(self.poll(), ["limit 90 60 sensor day week:notify fallback", "budget sessions"])
 
     def test_budget_on_change_only(self):
         self.s.over = ["sessions"]
@@ -486,13 +487,64 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(self.poll(), [])  # $40 left at 10 $/pp: 4 pp, projected 92
         self.assertEqual(self.mem["rate"]["week_usd_per_pp"], 10.0)
 
+    def test_monitor_and_plan_agree_on_the_week(self):
+        """Fix wave 1, item 6: the same readings log, limits and budget at a shift start give
+        the monitor and `scheduler.build_plan` one reading of the week."""
+        import types
+        import scheduler
+        self.d["week"]["calendar"] = _defaults.load()["week"]["calendar"]  # Mon-Fri 09-19, UTC
+        log = os.path.join(self.tmp.name, "monitor.log")
+        utc = datetime.timezone.utc
+        first = datetime.datetime(2026, 10, 21, 12, tzinfo=utc).timestamp()  # a Wednesday
+        reset = datetime.datetime(2026, 10, 26, 13, tzinfo=utc).timestamp()
+        now = first + 5 * 60  # the shift starts five minutes after the monitor's first poll
+
+        def reading(ts, week):
+            return {"ts": ts, "source": "sensor", "five_hour": 10.0, "seven_day": week,
+                    "resets_at": None, "seven_day_resets_at": reset}
+
+        def append(*rs):
+            with open(log, "a", encoding="utf-8") as fh:
+                for r in rs:
+                    fh.write(json.dumps(r) + "\n")
+        deps = self.s.deps()
+        deps["week_burn"] = lambda d, t: limits.week_burn(scheduler.readings(log), d, t)
+        self.s.limits = lim(10.0, None)  # the week is not on the sensor yet
+        append(reading(first - 4 * 3600, 62.0))  # one reading of the week: no interval yet
+        self.assertEqual(monitor.poll([], self.d, self.mem, first, deps=deps), [])
+        self.s.limits = lim(10.0, 66.0, week_resets=reset)
+        append(*[reading(first - h * 3600, 62.0 + (4 - h)) for h in (3, 2, 1, 0)])
+        events = monitor.poll([], self.d, self.mem, now, deps=deps)
+        j = types.SimpleNamespace(
+            kv_get=lambda k: self.s.kv.get(k), override=lambda: None, graph=lambda: {},
+            ready_work_orders=lambda: [], crews=lambda: [], machine=lambda: self.d["machine"],
+            budget=lambda: journal.budget(kv=self.s.kv),
+            shift_spend=lambda d, t=None: dict(self.s.spend))
+        plan = scheduler.build_plan(j, self.d, now, self.s.limits, log, (0.5, 8))
+        self.assertEqual(plan["week"]["basis"], "projection")
+        self.assertEqual(plan["week"]["allows"], "no_new_mass")
+        self.assertEqual(events, ["limit 10 66 sensor day week:no_new_mass"])
+
+    def test_monitor_measures_an_unmeasured_burn_again(self):
+        self.week_world()
+        self.s.limits = self.wk(20.0, 50.0)
+        self.s.week_burn = burn(None, self.reset)
+        for t in (0, 90):
+            self.poll(self.now + t)
+        self.assertNotIn("week_burn", self.mem)  # an unmeasured burn is never kept
+        self.s.week_burn = burn(1.0, self.reset)
+        for t in (180, 270, 360):
+            self.poll(self.now + t)
+        self.assertEqual([c - self.now for c in self.s.calls["week_burn"]], [0, 90, 180])
+        self.assertEqual(self.mem["week_burn"]["value"]["pp_per_h"], 1.0)
+
     def test_week_fallback_events(self):
         self.s.limits = lim(20.0, 49.9)
         self.assertEqual(self.poll(), [])
         self.s.limits = lim(20.0, 50.0)
-        self.assertEqual(self.poll(), ["limit 20 50 sensor day week:notify"])
+        self.assertEqual(self.poll(), ["limit 20 50 sensor day week:notify fallback"])
         self.s.limits = lim(20.0, 70.0)
-        self.assertEqual(self.poll(), ["limit 20 70 sensor day week:clearance_only"])
+        self.assertEqual(self.poll(), ["limit 20 70 sensor day week:clearance_only fallback"])
 
     def test_first_poll_computes_the_burn_before_deciding(self):
         self.week_world()
@@ -541,6 +593,7 @@ class TestMonitorPoll(PollBase):
 
     def test_week_burn_with_the_rate(self):
         self.s.limits = lim(10.0, 10.0)
+        self.s.week_burn = burn(0.5, self.now + 3 * 86400)  # a measured one is kept
         logged = {}
         for t in (0, 90, 540, 599, 600, 690):
             self.poll(self.now + t)
@@ -1635,7 +1688,7 @@ class TestProcessBudget(FakeBase):
         self.assertEqual(self._procs() - before, 2)  # agent list + kv list, nothing else
         self.assertIn("spend", self.mem)  # computed by reading files in the first poll
         self.assertIn("rate", self.mem)
-        self.assertIn("week_burn", self.mem)
+        self.assertNotIn("week_burn", self.mem)  # no readings log here: unmeasured, not kept
         # all three change status and there is no sensor: the limit pass reuses the screens
         os.remove(os.path.join(self.sensor, "s1.json"))
         self._agents("idle")

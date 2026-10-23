@@ -506,13 +506,13 @@ def _week_lines(d, now, lim, kv, sp, rates):
     the working hours left, the crew work outside them, the projection at the reset and what
     that allows; the fallback is named as such."""
     wk = d["week"]
-    burn = limits.week_burn(scheduler.readings(), d, now)
     night = kv.get("shift.night") == "1"
     start, week = kv.get("shift.week_start"), lim.get("seven_day")
     rise = None if start in (None, "") or week is None else float(week) - float(start)
-    off = limits.off_hours(night, journal.budget(kv), rise, sp["usd"],
-                           rates["seven_day"].get("usd_per_pp"))
-    proj = limits.week_projection(lim, burn, d, now, off_hours=off)
+    proj = limits.week_now(lim, scheduler.readings(), d, now, night=night,
+                           budget=journal.budget(kv), week_rise_pp=rise, shift_usd=sp["usd"],
+                           week_usd_per_pp=rates["seven_day"].get("usd_per_pp"))
+    burn = proj["burn"]
     if proj["used"] is None:
         return ["- week: unknown (no projection; the unknown-week rules apply)"]
     at = proj["resets_at"]

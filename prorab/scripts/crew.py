@@ -1164,10 +1164,11 @@ def _exit(name, pane, timeout_s, poll_s):
     journal.kv_set(mark, time.time())
     result = "not_exited"
     try:
-        try:
-            herdr_cli.send(name, "/exit")
-        except herdr_cli.HerdrError:
-            pass
+        if exit_dialog(screen) is None:  # an open exit dialog is answered below, never typed onto
+            try:
+                herdr_cli.send(name, "/exit")
+            except herdr_cli.HerdrError:
+                pass
         deadline = time.monotonic() + timeout_s
         pressed = False
         while True:

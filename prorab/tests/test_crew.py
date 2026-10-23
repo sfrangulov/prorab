@@ -3391,6 +3391,15 @@ class TestExitDialog(CrewBase):
         i_start = next(i for i, c in enumerate(calls) if c.startswith("agent start a1"))
         self.assertTrue(i_exit < i_key < i_cd < i_start)
 
+    def test_an_exit_dialog_already_open_gets_no_exit_typed_onto_it(self):
+        self.listed(True, True, False)
+        self.screens(self.dialog)  # the first read already shows the dialog
+        self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
+        r = self.handover()
+        self.assertEqual(r["status"], "restarted")
+        self.assertFalse([c for c in self.calls() if c.startswith("agent prompt a1 /exit")])
+        self.assertEqual(self.keys(), ["pane send-keys w:p9 1"])
+
     def keys_lines(self):
         return TestKeysLogged.keys_lines(self)
 

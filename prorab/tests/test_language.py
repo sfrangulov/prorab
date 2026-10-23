@@ -32,36 +32,19 @@ SKILL_FILE = "prorab/SKILL.md"
 SPEC_FILE = "docs/superpowers/specs/2026-10-21-prorab-design.md"
 
 
-def _skill_description_lines(lines):
-    """Zero-based indexes of the frontmatter `description:` value lines of SKILL.md."""
-    if not lines or lines[0].strip() != "---":
-        return set()
-    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), len(lines))
-    out, inside = set(), False
-    for i in range(1, end):
-        line = lines[i]
-        if line.startswith("description:"):
-            inside = True
-        elif inside and line[:1] not in (" ", "\t", "") and not line.startswith("#"):
-            inside = False
-        if inside:
-            out.add(i)
-    return out
-
-
 def cyrillic_hits(rel_path, text):
-    """`path:line: excerpt` for each line with Cyrillic, outside the allowlist (R41)."""
+    """`path:line: excerpt` for each line with Cyrillic, outside the allowlist (R41). SKILL.md has
+    no exemption since R121: its command-only `description` holds no trigger phrases."""
     rel_path = rel_path.replace(os.sep, "/")
     if rel_path in ALLOWED_FILES:
         return []
     lines = text.splitlines()
-    skip = _skill_description_lines(lines) if rel_path == SKILL_FILE else set()
     in_glossary = False
     hits = []
     for i, line in enumerate(lines):
         if rel_path == SPEC_FILE and line.startswith("## "):
             in_glossary = line.strip() == "## Glossary"
-        if not CYRILLIC.search(line) or i in skip:
+        if not CYRILLIC.search(line):
             continue
         if in_glossary and line.lstrip().startswith("|"):
             cells = line.strip().strip("|").split("|")
@@ -123,12 +106,9 @@ class TestLanguage(unittest.TestCase):
         self.assertEqual(len(cyrillic_hits(spec, glossary + "\n## Next\n\n%s\n" % ru)), 1)
         self.assertEqual(len(cyrillic_hits(spec, "| crew | %s | x |\n" % ru)), 1)
         self.assertEqual(len(cyrillic_hits("other.md", glossary + "| a | %s | b |\n" % ru)), 1)
-        skill = ("---\nname: prorab\ndescription: Use when asked.\n  Triggers: %s\n"
-                 "  more %s\nlicense: x\n---\nbody\n") % (ru, ru)
-        self.assertEqual(cyrillic_hits(SKILL_FILE, skill), [])
-        self.assertEqual(len(cyrillic_hits(SKILL_FILE, skill.replace("license: x", "license: " + ru))), 1)
-        self.assertEqual(len(cyrillic_hits(SKILL_FILE, skill + ru + "\n")), 1)
-        self.assertEqual(len(cyrillic_hits("prorab/other/SKILL.md", skill)), 2)
+        # R121: nothing in SKILL.md is exempt, its description included
+        skill = "---\nname: prorab\ndescription: Runs crews. %s\n---\nbody %s\n" % (ru, ru)
+        self.assertEqual(len(cyrillic_hits(SKILL_FILE, skill)), 2)
         for name in ALLOWED_FILES:
             self.assertEqual(cyrillic_hits(name, ru + "\n"), [], name)
         self.assertEqual(len(cyrillic_hits("prorab/scripts/x.py", "# %s\n" % ru)), 1)

@@ -29,8 +29,8 @@ The foreman itself executes nothing: every change to code or documents goes to a
 - **Gates**: anything only you can decide (a consent prompt, a login, more budget, a matter of
   taste) stops that work order with a recorded question; the rest goes on.
 
-It triggers on requests to hand out work across projects, open crews or start a night shift
-(in English or Russian), or on `/prorab`. It is not meant for ordinary work inside one project.
+It starts only with the `/prorab` command (for example `/prorab <goal text or goal file>`): no
+phrase in a chat loads it, so ordinary sessions never see it.
 
 ## Requirements
 
@@ -54,8 +54,8 @@ git clone <repository-url> ~/projects/prorab
 ### Project-scoped (default)
 
 The repository already holds `.claude/skills/prorab`, a relative link to `../../prorab`. Start
-Claude Code inside a herdr pane in the clone, which becomes the foreman's office, and ask for
-crews or type `/prorab`:
+Claude Code inside a herdr pane in the clone, which becomes the foreman's office, and type
+`/prorab`:
 
 ```bash
 cd ~/projects/prorab

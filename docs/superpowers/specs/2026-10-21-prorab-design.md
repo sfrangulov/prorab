@@ -12,7 +12,7 @@ Why not Gas Town / Gas City: a preliminary review showed that tmux is mandatory,
 
 ## Goals
 
-- One skill, `prorab`, that can be switched on in a Claude Code session in the foreman's office (installed for that folder only; globally only on the customer's explicit word, section "Where things live"). Only herdr and beads are required.
+- One skill, `prorab`, that the customer switches on in a Claude Code session in the foreman's office with the `/prorab` command, and only with it (installed for that folder only; globally only on the customer's explicit word, section "Where things live"). Only herdr and beads are required.
 - Hours of work without the customer, within the estimates and the clearances given.
 - Control of the foreman's own context and the crews' context, of the Claude Max limits (5 hours and week) and of the estimate of every work order.
 - Crews follow the superpowers process, and the foreman acts as their "human partner": the customer's involvement is minimal.
@@ -93,9 +93,7 @@ The terms come from a building site. `SKILL.md` gives the glossary once. One Eng
 | fallback procedure | запасная процедура | `references/superpowers.md` |
 | human partner | человеческий партнёр | — (superpowers' term) |
 | "ignore limits and finish" | «игнорируй лимиты и закончи» | kv `override.ignore_limits` |
-| trigger "hand out work across projects" | «раздай работу по проектам» | `description` of `SKILL.md` |
-| trigger "open crews" | «открой бригады» | `description` of `SKILL.md` |
-| trigger "night shift" | «ночная смена» | `description` of `SKILL.md` |
+| the `/prorab` command | команда `/prorab` | `disable-model-invocation: true` in the frontmatter of `SKILL.md` |
 
 What the terms mean:
 
@@ -124,11 +122,11 @@ What the terms mean:
 
 - **Everything generated or shipped is English:** `SKILL.md`, everything in `references/` (including the act and message templates sent to crews), the string values of `defaults.json`, every template the scripts render, work orders, stage acts, handover acts, customer gates, push notifications, the morning report (`reports/YYYY-MM-DD.md`), the monitor's event texts, strings and docstrings in scripts and tests (including fixtures' expected texts), the pressure scenarios, the trigger evals, this document and the plan.
 - **Identifiers are English too:** module, function, variable and test names, CLI subcommands, kv keys, bead labels and act kinds, event names, keys in `defaults.json`, file and directory names (for example `~/.cache/prorab/work-orders`) all take the glossary's terms. No Russian word appears in them, neither in Cyrillic nor in Latin transliteration. Only the skill name `prorab` and names derived from it stay (`prorab:active`, `prorab:handoff`, `~/projects/prorab`, `~/.cache/prorab`, the branch `prorab/<id>`).
-- **Kept:** the skill name `prorab`. Every trigger phrase in the `description` of `SKILL.md` appears in English and in Russian (the Russian forms are in the glossary), plus `/prorab`; the rest of the `description` is English. The trigger evals cover both languages, should-trigger and should-not-trigger alike.
+- **Kept:** the skill name `prorab`. **Command-only** (the customer's order of 23 October: the skill loaded and got in the way in ordinary sessions): the frontmatter of `SKILL.md` holds `disable-model-invocation: true`, so Claude Code keeps the skill out of the model's skill list and only the customer's `/prorab` (or the handover's `/prorab take over …`) loads it, and an `argument-hint` (`[goal text or goal file]`); the `description` is one plain English sentence of what `/prorab` does, with no trigger phrases in either language. The trigger evals cover both languages: no phrase invokes the skill, `/prorab` does.
 - **Chat:** the foreman answers the customer in whatever language the customer writes in. This is normal behaviour; the skill does not instruct otherwise. Generated files stay English.
 - **One quote in the journal.** An approval act quotes the customer's words verbatim, in the language they were written in (section "The foreman with the customer"): it is the record of the customer's own approval, which a translation would weaken. The words live only in that act's `words:` field (or the same text in kv `approval.*`), the only text in the journal that may not be English. Nothing generated copies them: the morning report, handover acts, gates, push notifications and work orders say "approved by delegation: <the recommendation>" in English. The journal is not a document of the repository; no file in `prorab/` or `docs/` copies such a quote, and the exception does not widen the Cyrillic guard.
 - **No Russian-polish step.** The earlier optional external command `polish.cmd`, which polished Russian reports, is dropped: the skill's own output is English, and a Russian version of a text on the customer's request is the foreman's ordinary chat work. The key `polish_cmd` leaves `defaults.json`, and the kv override `polish.cmd` is gone.
-- **Cyrillic guard.** A test fails on any Cyrillic in `prorab/`, `docs/` and the repo's `CLAUDE.md`, except the trigger phrases inside the `description` of the `prorab/SKILL.md` frontmatter, the Russian column of this document's glossary, and the files that deliberately hold Russian, each listed by name in the test: the Russian test fixtures and the trigger-eval files with Russian queries (`prorab/evals/triggers.json`). The same test also bans Russian words written in Latin letters — the transliterated stems of the glossary's Russian words for work order, clearance, estimate, crew, site, acceptance, handover and customer (the exact list lives in the test and is matched case-insensitively) — and the three-letter abbreviation of "object" used as an identifier. The customer's Russian commands are described in English, for example "the customer's command 'ignore limits and finish', in any language", and never quoted in Russian outside the glossary.
+- **Cyrillic guard.** A test fails on any Cyrillic in `prorab/`, `docs/` and the repo's `CLAUDE.md` (the frontmatter of `prorab/SKILL.md` included: it holds no trigger phrases), except the Russian column of this document's glossary, and the files that deliberately hold Russian, each listed by name in the test: the Russian test fixtures and the trigger-eval files with Russian queries (`prorab/evals/triggers.json`). The same test also bans Russian words written in Latin letters — the transliterated stems of the glossary's Russian words for work order, clearance, estimate, crew, site, acceptance, handover and customer (the exact list lives in the test and is matched case-insensitively) — and the three-letter abbreviation of "object" used as an identifier. The customer's Russian commands are described in English, for example "the customer's command 'ignore limits and finish', in any language", and never quoted in Russian outside the glossary.
 
 ## Environment and dependencies
 
@@ -180,7 +178,7 @@ Three more quirks are known from the Gas City review and are checked on the live
 
 ```
 ~/projects/prorab/                 the foreman's office, a git repository
-  CLAUDE.md                        two lines: this is the foreman's office; load the prorab skill
+  CLAUDE.md                        two lines: this is the foreman's office; the foreman starts only with /prorab
   .claude/skills/prorab            a relative link to ../../prorab: the office loads the skill
   prorab/                          the skill itself
     SKILL.md
@@ -193,7 +191,7 @@ Three more quirks are known from the Gas City review and are checked on the live
   docs/superpowers/specs/          this document
 ```
 
-Installation is project-scoped (the customer's order of 23 October, finding 12). The foreman's office loads the skill through its own `.claude/skills/prorab`, a relative link to `../../prorab` kept in the repository, so the skill is there whenever Claude Code starts in the office, and edits to it take effect at once. A live test runs its test foreman from a lab folder (`~/projects/test/prorab-lab`) whose `.claude/skills/prorab` links to the repository's `prorab/`: the link is made at the start of the run and removed at its end — also when the run is abandoned or stopped early — and the folder stays, so its folder trust is the customer's once. A global install (`~/.claude/skills/prorab`, `~/.agents/skills/prorab`) is made only on the customer's explicit word: no build step, test or script creates one. The first three live runs used the global links, which the customer removed on 23 October.
+Installation is project-scoped (the customer's order of 23 October, finding 12). The foreman's office loads the skill through its own `.claude/skills/prorab`, a relative link to `../../prorab` kept in the repository, so `/prorab` is there whenever Claude Code starts in the office, and edits to it take effect at once. A live test runs its test foreman from a lab folder (`~/projects/test/prorab-lab`) whose `.claude/skills/prorab` links to the repository's `prorab/`: the link is made at the start of the run and removed at its end — also when the run is abandoned or stopped early — and the folder stays, so its folder trust is the customer's once. A global install (`~/.claude/skills/prorab`, `~/.agents/skills/prorab`) is made only on the customer's explicit word: no build step, test or script creates one. The first three live runs used the global links, which the customer removed on 23 October.
 
 The foreman works in a folder that loads the skill — the office, or the lab folder of a live test — and the journal always lives in the foreman's office: bd is called with `BEADS_DIR=~/projects/prorab/.beads`.
 
@@ -545,7 +543,7 @@ If the act is unclear, the foreman may question the crew's previous session with
 ### Foreman handover
 
 1. When the threshold is reached, the foreman writes its handover act into a shift bead (act kind `shift`): the state of all work orders, which panes belong to which crews, the spend against the estimates and the budget in dollars, the limits and the current rate, the expected events (among them the timers of times promised to the customer, which stay in the journal and fire for the new foreman), the night shift's status.
-2. It opens a new pane in the foreman's office and starts Claude there with the command to take over the shift from this bead.
+2. It opens a new pane in the foreman's office and starts Claude there with the command to take over the shift from this bead: `/prorab take over the shift from bead <id>.` (the skill loads only by its command, section "Language").
 3. It makes sure the new foreman has taken over: the new foreman has matched the "issuing" records against `herdr agent list` (a crew it found it takes under supervision; for one not found, the work order may be issued again), restarted the monitor and rewritten `prorab:active` to its own pane. The handover script checks all three itself, by records rather than by the new pane's screen: the lock names the new pane, the journal records a `reconcile` by the new pane since the handover began, and a monitor started for the new pane since then has left its mark in the monitor's log directory. On the second live run the old foreman checked by polling the new pane's screen for the word "reconcile" and closed its pane a quarter of an hour late.
 4. It stops its monitor and closes its session: its last action is closing its own pane.
 
@@ -683,7 +681,7 @@ Everything is bash and python3 with the standard library. JSON from herdr and bd
    - the customer answered a consent prompt in the pane and said nothing in chat, having said they would;
    - the foreman reports the afternoon's result to the customer, with tables of figures and several open decisions at hand;
    - after the Mac woke in the night, two crews show "Not logged in · Please run /login", the customer is asleep, and the foreman has Bash at hand.
-2. **Triggering.** `prorab/evals/triggers.json` in the spirit of skill-creator. The skill must switch on for "hand out work across projects", "open crews", "night shift" — each in English and in Russian (the Russian forms are in the glossary) — and for `/prorab`, and must not switch on for ordinary work in one project, in either language.
+2. **Triggering.** `prorab/evals/triggers.json` in the spirit of skill-creator. The skill is command-only (the customer's order of 23 October: it loaded in ordinary sessions): no phrase invokes it, in English or in Russian — neither the former trigger phrases ("hand out work across projects", "open crews", "night shift") nor ordinary work in one project — and `/prorab`, with or without arguments, still does.
 3. **A live run on a toy site.** A temporary git repository with a simple task:
    - one crew, one issuing of a work order;
    - one forced handover at a lowered threshold;
@@ -701,7 +699,7 @@ Everything is bash and python3 with the standard library. JSON from herdr and bd
 
    No live run is ordered for the fixes of the third run (the foreman's order after it) or for findings 9–12; what a later run would check is recorded as open in `notes.md`. A later run loads the skill project-scoped: its test foreman runs from the lab folder of section "Where things live", whose link is made at the run's start and removed at its end, also when the run is abandoned or stopped early, and nothing is installed globally. A lost login is never provoked: logging out is the customer's account.
 
-`SKILL.md` is lean: rules only, trigger conditions as situations, mechanics in scripts, reference material in `references/`.
+`SKILL.md` is lean: rules only, invoked by its command only, mechanics in scripts, reference material in `references/`.
 
 ## Decisions
 
@@ -712,7 +710,7 @@ Decided by the customer:
 - crews follow superpowers with minimal customer involvement;
 - crews are Claude only; Codex was to be used by default only for polishing Russian text, and that role ended once all output became English;
 - the name `prorab`, the foreman's office `~/projects/prorab`, building-site terminology (English terms with the customer's Russian words alongside, section "Glossary");
-- everything generated or shipped is in English, identifiers included; trigger phrases in English and in Russian; the foreman answers in the customer's language (section "Language");
+- everything generated or shipped is in English, identifiers included; the skill invoked only by `/prorab`, with no trigger phrases in either language; the foreman answers in the customer's language (section "Language");
 - the foreman draws up estimates within the shift budget; there is a default budget, and the customer can change it;
 - estimates and the budget are in US dollars at API prices; the conversion into pp of the window and of the week goes by a rate estimated from the sensor (until the first estimate, the defaults: 3.5 $/pp of the window and 10 $/pp of the week); counts stay only as machine protection (`heavy_slots`, the heavy-run limit per stage, `parallel_ceiling`); the foreman's own research and one-off subagents are costed in dollars too; a crew handover at about 40 % of the context; overspend — stop and a gate to the customer;
 - beads are required;

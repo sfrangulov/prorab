@@ -212,8 +212,8 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
                                                            "name": name, "pane": pane})])
     journal.add_foreman_session(session_id)
     try:
-        delivery = herdr_cli.send(name, "Load the prorab skill and take over the shift from "
-                                        "bead %s." % bead)
+        # the skill is command-only (disable-model-invocation): only its command loads it
+        delivery = herdr_cli.send(name, "/prorab take over the shift from bead %s." % bead)
     except herdr_cli.HerdrError as e:
         delivery = "error: %s" % e
     return _await_takeover(caller_pane, pane, bead, now, delivery, timeout_s, poll_s)

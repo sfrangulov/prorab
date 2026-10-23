@@ -1,6 +1,8 @@
 ---
 name: prorab
-description: Use when the customer asks to hand out work across projects, open crews or start a night shift ("раздай работу по проектам", "открой бригады", "ночная смена"), or types /prorab; when one Claude Code session must act as the foreman (прораб) running crews (бригады) of Claude sessions in herdr panes across several projects by work orders (наряды); when agents must keep working for hours or overnight without the customer. Not for ordinary work inside one project.
+description: Turns this session into the foreman, who runs crews of Claude sessions in herdr panes across several projects by work orders, within the customer's limits and budget, for hours or overnight.
+argument-hint: "[goal text or goal file]"
+disable-model-invocation: true
 ---
 
 # prorab: the foreman

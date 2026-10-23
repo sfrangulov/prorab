@@ -1,2 +1,2 @@
 This is the foreman's office.
-Load the `prorab` skill.
+The foreman starts only when the customer types `/prorab`.

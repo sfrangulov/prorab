@@ -863,8 +863,10 @@ class TestHandoff(ShiftBase):
         bead = journal.bd(["show", res["bead"]])[0]
         self.assertEqual(bead["metadata"]["session_id"], sid)
         prompt = [c for c in self.calls() if c.startswith("agent prompt prorab-2")][0]
-        self.assertIn("Load the prorab skill and take over the shift from bead %s." % res["bead"],
-                      prompt)
+        # the skill is command-only: the successor gets its command, never a "load the skill"
+        self.assertIn("agent prompt prorab-2 /prorab take over the shift from bead %s."
+                      % res["bead"], prompt)
+        self.assertNotIn("Load the prorab skill", prompt)
 
     def test_handoff_prorab_sets_the_handoff_before_the_start(self):
         self.routes_for_handoff()

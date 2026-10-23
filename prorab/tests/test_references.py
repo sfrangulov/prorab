@@ -365,5 +365,52 @@ class TestSuperpowersAndPassport(unittest.TestCase):
         self.assertEqual(crew.criteria_ids(t), [])  # appended to the work-order file
 
 
+SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
+
+
+def frontmatter(text):
+    """{key: value} of the top-level `key: value` lines between the first two `---` lines."""
+    lines = text.splitlines()
+    assert lines[0] == "---", "SKILL.md starts with its frontmatter"
+    end = lines.index("---", 1)
+    out = {}
+    for line in lines[1:end]:
+        key, sep, value = line.partition(":")
+        assert sep and not line[:1].isspace(), "one line per key: %r" % line
+        out[key.strip()] = value.strip()
+    return out
+
+
+class CommandOnlyTests(unittest.TestCase):
+    """The customer's order of 23 October (R121): no phrase invokes the skill, `/prorab` does."""
+
+    def test_skill_is_command_only(self):
+        with open(os.path.join(SKILL_DIR, "SKILL.md"), encoding="utf-8") as fh:
+            fm = frontmatter(fh.read())
+        self.assertEqual(fm.get("name"), "prorab")
+        self.assertEqual(fm.get("disable-model-invocation"), "true")
+        self.assertNotIn("user-invocable", fm)  # `/prorab` stays the customer's
+        hint = fm.get("argument-hint", "").strip('"')
+        self.assertTrue(hint.startswith("[") and hint.endswith("]"), hint)
+        desc = fm.get("description", "")
+        self.assertTrue(desc.endswith(".") and desc.count(". ") == 0, "one sentence: " + desc)
+        # no Cyrillic, quotes, guillemets or brackets: the old trigger list had all four
+        banned = "[%s-%s%s%s\"()]" % (chr(0x400), chr(0x4ff), chr(0xab), chr(0xbb))
+        self.assertIsNone(re.search(banned, desc), desc)
+        for word in ("use when", "trigger", "/prorab", "asks to", "types"):
+            self.assertNotIn(word, desc.lower())
+
+    def test_trigger_evals_expect_the_command_only(self):
+        import json
+        path = os.path.join(SKILL_DIR, "evals", "triggers.json")
+        with open(path, encoding="utf-8") as fh:
+            queries = json.load(fh)
+        self.assertEqual(len(queries), 32)
+        for q in queries:
+            self.assertEqual(q["should_trigger"], q["query"].startswith("/prorab"), q["id"])
+        commands = [q for q in queries if q["should_trigger"]]
+        self.assertEqual(sorted(q["lang"] for q in commands), ["en", "ru"])
+
+
 if __name__ == "__main__":
     unittest.main()

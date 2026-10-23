@@ -4,7 +4,7 @@ A site passport tells a crew how to work on a site: a new worktree lacks whateve
 
 - Write: fill in the template into a file and run `journal.py passport SITE --set-file FILE`; the command creates the bead or replaces its text.
 - Read: `journal.py passport SITE` prints `{"id", "text"}`. The text goes below the work order in the work-order file (`work-order.md`, step 5), and the work order names the bead.
-- Update: after acceptance, whatever the stage taught (a missing setup step, a new quirk, a heavy command) goes into the passport at once.
+- Update: after acceptance, whatever the stage taught (a missing setup step, a new quirk, a heavy command) goes into the passport at once. Start from the report's "For the passport": `crew.py check_report` returns its items as `passport_notes`; put each into the fitting section of the passport and write it back with `--set-file`.
 
 ## Template
 

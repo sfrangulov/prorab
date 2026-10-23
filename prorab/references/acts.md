@@ -4,7 +4,7 @@
 
 ## Acceptance act
 
-Written after `crew.py check_report NAME WORK_ORDER --stage STAGE` passed and the claims were compared with the facts. Put the filled block into a file and record it with `crew.py accept WORK_ORDER STAGE --act-file FILE`; `accept` checks nothing itself, appends the `Spend:` block (`journal.spend_block`: the work order's dollars against its estimate, the shift's against the budget, the rates) and closes the stage. Do not write the spend yourself. The first line is the verdict; the morning report shows it.
+Written after `crew.py check_report NAME WORK_ORDER --stage STAGE` passed and the claims were compared with the facts. Put the filled block into a file and record it with `crew.py accept WORK_ORDER STAGE --act-file FILE`; `accept` checks nothing itself, appends the `Spend:` block (`journal.spend_block`: the work order's dollars against its estimate, the shift's against the budget, the rates) and closes the stage. Do not write the spend yourself. The first line is the verdict; the morning report shows it. Before the act, write the report's "For the passport" notes (`passport_notes` of the check) into the site passport; the `Passport:` line says which.
 
 "done, review needs rework" is a result, not a failure: review findings, missing tests and follow-ups go to the next stage, a fix round or a new work order. "failed" means the evidence does not show the stage reached its stop point.
 
@@ -19,6 +19,7 @@ Checks run by the foreman: <command - result - SKIP: <n>, or none>
 Heavy runs: <n> of <limit> per stage (slots log)
 Review: <requesting-code-review or the code-review skill, research item <key>; findings, or none>
 Did not match: <claim against fact, or nothing>
+Passport: updated <bead> | nothing new
 Answer to the crew: <next stage within the estimate and clearances | fixes | work order closed>
 ```
 

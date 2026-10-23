@@ -42,7 +42,7 @@ HANDOVER_MARKER = "HANDOVER READY"
 DROP_MARKER = "[customer decision] drop"
 
 REPORT_SECTIONS = ("Summary", "Behaviour", "Changed files", "Verification", "Stubs",
-                   "Residual risks")
+                   "For the passport", "Residual risks")
 CRITERION_STATUSES = ("done", "not applicable", "deferred", "blocked", "stub")
 OUTCOMES = ("delivered", "no changes", "blocked", "abandoned")
 # `limit_died` and `login` (a restart that stopped at a login screen) are never counted
@@ -1963,6 +1963,21 @@ def _live_field(item, cid):
     return len(fields) > 1 and fields[-1].strip(" *_`.") == "LIVE %s" % cid
 
 
+def _check_passport(sections):
+    """`(problems, notes)` of the section "For the passport": the single item `none`, or the
+    notes a newcomer to the site would trip over, which the foreman writes into the passport."""
+    if "For the passport" not in sections:
+        return [], []  # "missing section" is already a problem
+    lines = sections["For the passport"]
+    items = _items(lines)
+    bare = " ".join(ln.strip() for ln in lines if ln.strip())
+    if not items and bare.strip(" *_`.").lower() == "none":
+        items = ["none"]
+    if not items:
+        return ["For the passport: write none or list each note"], []
+    return [], [it for it in items if it.strip(" *_`.").lower() != "none"]
+
+
 def _check_stubs(sections, rows, criteria, live):
     """No stub passes as working: the Stubs section against the criteria table, and a `(live)`
     criterion's `done` against a `LIVE C<n>` item under Verification."""
@@ -2032,6 +2047,8 @@ def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, c
         elif status == "stub":
             warnings.append("criterion %s: stub — accept only if the work order allows it" % cid)
     problems += _check_stubs(sections, rows, criteria, live)
+    more, passport_notes = _check_passport(sections)
+    problems += more
     m = _RESULT.search(text)
     outcome = m.group(1).strip().lower() if m else None
     if outcome is None:
@@ -2063,7 +2080,7 @@ def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, c
             problems.append("delivered: no check command in Verification")
         problems += _check_delivery(sha, changed_items, files, worktree, base, work_order)
     return {"ok": not problems, "problems": problems, "warnings": warnings,
-            "outcome": outcome, "sha": sha}
+            "outcome": outcome, "sha": sha, "passport_notes": passport_notes}
 
 
 def _check_delivery(sha, changed_items, files, worktree, base, work_order=None):

@@ -2289,6 +2289,7 @@ def make_report(**kw):
         "Changed files": "## Changed files\n- `src/a.py` - new module\n",
         "Verification": "## Verification\n- `python3 -m unittest` SKIP: 0\n",
         "Stubs": "## Stubs\n- none\n",
+        "For the passport": "## For the passport\n- none\n",
         "Residual risks": "## Residual risks\nNone.\n",
     }
     parts.update(kw.get("sections", {}))
@@ -2345,6 +2346,28 @@ class TestCheckReport(CrewBase):
         self.has(self.problems(text=text), "missing section: Stubs")
         self.has(self.problems(text=self.stubs_report("## Stubs\n")),
                  "Stubs: write none or list each stub")
+
+    def passport_report(self, body):
+        return make_report(sections={"For the passport": body},
+                           tail="\nResult: delivered\nCommit: %s\n" % self.sha)
+
+    def test_check_report_passport_section_required(self):
+        self.has(self.problems(text=self.passport_report("")), "missing section: For the passport")
+        self.has(self.problems(text=self.passport_report("## For the passport\n")),
+                 "For the passport: write none or list each note")
+
+    def test_check_report_returns_the_passport_notes(self):
+        for body in ("## For the passport\n- none\n", "## For the passport\nNone.\n"):
+            r = self.check(text=self.passport_report(body))
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(r["passport_notes"], [])
+        r = self.check(text=self.passport_report(
+            "## For the passport\n- `npx expo install` fails under npm 11 with EALLOWSCRIPTS;"
+            " run `npm install` after it\n- the first test run is slow\n"))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["passport_notes"], [
+            "`npx expo install` fails under npm 11 with EALLOWSCRIPTS; run `npm install` after it",
+            "the first test run is slow"])
 
     def test_check_report_stubs_none_passes(self):
         for body in ("## Stubs\n- none\n", "## Stubs\n- None.\n", "## Stubs\nnone\n"):
@@ -2456,7 +2479,7 @@ class TestCheckReport(CrewBase):
     def test_check_report_ok(self):
         r = self.check()
         self.assertEqual(r, {"ok": True, "problems": [], "warnings": [],
-                             "outcome": "delivered", "sha": self.sha})
+                             "outcome": "delivered", "sha": self.sha, "passport_notes": []})
 
     def test_check_report_rejects(self):
         self.has(self.problems(text=make_report(

@@ -67,7 +67,7 @@ At `settled`: `crew.py summary NAME`, a report or a question.
 2. Fails, never accepted: `crew.py report_fix NAME WO STAGE --problems-file FILE`, FILE its `problems` verbatim, one per line, plus facts it misses (uncommitted files); `journal.py act STAGE answer "report check failed: <claim vs fact>"`. Past `cycles.report_fix` it gates: `wait STAGE` naming the problems, the crew only `pause`. No next stage.
 3. Passes: facts on top of it, never instead: `crew.py evidence WORKTREE`, cheap checks, a review subagent under its estimate.
 4. Act from `references/acts.md`, every mismatch in it: `crew.py accept WO STAGE --act-file FILE` (checks nothing; adds spend, rate). "done, review needs rework" is not "failed".
-5. Then the next stage (`stage-start`), a fix, or closed: `crew.py stop NAME WO`, never a second WO; not `stopped`: still running, no `cleanup` or end-of-branch option yet; `bg_shells`/`bg_work`: wait, `stop` again; `not_exited`: incident, gate. Passport: `journal.py passport SITE --set-file FILE`.
+5. Then the next stage (`stage-start`), a fix, or closed: `crew.py stop NAME WO`, never a second WO; not `stopped`: still running, no `cleanup` or end-of-branch option yet; `bg_shells`/`bg_work`: wait, `stop` again; `not_exited`: incident, gate. Passport: the report's notes, `journal.py passport SITE --set-file FILE`.
 
 ## Answers
 

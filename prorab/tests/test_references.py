@@ -166,7 +166,8 @@ class TestActs(unittest.TestCase):
         act = block("acts.md", "Acceptance act")
         self.assertTrue(act.startswith("Verdict: "), act)  # the morning report shows line 1
         self.assertIn("accepted | done, review needs rework | failed", act)
-        for word in ("Report check", "Heavy runs", "Review", "Did not match"):
+        for word in ("Report check", "Heavy runs", "Review", "Did not match",
+                     "Passport: updated <bead> | nothing new"):
             self.assertIn(word, act)
         self.assertIn("check_report", prose)
         self.assertIn("crew.py accept", prose)
@@ -292,6 +293,10 @@ class TestWorkOrder(unittest.TestCase):
         self.assertRegex(self.example, r"(?m)^Guard refusals: 0$")
         self.assertEqual(crew.live_criteria(t), [])  # the placeholder id is not a criterion
         self.assertEqual(crew._items(crew._sections(self.example)["Stubs"]), ["none"])
+        # the surprises of the stage reach the site passport
+        self.assertEqual(crew._items(crew._sections(self.example)["For the passport"]), ["none"])
+        for word in ("## For the passport", "Seven sections", "site passport"):
+            self.assertIn(word, t)
         self.assertIn("crew.py check_report NAME WORK_ORDER --stage STAGE", self.text)
 
         with tempfile.TemporaryDirectory() as tmp, \
@@ -325,7 +330,8 @@ class TestWorkOrder(unittest.TestCase):
                 heavy_limit=_defaults.load()["machine"]["heavy_runs_per_stage"],
                 heavy_counted=heavy)
         self.assertEqual(result, {"ok": True, "problems": [], "warnings": [],
-                                  "outcome": "delivered", "sha": sha})
+                                  "outcome": "delivered", "sha": sha,
+                              "passport_notes": []})
 
 
 class TestSuperpowersAndPassport(unittest.TestCase):
@@ -370,6 +376,7 @@ class TestSuperpowersAndPassport(unittest.TestCase):
         self.assertIn("journal.py passport SITE --set-file", text)
         self.assertIn("prorab:passport", text)
         self.assertIn("after acceptance", text)
+        self.assertIn("For the passport", text)  # the report's notes are the update's source
         t = block("passport.md", "Template")
         for field in ("Worktree setup", "Quick checks", "Heavy commands",
                       "<absolute path>/prorab/scripts/slots.py run --kind heavy -- <command>",

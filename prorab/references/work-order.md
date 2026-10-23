@@ -97,13 +97,17 @@ Guard refusals: <n>
 ## Stubs
 - `<path or symbol>` - <what it fakes> - C<n>
 
+## For the passport
+- <what a newcomer to this site would trip over, or none>
+
 ## Residual risks
 <what may still be wrong, or none>
 ```
 
-- Six sections with these headings: Summary, Behaviour, Changed files, Verification, Stubs, Residual risks.
+- Seven sections with these headings: Summary, Behaviour, Changed files, Verification, Stubs, For the passport, Residual risks.
 - One table row per acceptance criterion, with the bare id (`| C2 | done | |`, even for a `(live)` criterion). The status is done, not applicable, deferred, blocked or stub; every status but done needs a reason.
 - Stubs lists every hardcoded or stub data source the work rests on (a fixed table standing in for a live feed, a service mocked in the product code, sample data, a placeholder), each as `- \`<path or symbol>\` - <what it fakes> - C<n>`, or the single item `- none`. A stub's criterion is `stub`, never `done`.
+- For the passport lists what you learned about the site that a newcomer would trip over and the site passport does not say yet (an install that fails and the fix that worked, a step that needs a flag, a slow or flaky test), one item each, with the command or the fix, or the single item `- none`. The foreman writes the items into the site passport at acceptance.
 - A `(live)` criterion is `done` only with one Verification item marked `LIVE C<n>` as the item's last field, after a ` - ` separator (`- \`<exact command>\` - <output line> - SKIP: <n> - LIVE C<n>`): a real run against the real thing, not a mocked test. Text like "mocked, not LIVE C2" inside another field does not count. A Stubs item names only criteria of this work order.
 - Result: delivered, no changes, blocked or abandoned. With delivered, `Commit:` is a commit on `prorab/<id>` made since the base, Verification holds at least one check command, and Changed files lists exactly the files of `git diff --name-only <base branch>...HEAD` (the whole branch, not only this stage), one path in backticks per item.
 - Heavy runs: the heavy runs of this stage through `slots.py`, 0 if none. The check compares the number with the log of `slots.py`; a report without the line, or with another number, is rejected.
@@ -144,6 +148,9 @@ Added a CSV export of the daily report.
 - `/home/user/projects/prorab/prorab/scripts/slots.py run --kind heavy -- python3 -m unittest discover -s tests` - `Ran 14 tests ... OK` - SKIP: 0
 
 ## Stubs
+- none
+
+## For the passport
 - none
 
 ## Residual risks

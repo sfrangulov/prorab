@@ -49,6 +49,8 @@ class FakeJournal:
         self.estimates = {}
         self.set_spent_log = []
         self.accepted = []
+        self.closed_work_orders = []
+        self.open_gates = set()
         self.shift = {"usd": 0.0, "work_orders": {}, "research": {}, "foreman_usd": 0.0}
 
     def bump_restarts(self, work_order):
@@ -79,6 +81,13 @@ class FakeJournal:
 
     def open_stages(self, work_order):
         return list(self.stages.get(work_order, []))
+
+    def close_work_order(self, work_order, reason):
+        self.closed_work_orders.append((work_order, reason))
+        return {"work_order": work_order, "closed": [], "already": False}
+
+    def has_open_gate(self, bead):
+        return bead in self.open_gates
 
     def bd(self, args, json_out=True):
         return [{"id": args[1], "status": "in_progress"}]
@@ -1186,7 +1195,7 @@ class TestGit(CrewBase):
         repo = self.make_repo()
         wt = self.add_worktree(repo, "N1", "prorab/N1")
         self.commit(wt, "g.txt", "1\n", "one")
-        self.assertEqual(crew.cleanup(repo, "N1"), {"status": "kept", "reason": "unmerged"})
+        self.assertEqual(crew.cleanup(repo, "N1"), {"status": "kept", "reason": "unmerged", "work_order_closed": False})
         self.assertTrue(os.path.isdir(wt))
 
     def test_cleanup_removes_merged(self):
@@ -1203,13 +1212,57 @@ class TestGit(CrewBase):
         self.assertEqual(crew.cleanup(repo, "N1")["status"], "removed")
         self.assertFalse(os.path.exists(wt))
 
+    def test_cleanup_closes_a_merged_work_order(self):
+        repo = self.make_repo()
+        self.add_worktree(repo, "N1", "prorab/N1")
+        self.j.issue_set("N1", "issued", name="a1")
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "removed")
+        self.assertTrue(r["work_order_closed"])
+        self.assertEqual(self.j.closed_work_orders, [("N1", "the branch merged")])
+        self.assertEqual(self.j.issue("N1")["decided"], "merged")
+
+    def test_cleanup_closes_a_dropped_work_order(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.commit(wt, "g.txt", "1\n", "one")
+        self.j.issue_set("N1", "issued", name="a1")
+        self.j.add_act("N1", "answer", crew.DROP_MARKER + " (customer's words)")
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "removed")
+        self.assertEqual(self.j.closed_work_orders, [("N1", "dropped by the customer")])
+        self.assertEqual(self.j.issue("N1")["decided"], "dropped")
+
+    def test_cleanup_closes_a_dropped_work_order_without_a_worktree(self):
+        repo = self.make_repo()
+        self.j.add_act("N1", "answer", crew.DROP_MARKER)
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "absent")
+        self.assertTrue(r["work_order_closed"])
+        self.assertEqual(self.j.closed_work_orders, [("N1", "dropped by the customer")])
+        self.assertIsNone(self.j.issue("N1"))  # no record, no field
+
+    def test_cleanup_absent_without_a_drop_closes_nothing(self):
+        repo = self.make_repo()
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "absent")
+        self.assertEqual(self.j.closed_work_orders, [])
+
+    def test_cleanup_kept_closes_nothing(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.commit(wt, "g.txt", "1\n", "one")
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r, {"status": "kept", "reason": "unmerged", "work_order_closed": False})
+        self.assertEqual(self.j.closed_work_orders, [])
+
     def test_cleanup_drop_needs_the_exact_marker(self):
         repo = self.make_repo()
         wt = self.add_worktree(repo, "N1", "prorab/N1")
         self.commit(wt, "g.txt", "1\n", "one")
         for text in ("drop the unused column", "dropdown menu", "decision: drop"):
             self.j.add_act("N1", "answer", text)
-        self.assertEqual(crew.cleanup(repo, "N1"), {"status": "kept", "reason": "unmerged"})
+        self.assertEqual(crew.cleanup(repo, "N1"), {"status": "kept", "reason": "unmerged", "work_order_closed": False})
         self.assertTrue(os.path.isdir(wt))
 
     def test_drop_marker_matches_acts_md(self):
@@ -2252,7 +2305,7 @@ class TestStartPanes(CrewBase):
         self.first_needs_trust()
         self.pane_get("w:p9", terminal="term-new")
         self.assertEqual(crew.cleanup(os.path.join(self.dir, "nowhere"), "N1"),
-                         {"status": "absent"})
+                         {"status": "absent", "work_order_closed": False})
         self.assertFalse([c for c in self.later() if c.startswith("pane close")])
         self.assertIsNone(self.j.issue("N1").get("pane"))
 
@@ -2658,6 +2711,34 @@ class TestStopClosesPane(CrewBase):
         self.assertEqual(r, {"status": "bg_shells"})
         self.assertNotIn("pane close w:p9", self.calls_or_empty())
         self.assertIn("crew.a1.pane", self.j.kv)
+
+    def stop_n1(self):
+        self.route("agent list", ok({"agents": []}))
+        return crew.stop("a1", "N1")
+
+    def test_stop_closes_the_work_order_when_every_stage_is_accepted(self):
+        r = self.stop_n1()
+        self.assertEqual(self.j.closed_work_orders, [("N1", "every stage accepted")])
+        self.assertTrue(r["work_order_closed"])
+
+    def test_stop_keeps_a_work_order_with_an_open_stage_open(self):
+        self.j.stages["N1"] = ["N1.2"]
+        r = self.stop_n1()
+        self.assertEqual(self.j.closed_work_orders, [])
+        self.assertFalse(r["work_order_closed"])
+
+    def test_stop_keeps_a_work_order_with_an_open_gate_open(self):
+        self.j.open_gates.add("N1")
+        r = self.stop_n1()
+        self.assertEqual(self.j.closed_work_orders, [])
+        self.assertFalse(r["work_order_closed"])
+
+    def test_refused_stop_closes_nothing(self):
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        with mock.patch.object(crew, "_exit", return_value="bg_shells"):
+            r = crew.stop("a1", "N1", timeout_s=1, poll_s=0.01)
+        self.assertEqual(r, {"status": "bg_shells"})
+        self.assertEqual(self.j.closed_work_orders, [])
 
     def test_stop_clears_the_delivered_fingerprint(self):
         self.route("agent list", ok({"agents": []}))

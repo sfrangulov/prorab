@@ -151,6 +151,8 @@ def create_stage(parent, title, body, blocked_by=(), files=(), duration_min=None
     Storage (bd 1.3.1): files / duration_min / started_at / actual_min live in the
     bead's `metadata` JSON object (bd update merges keys); kind is the label `type:<kind>`.
     """
+    if _show(parent).get("status") == "closed":  # a stage added to a closed work order reopens it
+        _run(["reopen", parent, "--reason", "a stage was added"])
     meta = {"files": list(files or [])}
     if duration_min is not None:
         meta["duration_min"] = float(duration_min)
@@ -281,6 +283,22 @@ def clear_override(data=None):
 def _open_gate(item):
     return any(d.get("issue_type") == "gate" and d.get("status") != "closed"
                for d in item.get("dependencies") or [])
+
+
+def has_open_gate(bead):
+    return _open_gate(_show(bead))
+
+
+def close_work_order(work_order, reason):
+    """Close the work order's open stages (creation order), then the work order itself; a
+    closed bead is skipped. ``{"work_order", "closed": [ids closed now], "already": bool}``;
+    a gate on the work order stays as it is."""
+    already = _show(work_order).get("status") == "closed"
+    closed = []
+    for bead in open_stages(work_order) + ([] if already else [work_order]):
+        _run(["close", bead, "--reason", reason])
+        closed.append(bead)
+    return {"work_order": work_order, "closed": closed, "already": already}
 
 
 def _work_order_settled(work_order_id):
@@ -1189,6 +1207,8 @@ def main(argv=None):
     osub = p.add_subparsers(dest="ovcmd", required=True)
     osub.add_parser("get"); osub.add_parser("clear")
     osub.add_parser("set").add_argument("goal")
+    p = sub.add_parser("close-work-order")
+    p.add_argument("work_order"); p.add_argument("--reason", required=True)
     sub.add_parser("ready")
     sub.add_parser("graph")
     sub.add_parser("ready-work-orders")
@@ -1308,6 +1328,8 @@ def main(argv=None):
         elif a.ovcmd == "clear":
             clear_override()
         return _emit({"override": override()})
+    if a.cmd == "close-work-order":
+        return _emit(close_work_order(a.work_order, a.reason))
     if a.cmd == "ready":
         return _emit(ready())
     if a.cmd == "graph":

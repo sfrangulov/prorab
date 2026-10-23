@@ -869,6 +869,83 @@ class TestJournalG(JournalBase):
         self.assertEqual(list(out), ["wo-3"])
 
 
+class TestCloseWorkOrder(JournalBase):
+    def run_cli(self, *argv):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = journal.main(list(argv))
+        return rc, json.loads(buf.getvalue())
+
+    def status(self, bead):
+        return journal._show(bead).get("status")
+
+    def two_stages(self):
+        n = new_work_order()
+        done = journal.create_stage(n, "One", "b")
+        todo = journal.create_stage(n, "Two", "b")
+        journal.start_stage(done)
+        journal.accept_stage(done, "ok")
+        return n, done, todo
+
+    def test_close_work_order_closes_open_stages_then_itself(self):
+        n, done, todo = self.two_stages()
+        got = journal.close_work_order(n, "the branch merged")
+        self.assertEqual(got, {"work_order": n, "closed": [todo, n], "already": False})
+        for bead in (n, done, todo):
+            self.assertEqual(self.status(bead), "closed")
+        self.assertNotEqual(journal._show(done).get("close_reason"), "the branch merged")
+        self.assertEqual(journal._show(todo).get("close_reason"), "the branch merged")
+
+    def test_close_work_order_twice_closes_nothing(self):
+        n, _done, _todo = self.two_stages()
+        journal.close_work_order(n, "every stage accepted")
+        self.assertEqual(journal.close_work_order(n, "every stage accepted"),
+                         {"work_order": n, "closed": [], "already": True})
+
+    def test_closed_work_order_is_not_ready(self):
+        n = new_work_order()
+        s = journal.create_stage(n, "One", "b")
+        journal.start_stage(s)
+        journal.accept_stage(s, "ok")
+        self.assertIn(n, journal.ready_work_orders())  # the live defect
+        journal.close_work_order(n, "every stage accepted")
+        self.assertNotIn(n, journal.ready_work_orders())
+        self.assertNotIn(n, journal.graph())
+
+    def test_stage_added_to_a_closed_work_order_reopens_it(self):
+        n, _done, _todo = self.two_stages()
+        journal.close_work_order(n, "every stage accepted")
+        s = journal.create_stage(n, "Three", "b")
+        self.assertEqual(self.status(n), "open")
+        self.assertEqual(journal.open_stages(n), [s])
+        self.assertIn(n, journal.ready_work_orders())
+
+    def test_closed_before_the_shift_leaves_the_shift_spend(self):
+        import _defaults
+        n = new_work_order()
+        journal.issue_set(n, "issued", worktree="/home/user/projects/demo-app-a")
+        journal.close_work_order(n, "every stage accepted")
+        time.sleep(1.1)  # bd stamps whole seconds
+        journal.begin_shift(None, "fs1")
+        self.assertIn(n, journal.kv_get("shift.closed_before").split(","))
+        sp = journal.shift_spend(_defaults.load(), kv=journal.kv_all(), home=self.home)
+        self.assertNotIn(n, sp["work_orders"])
+
+    def test_has_open_gate(self):
+        n = new_work_order()
+        self.assertFalse(journal.has_open_gate(n))
+        journal.wait_customer(n, "a question")
+        self.assertTrue(journal.has_open_gate(n))
+
+    def test_close_work_order_cli(self):
+        n, _done, todo = self.two_stages()
+        rc, out = self.run_cli("close-work-order", n, "--reason", "dropped by the customer")
+        self.assertEqual((rc, out), (0, {"work_order": n, "closed": [todo, n], "already": False}))
+        self.assertEqual(self.status(n), "closed")
+
+
 class TestOverrideHistory(JournalBase):
     def test_history_written_on_set_and_closed_on_expiry(self):
         journal.set_override("g1")

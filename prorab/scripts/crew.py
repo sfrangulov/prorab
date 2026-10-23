@@ -1227,7 +1227,12 @@ def stop(name, work_order, timeout_s=60, poll_s=1):
     for field in ("work_order", "site", "pane", "pane_identity", "worktree", "branch", "session",
                   "transcript", "limit_until", "exiting", "handover_act", "delivered"):
         journal.kv_clear(_kv(name, field))
-    return {"status": "stopped", "tokens": tokens, "pane_closed": pane_closed}
+    closed = False
+    if not journal.open_stages(work_order) and not journal.has_open_gate(work_order):
+        journal.close_work_order(work_order, "every stage accepted")
+        closed = True
+    return {"status": "stopped", "tokens": tokens, "pane_closed": pane_closed,
+            "work_order_closed": closed}
 
 
 def _default_branch(site_path):
@@ -1243,23 +1248,33 @@ def cleanup(site_path, work_order):
         if key.startswith("consent.%s." % work_order):
             journal.kv_clear(key)
     wt = _find_worktree(site_path, work_order)
-    if wt is None:
-        return {"status": "absent"}
-    branch = wt["branch"]
     dropped = any(a.startswith(DROP_MARKER) for a in journal.acts(work_order, "answer"))
+    if wt is None:
+        closed = dropped
+        if closed:
+            journal.close_work_order(work_order, "dropped by the customer")
+        return {"status": "absent", "work_order_closed": closed}
+    branch = wt["branch"]
     merged = False
     if branch:
         out = _git_soft(["branch", "--merged", _default_branch(site_path)], site_path).stdout
         merged = branch in [ln.strip().lstrip("*+ ").strip() for ln in out.splitlines()]
     if not (merged or dropped):
-        return {"status": "kept", "reason": "unmerged"}
+        return {"status": "kept", "reason": "unmerged", "work_order_closed": False}
     rm = ["worktree", "remove"] + (["--force"] if dropped and not merged else []) + [wt["path"]]
     p = _git_soft(rm, site_path)
     if p.returncode != 0:
-        return {"status": "kept", "reason": "dirty", "detail": p.stderr.strip()}
+        return {"status": "kept", "reason": "dirty", "detail": p.stderr.strip(),
+                "work_order_closed": False}
     if branch:
         _git_soft(["branch", "-D" if dropped and not merged else "-d", branch], site_path)
-    return {"status": "removed", "worktree": wt["path"], "branch": branch}
+    decided = "merged" if merged else "dropped"
+    rec = journal.issue(work_order)
+    if rec:
+        journal.issue_set(work_order, rec.get("state") or "issued", decided=decided)
+    journal.close_work_order(work_order, "the branch merged" if merged else "dropped by the customer")
+    return {"status": "removed", "worktree": wt["path"], "branch": branch,
+            "work_order_closed": True}
 
 
 # ---- stage report check -------------------------------------------------------

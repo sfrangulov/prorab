@@ -410,6 +410,20 @@ class TestMergeCrew(HooksBase):
         self.assertEqual(self.merge_decide("git merge prorab/x", nogit)[0], 2)  # cannot tell
         self.assertEqual(self.merge_decide("git status", nogit), (0, ""))
 
+    def test_guard_a_hash_hides_nothing_from_the_guard(self):
+        repo = self.git_dir()
+        hidden = ("echo a#b; git push origin main", "true # x\ngit push origin main",
+                  "echo a#b; git commit --allow-empty -m x", "true # x\ngit commit -m x",
+                  "ls #; git commit -m x", "git status #x\ngit commit -m x")
+        for command in hidden:
+            self.assertEqual(self.decide(command, cwd=repo)[0], 2 if "push" in command else 0)
+            self.assertEqual(self.merge_decide(command, repo)[0], 2, command)
+        # a comment line alone, or after a command, stays harmless
+        for command in ("# just a note", "ls # list the files", "git status # ok",
+                        "echo a#b", "# note\ngit status"):
+            self.assertEqual(self.merge_decide(command, repo), (0, ""), command)
+            self.assertEqual(self.decide(command, cwd=repo), (0, ""), command)
+
     def test_guard_merge_branch_sees_git_spelled_around_the_gate(self):
         repo = self.git_dir()
         for command in ("g''it commit -m a", "g\\it commit -m a", "\"g\"it reset --hard",

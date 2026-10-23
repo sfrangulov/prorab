@@ -188,6 +188,7 @@ def _segments(command):
     token holding `<` or `>`."""
     lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""  # a `#` inside a word is no comment to a shell; nothing is dropped
     try:
         tokens = list(lexer)
     except ValueError:

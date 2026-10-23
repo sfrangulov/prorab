@@ -4319,6 +4319,36 @@ class TestMainCheckout(CrewBase):
         r, _ = self.merge_check(files=("y.txt",), changed="- `y.txt` - merged\n")
         self.assertIn("main moved by more than the merge of prorab/x", r["problems"])
 
+    def test_check_report_an_octopus_merge_is_refused(self):
+        self.merge_record()
+        git(self.repo, "checkout", "-q", "-b", "prorab/y")
+        self.commit(self.repo, "y.txt", "y\n", "work on y")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/x", "prorab/y")
+        self.assertEqual(len(git(self.repo, "rev-list", "--parents", "-n", "1",
+                                 "HEAD").split()), 4)
+        r, _ = self.merge_check(files=("x.txt", "y.txt"),
+                                changed="- `x.txt` - merged\n- `y.txt` - merged\n")
+        self.assertIn("main moved by more than the merge of prorab/x", r["problems"])
+
+    def test_check_report_a_rewritten_base_is_refused(self):
+        self.merge_record()
+        git(self.repo, "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten base")
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "--allow-unrelated-histories",
+            "prorab/x")
+        r, _ = self.merge_check()
+        self.assertIn("main moved by more than the merge of prorab/x", r["problems"])
+
+    def test_check_report_a_fast_forward_to_a_tip_not_descending_from_the_base(self):
+        self.commit(self.repo, "later.txt", "l\n", "a later commit on main")
+        later = git(self.repo, "rev-parse", "HEAD").strip()
+        git(self.repo, "reset", "-q", "--hard", self.head)
+        self.j.issue_set("N1", "issued", worktree=self.repo, base_commit=later,
+                         main_checkout=True, merge_branch="prorab/x")
+        git(self.repo, "merge", "-q", "--ff-only", "prorab/x")
+        r, _ = self.merge_check()
+        self.assertIn("main moved by more than the merge of prorab/x", r["problems"])
+
     def test_check_report_without_a_recorded_merge_branch_is_refused(self):
         self.j.issue_set("N1", "issued", worktree=self.repo, base_commit=self.head,
                          main_checkout=True)

@@ -456,6 +456,19 @@ class TestCost(unittest.TestCase):
         # main.jsonl was written just now, so its mtime passes; only B is in the window
         self.assertEqual(json.loads(buf.getvalue())["messages"], 1)
 
+    def test_guard_refusals_count_and_since(self):
+        path = os.path.join(FIX, "transcript_guard_refusal.jsonl")
+        # per entry, not per occurrence: each refusal line holds the text twice
+        self.assertEqual(transcript.guard_refusals(path), 2)
+        stage_start = _ts(9, 30)
+        self.assertEqual(transcript.guard_refusals(path, since=stage_start), 1)
+        self.assertEqual(transcript.guard_refusals(path, since=_ts(10, 0) + 6), 1)
+        self.assertEqual(transcript.guard_refusals(path, since=_ts(10, 0) + 7), 0)
+        # an ordinary tool result, a typed message and a missing file count nothing
+        self.assertEqual(transcript.guard_refusals(MAIN), 0)
+        with self.assertRaises(OSError):
+            transcript.guard_refusals(os.path.join(FIX, "no-such.jsonl"))
+
 
 if __name__ == "__main__":
     unittest.main()

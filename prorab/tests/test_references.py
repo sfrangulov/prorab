@@ -21,6 +21,7 @@ if SCRIPTS_DIR not in sys.path:
 import _defaults  # noqa: E402
 import crew  # noqa: E402
 import shift  # noqa: E402
+import transcript  # noqa: E402
 
 REFERENCES = os.path.join(os.path.dirname(SCRIPTS_DIR), "references")
 _ADDR = "t" + "@" + "x.invalid"
@@ -282,6 +283,13 @@ class TestWorkOrder(unittest.TestCase):
         # no stub passes as working: the template names the status, the marker and the check
         for word in ("stub", "(live)", "LIVE C<n>", "Never accept stub data as done"):
             self.assertIn(word, t)
+        # the worktree guard: its refusal text, the report's count, the plain-form rule
+        for word in ("This session is isolated in the worktree", "Guard refusals: <n>",
+                     "never routed around", "SKIP: <n> - LIVE C<n>"):
+            self.assertIn(word, t)
+        self.assertIn(transcript.GUARD_REFUSAL, t)
+        self.assertIn(transcript.GUARD_REFUSAL, read("superpowers.md"))
+        self.assertRegex(self.example, r"(?m)^Guard refusals: 0$")
         self.assertEqual(crew.live_criteria(t), [])  # the placeholder id is not a criterion
         self.assertEqual(crew._items(crew._sections(self.example)["Stubs"]), ["none"])
         self.assertIn("crew.py check_report NAME WORK_ORDER --stage STAGE", self.text)

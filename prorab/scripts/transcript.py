@@ -115,7 +115,49 @@ def last_text(path):
     return result
 
 
-_META = "is" + "Meta"   # Claude Code's flag on entries it writes itself (no message to the crew)
+GUARD_REFUSAL = "This session is isolated in the worktree"   # Claude Code's worktree guard
+
+
+def _result_text(block):
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content
+                         if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
+def guard_refusals(path, since=None):
+    """Refusals of Claude Code's worktree guard in a transcript: user entries holding a
+    `tool_result` whose text has `GUARD_REFUSAL`, stamped at or after `since` (epoch seconds).
+    Counted per entry: the line repeats the text in `toolUseResult`. Raises OSError."""
+    n = 0
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if GUARD_REFUSAL not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "user":
+                continue
+            msg = entry.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list) or not any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    and GUARD_REFUSAL in _result_text(b) for b in content):
+                continue
+            if since is not None:
+                ts = _parse_ts(entry.get("timestamp"))
+                if ts is None or ts < since:
+                    continue
+            n += 1
+    return n
+
+
+_META = "is" + "Meta"  # Claude Code's flag on entries it writes itself (no message to the crew)
 _STAGE_REPORT = re.compile(r"^#\s*Stage\s+\S+\s+report:")
 _NOTICE = "<task-notification"   # a finished background task tells the crew, by a user entry
 _final_cache = {}

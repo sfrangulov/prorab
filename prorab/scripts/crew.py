@@ -1829,6 +1829,7 @@ _ITEM = re.compile(r"^\s*(?:[-*+]|\d+\.)(?:\s+(.*))?$")
 _TICKS = re.compile(r"`([^`]+)`")
 _SKIP = re.compile(r"\bSKIP:\s*(\d+)", re.I)
 _HEAVY = re.compile(r"^[\s>*_-]*Heavy runs[\s*_]*:[\s*_`]*(\d+)\b", re.I | re.M)
+_GUARD = re.compile(r"^[\s>*_-]*Guard refusals[\s*_]*:[\s*_`]*(\d+)\b", re.I | re.M)
 
 
 def criteria_ids(work_order_text):
@@ -1889,6 +1890,29 @@ def _check_heavy(text, heavy_limit, cleared, heavy_counted, unverifiable=None):
     return problems
 
 
+def _check_guard(text, counted, unverifiable=None):
+    """The reported refusals of Claude Code's worktree guard against the transcript's count."""
+    m = _GUARD.search(text)
+    if not m:
+        return ["no Guard refusals line"], []
+    n = int(m.group(1))
+    problems, warnings = [], []
+    if unverifiable:  # by evidence, never by the crew's word
+        problems.append("guard refusals not verifiable: %s" % unverifiable)
+    elif counted is not None and n != counted:
+        problems.append("Guard refusals: reported %d, the transcript counts %d" % (n, counted))
+    if max(n, counted or 0) > 0:
+        warnings.append("%d refusals of the worktree guard; read each under Residual risks "
+                        "for what the crew did then" % max(n, counted or 0))
+    return problems, warnings
+
+
+def _live_field(item, cid):
+    """True when the Verification item ends in the field `LIVE <cid>`: after a ` - `."""
+    fields = item.split(" - ")
+    return len(fields) > 1 and fields[-1].strip(" *_`.") == "LIVE %s" % cid
+
+
 def _check_stubs(sections, rows, criteria, live):
     """No stub passes as working: the Stubs section against the criteria table, and a `(live)`
     criterion's `done` against a `LIVE C<n>` item under Verification."""
@@ -1906,6 +1930,8 @@ def _check_stubs(sections, rows, criteria, live):
                 ids = _CID.findall(item)
                 if not ids:
                     problems.append("stub item names no criterion: %s" % item)
+                if any(cid not in criteria for cid in ids):
+                    problems.append("stub item names an unknown criterion: %s" % item)
                 for cid in ids:
                     backed.setdefault(cid, item)
     for cid in criteria:
@@ -1917,18 +1943,23 @@ def _check_stubs(sections, rows, criteria, live):
     checks = _items(sections.get("Verification", []))
     for cid in live:
         if cid in rows and rows[cid][0] == "done" and not any(
-                re.search(r"\bLIVE\s+%s\b" % cid, it) for it in checks):
+                _live_field(it, cid) for it in checks):
             problems.append("criterion %s (live): done without a LIVE %s check under "
                             "Verification" % (cid, cid))
     return problems
 
 
 def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, cleared=False,
-                 heavy_counted=None, unverifiable=None, live=(), work_order=None):
+                 heavy_counted=None, unverifiable=None, live=(), work_order=None,
+                 guard_counted=None, guard_unverifiable=None):
     """Read-only check of a stage report against its work order and the worktree's git.
-    `work_order` finds the recorded base of a main-checkout work order (see `_recorded_base`)."""
+    `work_order` finds the recorded base of a main-checkout work order (see `_recorded_base`);
+    `guard_counted` is the transcript's count of the worktree guard's refusals in the stage."""
     problems, warnings = [], []
     problems += _check_heavy(text, heavy_limit, cleared, heavy_counted, unverifiable)
+    more, notes = _check_guard(text, guard_counted, guard_unverifiable)
+    problems += more
+    warnings += notes
     sections = _sections(text)
     for sec in REPORT_SECTIONS:
         if sec not in sections:
@@ -2103,21 +2134,29 @@ def _check_report_cli(name, work_order, stage=None, base=None):
         raise ValueError("worktree of the crew %s is unknown" % name)
     shown = journal.bd(["show", work_order])
     description = (shown[0].get("description") or "") if shown else ""
-    cleared, counted = False, None
-    missing = "no stage given (--stage)" if not stage else None
+    cleared, counted, guard_counted = False, None, None
+    missing = guard_missing = "no stage given (--stage)" if not stage else None
     if stage:
         labels = ((journal.bd(["show", stage]) or [{}])[0].get("labels")) or []
         cleared = "clearance:granted" in labels
         started = journal.stage_info(stage)["started_at"]
         if started is not None:
             counted = slots.runs("heavy", worktree, since=float(started))
+            path = _transcript_for(name)
+            try:
+                if not path:
+                    raise OSError("no transcript of the crew")
+                guard_counted = transcript.guard_refusals(path, since=float(started))
+            except OSError as e:
+                guard_missing = "transcript unreadable (%s)" % e
         else:
-            missing = "stage %s has no start time" % stage
+            missing = guard_missing = "stage %s has no start time" % stage
     return check_report(summary(name), criteria_ids(description),
                         journal.work_order_files(work_order), worktree, base,
                         heavy_limit=journal.estimate(work_order)["heavy_runs_per_stage"],
                         cleared=cleared, heavy_counted=counted, unverifiable=missing,
-                        live=live_criteria(description), work_order=work_order)
+                        live=live_criteria(description), work_order=work_order,
+                        guard_counted=guard_counted, guard_unverifiable=guard_missing)
 
 
 def _accept_cli(work_order, stage, act_file):

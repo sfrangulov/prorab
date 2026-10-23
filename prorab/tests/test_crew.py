@@ -2204,7 +2204,8 @@ def make_report(**kw):
     parts.update(kw.get("sections", {}))
     text = "# Stage report\n\n" + "\n".join(v for v in parts.values() if v)
     heavy = kw.get("heavy", "Heavy runs: 3\n")
-    return text + ("\n" + heavy if heavy else "") + kw.get("tail", "")
+    guard = kw.get("guard", "Guard refusals: 0\n")
+    return text + ("\n" + heavy if heavy else "") + guard + kw.get("tail", "")
 
 class TestCheckReport(CrewBase):
     def setUp(self):
@@ -2294,9 +2295,60 @@ class TestCheckReport(CrewBase):
         self.has(r["problems"], "criterion C1 (live): done without a LIVE C1 check under "
                                 "Verification")
         self.assertTrue(run("- `python3 -m unittest` SKIP: 0\n"
-                            "- LIVE C1 `rates.py --real` - 1 EUR = 1.08 USD - SKIP: 0\n")["ok"])
+                            "- `rates.py --real` - 1 EUR = 1.08 USD - SKIP: 0 - LIVE C1\n")["ok"])
         # a LIVE item for another criterion does not count
-        self.assertFalse(run("- `x` SKIP: 0\n- LIVE C2 `y` SKIP: 0\n")["ok"])
+        self.assertFalse(run("- `x` SKIP: 0\n- `y` - out - SKIP: 0 - LIVE C2\n")["ok"])
+        # LIVE C<n> counts only as a field of its own, the item's last one
+        for item in ("- `y` - mocked, not LIVE C1 - SKIP: 0\n",
+                     "- `y` - mocked, not LIVE C1\n- `x` SKIP: 0\n",
+                     "- LIVE C1 `y` - out - SKIP: 0\n",
+                     "- `y` - out - LIVE C1 - SKIP: 0\n",
+                     "- `y` - out - SKIP: 0 LIVE C1\n"):
+            self.has(run(item)["problems"], "criterion C1 (live): done without a LIVE C1 check")
+        self.assertTrue(run("- `y` - out - SKIP: 0 - **LIVE C1**\n")["ok"])
+
+    def test_check_report_stub_item_names_an_unknown_criterion(self):
+        p = self.problems(text=self.stubs_report(
+            "## Stubs\n- `src/rates.py` - fixed table - C9\n"))
+        self.has(p, "stub item names an unknown criterion: `src/rates.py` - fixed table - C9")
+        p = self.problems(text=self.stubs_report(
+            "## Stubs\n- `src/rates.py` - fixed table - C1 and C9\n"))
+        self.has(p, "stub item names an unknown criterion")
+
+    def guard_report(self, guard):
+        return make_report(guard=guard, tail="\nResult: delivered\nCommit: %s\n" % self.sha)
+
+    def test_check_report_guard_line_required(self):
+        self.has(self.problems(text=self.guard_report("")), "no Guard refusals line")
+        r = crew.check_report(self.guard_report(""), ["C1", "C2"], ["src/"], self.wt,
+                              guard_counted=0)
+        self.has(r["problems"], "no Guard refusals line")
+
+    def test_check_report_guard_count_mismatch(self):
+        def run(guard, counted):
+            return crew.check_report(self.guard_report(guard), ["C1", "C2"], ["src/"], self.wt,
+                                     guard_counted=counted)
+        self.has(run("Guard refusals: 0\n", 2)["problems"],
+                 "Guard refusals: reported 0, the transcript counts 2")
+        self.has(run("Guard refusals: 3\n", 1)["problems"],
+                 "Guard refusals: reported 3, the transcript counts 1")
+
+    def test_check_report_guard_count_matches(self):
+        def run(guard, counted):
+            return crew.check_report(self.guard_report(guard), ["C1", "C2"], ["src/"], self.wt,
+                                     guard_counted=counted)
+        self.assertEqual(run("Guard refusals: 0\n", 0)["warnings"], [])
+        self.assertTrue(run("**Guard refusals:** 0\n", 0)["ok"])
+        r = run("Guard refusals: 2\n", 2)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(len(r["warnings"]), 1)
+        self.assertIn("2 refusals of the worktree guard", r["warnings"][0])
+        self.assertIn("Residual risks", r["warnings"][0])
+
+    def test_check_report_guard_unverifiable(self):
+        r = crew.check_report(self.guard_report("Guard refusals: 0\n"), ["C1", "C2"], ["src/"],
+                              self.wt, guard_unverifiable="no transcript")
+        self.has(r["problems"], "guard refusals not verifiable: no transcript")
 
     def test_check_report_ok(self):
         r = self.check()
@@ -2532,11 +2584,15 @@ class TestWorkOrderSpend(CrewBase):
         self.route("agent list", ok({"agents": [agent_entry(cwd=wt)]}))
         with mock.patch.object(crew.slots, "runs", return_value=9) as runs, \
                 mock.patch.object(crew, "summary", return_value="r"), \
+                mock.patch.object(crew, "_transcript_for", return_value="/home/user/t.jsonl"), \
+                mock.patch.object(crew.transcript, "guard_refusals", return_value=2) as refs, \
                 mock.patch.object(crew, "check_report", return_value={"ok": True}) as chk:
             crew._check_report_cli("a1", "N1", stage="N1.1")
         runs.assert_called_once_with("heavy", wt, since=100.0)
+        refs.assert_called_once_with("/home/user/t.jsonl", since=100.0)
         kw = chk.call_args.kwargs
         self.assertEqual((kw["heavy_limit"], kw["cleared"], kw["heavy_counted"]), (4, True, 9))
+        self.assertEqual((kw["guard_counted"], kw["guard_unverifiable"]), (2, None))
         self.assertEqual(kw["live"], ["C2"])
 
     def _cli_check(self, stage, started):
@@ -2563,9 +2619,35 @@ class TestWorkOrderSpend(CrewBase):
                             for p in r["problems"]), r["problems"])
 
     def test_cli_check_report_verified_count_passes(self):
-        with mock.patch.object(crew.slots, "runs", return_value=3):
+        with mock.patch.object(crew.slots, "runs", return_value=3), \
+                mock.patch.object(crew, "_transcript_for", return_value="/home/user/t.jsonl"), \
+                mock.patch.object(crew.transcript, "guard_refusals", return_value=0):
             r = self._cli_check("N1.1", 100)
         self.assertTrue(r["ok"], r)
+
+    def test_cli_check_report_counts_the_transcripts_guard_refusals(self):
+        with mock.patch.object(crew.slots, "runs", return_value=3), \
+                mock.patch.object(crew, "_transcript_for", return_value="/home/user/t.jsonl"), \
+                mock.patch.object(crew.transcript, "guard_refusals", return_value=2):
+            r = self._cli_check("N1.1", 100)
+        self.assertTrue(any("reported 0, the transcript counts 2" in p for p in r["problems"]),
+                        r["problems"])
+
+    def test_cli_check_report_unreadable_transcript_is_not_verifiable(self):
+        with mock.patch.object(crew.slots, "runs", return_value=3):
+            with mock.patch.object(crew, "_transcript_for", return_value=None):
+                r = self._cli_check("N1.1", 100)
+            self.assertTrue(any("guard refusals not verifiable" in p for p in r["problems"]),
+                            r["problems"])
+            with mock.patch.object(crew, "_transcript_for", return_value="/home/user/none.jsonl"):
+                r = self._cli_check("N1.1", 100)
+        self.assertTrue(any("guard refusals not verifiable" in p for p in r["problems"]),
+                        r["problems"])
+
+    def test_cli_check_report_without_stage_guard_is_not_verifiable(self):
+        r = self._cli_check(None, None)
+        self.assertTrue(any("guard refusals not verifiable" in p and "stage" in p
+                            for p in r["problems"]), r["problems"])
 
 
 class TestAskPredecessor(CrewBase):

@@ -39,6 +39,7 @@ Every stage ends at its stop point: commit, leave no background command running,
 - While the customer has enabled crew hooks, a hook denies the commands the foreman's rules forbid and, during an emergency stop, every tool call; a denied step is a question for the foreman, never a reason to find another way.
 - Change only the work order's files: the union of the stages' Files (a path ending in `/` covers everything below it). A change outside them fails the report check; ask the foreman first if you need another file.
 - Do not touch installed things: installed skills and plugins, user configs (`~/.claude`, shell profiles), global packages; no `sudo`.
+- Claude Code's worktree guard refuses a Bash command it cannot prove stays inside this worktree: a `cd` or `git -C` elsewhere, a path or option computed at run time (a shell variable, `$(...)`), a heredoc, or a compound command it cannot parse. Use plain commands with literal paths, run from this worktree, one step per call, and the file tools (Read, Edit, Write) for files; those pass. A refusal (its text starts "This session is isolated in the worktree") is counted in the stage report and is never routed around: no script file, `bash -c`, `eval`, other tool or other folder doing the same. When the plain form is refused too, stop and ask the foreman, quoting the refusal.
 - Never answer a trust prompt or any other consent prompt, and never press "Upgrade": stop and tell the foreman.
 - Never run `/login`, `claude auth`, `claude login`, `claude logout` or `claude setup-token`, and never answer a login screen: logging in is the customer's. If a command says Claude Code is not logged in, stop and tell the foreman in one line.
 - This work order has one crew and one session at a time: start no other Claude session for it (a `claude -p` run inside this worktree counts in the estimate), and take no second work order.
@@ -75,6 +76,7 @@ At every stop point your last message is the stage report, as plain text in the 
 Result: <delivered | no changes | blocked | abandoned>
 Commit: <SHA of the stage's last commit, or none>
 Heavy runs: <n>
+Guard refusals: <n>
 
 ## Summary
 <two or three sentences: what was done>
@@ -102,9 +104,10 @@ Heavy runs: <n>
 - Six sections with these headings: Summary, Behaviour, Changed files, Verification, Stubs, Residual risks.
 - One table row per acceptance criterion, with the bare id (`| C2 | done | |`, even for a `(live)` criterion). The status is done, not applicable, deferred, blocked or stub; every status but done needs a reason.
 - Stubs lists every hardcoded or stub data source the work rests on (a fixed table standing in for a live feed, a service mocked in the product code, sample data, a placeholder), each as `- \`<path or symbol>\` - <what it fakes> - C<n>`, or the single item `- none`. A stub's criterion is `stub`, never `done`.
-- A `(live)` criterion is `done` only with one Verification item marked `LIVE C<n>`: a real run against the real thing, with its command in backticks, its output and `SKIP: <n>`, not a mocked test.
+- A `(live)` criterion is `done` only with one Verification item marked `LIVE C<n>` as the item's last field, after a ` - ` separator (`- \`<exact command>\` - <output line> - SKIP: <n> - LIVE C<n>`): a real run against the real thing, not a mocked test. Text like "mocked, not LIVE C2" inside another field does not count. A Stubs item names only criteria of this work order.
 - Result: delivered, no changes, blocked or abandoned. With delivered, `Commit:` is a commit on `prorab/<id>` made since the base, Verification holds at least one check command, and Changed files lists exactly the files of `git diff --name-only <base branch>...HEAD` (the whole branch, not only this stage), one path in backticks per item.
 - Heavy runs: the heavy runs of this stage through `slots.py`, 0 if none. The check compares the number with the log of `slots.py`; a report without the line, or with another number, is rejected.
+- Guard refusals: the commands Claude Code's worktree guard refused in this stage, 0 if none. The check compares the number with the crew's transcript since the stage started; a report without the line, or with another number, is rejected. Name each refusal under Residual risks with what you did then (the plain form, or a stop): a refused command is never routed around.
 - Every item under Verification is one check command in backticks, with its output and `SKIP: <n>`, the number of skipped tests (0 if none). "Tests are green" without a command is not accepted; remarks go under Residual risks.
 - No spend in dollars: the foreman computes it.
 ````
@@ -119,6 +122,7 @@ A report that passes `crew.py check_report` once its commit is on the crew's bra
 Result: delivered
 Commit: 4e1d2c7
 Heavy runs: 1
+Guard refusals: 0
 
 ## Summary
 Added a CSV export of the daily report.

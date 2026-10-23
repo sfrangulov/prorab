@@ -379,8 +379,9 @@ def _finished_branches(work_orders):
     lines = []
     for wo in work_orders:
         rec = journal.issue(wo["id"]) or {}
-        if wo.get("status") != "closed" or not rec.get("worktree") or rec.get("decided"):
-            continue  # a decided branch is no open decision
+        if wo.get("status") != "closed" or not rec.get("worktree") or rec.get("decided") \
+                or rec.get("main_checkout"):
+            continue  # a decided branch is no open decision; a merge work order has no branch
         wt = rec["worktree"]
         detail = ""
         if os.path.isdir(wt):
@@ -436,7 +437,8 @@ def _counts_lines(sp, kv):
             count = len(set(sessions))
         else:
             count = int(kv.get("spent.%s.sessions" % wo) or 0)
-        files = transcript.work_order_files(rec["worktree"], sessions or [])
+        files = transcript.work_order_files(rec["worktree"], sessions or [],
+                                            own_only=bool(rec.get("main_checkout")))
         t = transcript.cost(files, _defaults.load())["tokens"]
         tokens = t["input"] + t["cache_write"] + t["output"]
         runs = int(kv.get("spent.%s.runs" % wo) or 0)

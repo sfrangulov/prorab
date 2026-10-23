@@ -568,6 +568,19 @@ class TestJournalDollars(JournalBase):
         self.assertAlmostEqual(sp["work_orders"][a]["usd_shift"], 2.0)
         self.assertAlmostEqual(sp["usd"], 2.0)
 
+    def test_shift_spend_main_checkout_counts_only_its_sessions(self):
+        a = new_work_order("A", usd=10)
+        site = "/home/user/projects/demo-app"
+        journal.issue_set(a, "issued", worktree=site, sessions=["merge-s"], main_checkout=True)
+        self.start()
+        self.write(site, "merge-s", [("m1", T0 + 60, 2.0)])
+        self.write(site, "customer-s", [("c1", T0 + 70, 9.0)])
+        self.write(site + "/.claude/worktrees/prorab-B", "other-s", [("o1", T0 + 80, 7.0)])
+        sp = self.spend()
+        self.assertAlmostEqual(sp["work_orders"][a]["usd_shift"], 2.0)
+        self.assertAlmostEqual(sp["work_orders"][a]["usd_total"], 2.0)
+        self.assertAlmostEqual(sp["usd"], 2.0)
+
     def test_research_items_by_start_time(self):
         self.start(foreman="fs1")
         own = "/home/user/projects/demo-app"

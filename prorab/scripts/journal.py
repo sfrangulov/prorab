@@ -763,7 +763,8 @@ def shift_spend(d, now=None, kv=None, home=None):
     for n, rec in sorted(issues(kv=kv).items()):
         if not rec.get("worktree") or n in skipped:
             continue
-        files = transcript.work_order_files(rec["worktree"], rec.get("sessions") or [], home)
+        files = transcript.work_order_files(rec["worktree"], rec.get("sessions") or [], home,
+                                            own_only=bool(rec.get("main_checkout")))
         usd_shift = transcript.cost(files, d, since=since, seen=seen)["usd"]
         before = 0.0 if since is None else transcript.cost(files, d, until=since)["usd"]
         est = estimate(n, kv)["usd"]

@@ -514,6 +514,9 @@ def _merge_decision(work_order):
     the work order: "" when that act names none, None when there is no such act."""
     found = None
     for text in journal.acts(work_order, "answer"):
+        if text.startswith(DROP_MARKER):  # a later drop decision withdraws an earlier merge
+            found = None
+            continue
         rest = text[len(MERGE_MARKER):] if text.startswith(MERGE_MARKER) else None
         if rest is not None and (not rest or rest[0].isspace()):
             found = rest.split()[0] if rest.split() else ""
@@ -554,6 +557,10 @@ def _main_checkout_refusal(site_path, work_order):
     busy = [c for c in journal.crews()
             if (journal.kv_get(_kv(c, "worktree")) or "")
             and os.path.realpath(journal.kv_get(_kv(c, "worktree"))) == real]
+    # a merge start still waiting at a consent prompt holds the checkout too
+    busy += [wo for wo, rec in journal.issues().items()
+             if wo != work_order and rec.get("main_checkout") and rec.get("state") == "issuing"
+             and rec.get("site") and os.path.realpath(rec["site"]) == real]
     if busy:
         return {"status": "main_busy", "with": busy}, None
     return None, branch
@@ -1271,16 +1278,32 @@ def _adopt_new_worktree(name, work_order, worktree, new):
     return found
 
 
+def _crews_work_order(name, work_order):
+    """The work order the crew is recorded with (kv), else the one given: a restart under a
+    mistyped id must not pick the wrong settings."""
+    return journal.kv_get(_kv(name, "work_order")) or work_order
+
+
+def _settings_failure(name, work_order, pane=None):
+    """A `restart_failed` result (step `settings`) when this crew's session cannot get its
+    settings (a merge crew with the hooks off), else None. Checked before a crew is exited."""
+    try:
+        _settings_pairs(_crews_work_order(name, work_order))
+    except ValueError as e:
+        return {"status": "restart_failed", "step": "settings", "reason": str(e),
+                "pane_id": pane}
+    return None
+
+
 def _start_session(name, pane, claude_args, want_screen=False, work_order=None):
     """`agent start` in `pane`. Returns (error result or None, screen text). A consent
     screen maps as in `start`; the screen is read only when it is needed. The settings are
     the shared ones, or the merge crew's own when the work order's record says so; a merge
     crew with the hooks off is not started."""
-    try:
-        settings = _settings_pairs(work_order)
-    except ValueError as e:
-        return {"status": "restart_failed", "step": "settings", "reason": str(e),
-                "pane_id": pane}, ""
+    failed = _settings_failure(name, work_order, pane)
+    if failed:
+        return failed, ""
+    settings = _settings_pairs(_crews_work_order(name, work_order))
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
                       + _claude_args(*claude_args, *settings), timeout_s=90)
@@ -1343,6 +1366,9 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
     worktree = journal.kv_get(_kv(name, "worktree"))
     if not worktree:
         return {"status": "restart_failed", "reason": "worktree of the crew is unknown"}
+    failed = _settings_failure(name, work_order, pane)  # before the act is saved, before /exit
+    if failed:
+        return failed
     previous = journal.kv_get("handover.%s.last" % work_order)
     try:
         looping = previous is not None and \
@@ -1427,6 +1453,9 @@ def restart(name, work_order, work_order_text, reason, caller_pane=None,
     worktree = journal.kv_get(_kv(name, "worktree"))
     if not worktree:
         return {"status": "restart_failed", "reason": "worktree of the crew is unknown"}
+    failed = _settings_failure(name, work_order, journal.kv_get(_kv(name, "pane")))
+    if failed:  # a merge crew without its guard is not restarted, and not exited either
+        return failed
     try:
         return _restart(name, work_order, work_order_text, worktree, caller_pane,
                         timeout_s, poll_s, counted)
@@ -2000,7 +2029,38 @@ def _check_delivery(sha, changed_items, files, worktree, base, work_order=None):
         if outside:
             problems.append("changed files outside the work order's files: %s"
                             % ", ".join(outside))
+    rec = (journal.issue(work_order) or {}) if work_order else {}
+    if rec.get("main_checkout"):
+        problems += _check_merge_only(rec.get("merge_branch"), base, worktree)
     return problems
+
+
+def _check_merge_only(branch, base, worktree):
+    """The backstop of the merge crew's string guard, in git: since `base`, the first-parent
+    chain of the main checkout is exactly one merge commit (first parent the base, second
+    parent the tip of `branch`), or a fast-forward to exactly that tip."""
+    if not branch:
+        return ["main-checkout work order without a recorded merge branch"]
+    moved = ["main moved by more than the merge of %s" % branch]
+
+    def rev(*args):
+        p = _git_soft(list(args), worktree)
+        return p.stdout.split() if p.returncode == 0 else None
+    tip = rev("rev-parse", "--verify", "--quiet", "refs/heads/%s^{commit}" % branch)
+    start = rev("rev-parse", "--verify", "--quiet", "%s^{commit}" % base)
+    head = rev("rev-parse", "HEAD")
+    chain = rev("rev-list", "--first-parent", "%s..HEAD" % base)
+    if not (tip and start and head and chain is not None):
+        return ["cannot read main and %s to check that only the merge moved it" % branch]
+    tip, start, head = tip[0], start[0], head[0]
+    if head == tip:
+        ancestor = _git_soft(["merge-base", "--is-ancestor", start, tip], worktree)
+        return [] if ancestor.returncode == 0 else moved
+    if len(chain) == 1:
+        parents = rev("rev-list", "--parents", "-n", "1", chain[0])
+        if parents and len(parents) == 3 and parents[1] == start and parents[2] == tip:
+            return []
+    return moved
 
 
 def report_fix(name, work_order, stage, problems):

@@ -294,6 +294,26 @@ class TestReport(ShiftBase):
         self.assertIn("- %s: tokens 1500000, sessions 3, agent runs 2" % n, text)
         self.assertNotIn("- %s: tokens" % old, text)
 
+    def test_report_counts_main_checkout_sessions_only(self):
+        n = journal.create_work_order("o", "Merge", "b", {"usd": 10})
+        site = "/home/user/projects/demo-app"
+        journal.issue_set(n, "issued", worktree=site, sessions=["s1"], main_checkout=True)
+        self.start_shift()
+        self.write_transcript(site, "s1", [("m1", T0 + 60, 1.0)])
+        self.write_transcript(site, "customer-s", [("c1", T0 + 70, 9.0)])
+        self.assertIn("- %s: tokens 250000, sessions 1, agent runs 0" % n, self.report_text())
+
+    def test_report_skips_main_checkout_branches(self):
+        self.start_shift()
+        a, _ = self.accepted_work_order("Kept")
+        b, _ = self.accepted_work_order("Merge")
+        journal.issue_set(a, "issued", worktree="/home/user/projects/demo-app-a")
+        journal.issue_set(b, "issued", worktree="/home/user/projects/demo-app",
+                          main_checkout=True, merge_branch="prorab/x")
+        text = self.report_text()
+        self.assertIn("prorab/%s" % a, text)
+        self.assertNotIn("prorab/%s" % b, text)
+
     def test_report_counts_fall_back_to_kv_without_a_session_list(self):
         n = journal.create_work_order("o", "Importer", "b", {"usd": 10})
         journal.issue_set(n, "issued", worktree="/home/user/projects/demo-app-a")

@@ -380,8 +380,8 @@ class TestMergeCrew(HooksBase):
         main = self.git_dir("main-site")
         other = self.git_dir("other-site", branch="prorab/wo-1")
         for target in (other, "/elsewhere", os.path.join(self.tmp.name, "nowhere")):
-            self.assertEqual(self.merge_decide("git -C %s status" % target, main)[0], 2, target)
             self.assertEqual(self.merge_decide("git -C %s merge prorab/x" % target, main)[0], 2)
+            self.assertEqual(self.merge_decide("git -C %s reset --hard" % target, main)[0], 2)
         self.assertEqual(self.merge_decide("git -C %s -C %s status" % (main, other), main)[0], 2)
 
     def test_guard_merge_branch_keeps_the_rules_for_any_crew(self):
@@ -392,14 +392,36 @@ class TestMergeCrew(HooksBase):
         self.assertEqual(self.merge_decide("ls %s" % office, repo)[0], 2)
         self.assertEqual(self.merge_decide("", repo), (2, "prorab guard: unreadable hook input"))
 
-    def test_guard_merge_branch_outside_main_follows_the_ordinary_rules(self):
-        work = self.git_dir("w", branch="prorab/wo-1")
-        self.assertEqual(self.merge_decide("git merge main", work), (0, ""))
-        self.assertEqual(self.merge_decide("git commit -m x", work), (0, ""))
-        self.assertEqual(self.merge_decide("git push", work)[0], 2)
+    def test_guard_merge_branch_holds_in_every_checkout(self):
+        site = self.git_dir("site", branch="main")
+        work = self.git_dir("w", branch="prorab/wo-1")  # a crew that cd'ed into a worktree
+        for command in ("git merge main", "git merge prorab/x", "git commit -m x",
+                        "git -C %s reset --hard" % site, "git -C %s commit -m x" % site,
+                        "git -C .. reset --hard", "git branch -D prorab/x", "git checkout x",
+                        "git push"):
+            self.assertEqual(self.merge_decide(command, work)[0], 2, command)
+        # the merge itself needs its target on main/master, read-only git and --abort anywhere
+        self.assertEqual(self.merge_decide("git -C %s merge --no-ff --no-edit prorab/x" % site,
+                                           work), (0, ""))
+        for command in ("git status", "git merge --abort", "git log -1", "git -C %s status" % site):
+            self.assertEqual(self.merge_decide(command, work), (0, ""), command)
         nogit = os.path.join(self.tmp.name, "plain")
         os.makedirs(nogit)
-        self.assertEqual(self.merge_decide("git status", nogit)[0], 2)  # cannot tell the branch
+        self.assertEqual(self.merge_decide("git merge prorab/x", nogit)[0], 2)  # cannot tell
+        self.assertEqual(self.merge_decide("git status", nogit), (0, ""))
+
+    def test_guard_merge_branch_sees_git_spelled_around_the_gate(self):
+        repo = self.git_dir()
+        for command in ("g''it commit -m a", "g\\it commit -m a", "\"g\"it reset --hard",
+                        "$g't' commit", "${g}it commit", "eval 'g'i't commit'",
+                        "eval git status", "echo ok && g''it push2", "X=1 g''it commit",
+                        "$(printf 'g%s' it) commit", "`echo git` commit", "g=gi; $g't' commit"):
+            code, message = self.merge_decide(command, repo)
+            self.assertEqual(code, 2, command)
+        # plain commands of a crew stay allowed
+        for command in ("python3 -m unittest", "ls -la src", "echo done", "cat .git/HEAD",
+                        "git status"):
+            self.assertEqual(self.merge_decide(command, repo), (0, ""), command)
 
     def test_guard_without_the_option_nothing_changes(self):
         repo = self.git_dir()

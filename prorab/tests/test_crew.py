@@ -4186,18 +4186,110 @@ class TestMainCheckout(CrewBase):
         self.assertTrue(r["work_order_closed"])
         self.assertTrue(os.path.isdir(wt))
 
-    def test_check_report_merge_commit_on_main(self):
+    def merge_record(self):
         self.j.issue_set("N1", "issued", worktree=self.repo, base_commit=self.head,
-                         main_checkout=True)
-        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/x")
+                         main_checkout=True, merge_branch="prorab/x")
+
+    def merge_check(self, files=("x.txt",), changed="- `x.txt` - merged\n"):
         sha = git(self.repo, "rev-parse", "--short=10", "HEAD").strip()
-        text = make_report(sections={"Changed files": "## Changed files\n- `x.txt` - merged\n"},
+        text = make_report(sections={"Changed files": "## Changed files\n" + changed},
                            tail="\nResult: delivered\nCommit: %s\n" % sha)
-        r = crew.check_report(text, ["C1", "C2"], ["x.txt"], self.repo, work_order="N1")
+        return crew.check_report(text, ["C1", "C2"], list(files), self.repo, work_order="N1"), text
+
+    def test_check_report_merge_commit_on_main(self):
+        self.merge_record()
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/x")
+        r, text = self.merge_check()
         self.assertTrue(r["ok"], r["problems"])
         # without the work order the base falls back to main itself: nothing to deliver
         r = crew.check_report(text, ["C1", "C2"], ["x.txt"], self.repo)
         self.assertFalse(r["ok"])
+
+    def test_check_report_fast_forward_to_the_branch_tip_passes(self):
+        self.merge_record()
+        git(self.repo, "merge", "-q", "--ff-only", "prorab/x")
+        r, _ = self.merge_check()
+        self.assertTrue(r["ok"], r["problems"])
+
+    def test_check_report_main_moved_by_more_than_the_merge_is_refused(self):
+        self.merge_record()
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/x")
+        self.commit(self.repo, "extra.txt", "e\n", "an extra commit on main")
+        r, _ = self.merge_check(files=("x.txt", "extra.txt"),
+                                changed="- `x.txt` - merged\n- `extra.txt` - extra\n")
+        self.assertFalse(r["ok"])
+        self.assertIn("main moved by more than the merge of prorab/x", r["problems"])
+
+    def test_check_report_a_commit_before_the_merge_is_refused(self):
+        self.merge_record()
+        self.commit(self.repo, "pre.txt", "p\n", "a commit before the merge")
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/x")
+        r, _ = self.merge_check(files=("x.txt", "pre.txt"),
+                                changed="- `x.txt` - merged\n- `pre.txt` - extra\n")
+        self.assertIn("main moved by more than the merge of prorab/x", r["problems"])
+
+    def test_check_report_the_merge_of_another_branch_is_refused(self):
+        self.merge_record()
+        git(self.repo, "checkout", "-q", "-b", "prorab/y")
+        self.commit(self.repo, "y.txt", "y\n", "work on y")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/y")
+        r, _ = self.merge_check(files=("y.txt",), changed="- `y.txt` - merged\n")
+        self.assertIn("main moved by more than the merge of prorab/x", r["problems"])
+
+    def test_check_report_without_a_recorded_merge_branch_is_refused(self):
+        self.j.issue_set("N1", "issued", worktree=self.repo, base_commit=self.head,
+                         main_checkout=True)
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/x")
+        r, _ = self.merge_check()
+        self.assertFalse(r["ok"])
+
+    def test_decision_latest_of_merge_and_drop_wins(self):
+        self.j.add_act("N1", "answer", crew.DROP_MARKER + " (changed my mind)")
+        self.refused("no_merge_decision")
+        self.j.add_act("N1", "answer", self.DECISION)
+        self.assertEqual(self.go()["status"], "started")
+
+    def test_start_main_checkout_refuses_while_another_start_is_issuing(self):
+        self.j.issue_set("N0", "issuing", main_checkout=True, site=self.repo, name="b0")
+        r = self.refused("main_busy")
+        self.assertEqual(r.get("with"), ["N0"])
+        self.j.issue_set("N0", "issued", main_checkout=True, site=self.repo, name="b0")
+        self.assertEqual(self.go()["status"], "started")  # registered crews are what count then
+
+    def test_restart_settings_follow_the_crews_recorded_work_order(self):
+        self.go()
+        os.remove(self.merge_settings())
+        with mock.patch.object(crew, "_cd_failure", return_value=None), \
+                mock.patch.object(crew, "deliver", return_value="accepted"):
+            r = crew._restart_after_exit("a1", "N9", "Work order text", self.repo, "w:p9",
+                                         {"usd": 0}, 1, 0.01)
+        self.assertEqual(r["status"], "restarted")
+        line = [c for c in self.calls() if c.startswith("agent start a1")][-1]
+        self.assertTrue(line.endswith(" --settings %s" % self.merge_settings()), line)
+        self.assertFalse(os.path.exists(self.shared_settings()))
+
+    def test_complete_handover_without_hooks_exits_nothing(self):
+        self.go()
+        del self.j.kv["hooks.enabled"]
+        self.write_transcript(self.repo, self.j.kv["crew.a1.session"],
+                              "Act: done\nHANDOVER READY")
+        self.route("agent read a1 --source visible", "idle\n")
+        before = len(self.calls())
+        r = crew.complete_handover("a1", "N1", "work order", timeout_s=1, poll_s=0.01)
+        self.assertEqual((r["status"], r["step"]), ("restart_failed", "settings"))
+        self.assertEqual([c for c in self.calls()[before:] if "/exit" in c], [])
+        self.assertEqual(self.j.acts("N1", "handover"), [])
+
+    def test_restart_without_hooks_exits_nothing(self):
+        self.go()
+        del self.j.kv["hooks.enabled"]
+        before = len(self.calls())
+        r = crew.restart("a1", "N1", "work order", "gone", caller_pane="w:p1",
+                         timeout_s=1, poll_s=0.01)
+        self.assertEqual((r["status"], r["step"]), ("restart_failed", "settings"))
+        self.assertEqual([c for c in self.calls()[before:] if "/exit" in c or "agent start" in c],
+                         [])
 
     def test_cli_start_takes_main_checkout(self):
         with mock.patch.object(crew, "start", return_value={"status": "started"}) as s, \

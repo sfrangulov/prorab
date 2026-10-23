@@ -173,8 +173,9 @@ def checked_out_branch(start):
 
 
 # ---- the guard of a main-checkout merge crew ---------------------------------------------
-# `guard --merge-branch BRANCH`: in a checkout on main/master of such a crew git is allowed
-# only as the one merge it was started for, `git merge --abort` and read-only subcommands.
+# `guard --merge-branch BRANCH`: for such a crew, in every checkout and for every `-C` target,
+# git is allowed only as the one merge it was started for (into a checkout on main/master),
+# `git merge --abort` and read-only subcommands.
 
 _GIT_WORD = re.compile(r"(?<![\w.-])git(?![\w.-])")
 _READ_ONLY_GIT = ("status", "log", "diff", "show", "rev-parse", "merge-base", "ls-files")
@@ -208,13 +209,10 @@ def _is_git(token):
     return token == "git" or token.endswith("/git")
 
 
-def _same_checkout(a, b):
-    ga, gb = _find_dot_git(a), _find_dot_git(b)
-    return ga is not None and gb is not None and os.path.realpath(ga) == os.path.realpath(gb)
-
-
-def _merge_crew_git(tokens, cwd):
-    """None when this git command is allowed, else the reason. `tokens[0]` is git."""
+def _merge_crew_git(tokens, cwd_of, branch):
+    """None when this git command is allowed, else the reason. `tokens[0]` is git. The
+    allow-list holds in every checkout and for every `-C` target: the exact merge (only into
+    a checkout on main/master), `merge --abort`, and the read-only subcommands."""
     words, target, i = tokens[1:], None, 0
     while i < len(words) and words[i].startswith("-"):
         if words[i] == "-C" and target is None and i + 1 < len(words):
@@ -224,11 +222,6 @@ def _merge_crew_git(tokens, cwd):
             i += 1
         else:
             return "git option %s" % words[i]
-    if target is not None:
-        target = os.path.expanduser(target)
-        target = target if os.path.isabs(target) else os.path.join(cwd, target)
-        if not _same_checkout(target, cwd):
-            return "git -C outside this checkout"
     words = words[i:]
     if not words:
         return "a bare git command"
@@ -240,6 +233,21 @@ def _merge_crew_git(tokens, cwd):
     if sub == "branch":
         return None if all(w in ("--list", "--show-current") for w in rest) \
             else "git branch with arguments"
+    if sub == "merge":
+        if rest == ["--abort"]:
+            return None
+        if not _merge_crew_forms_ok(rest, branch):
+            return "this merge"
+        cwd = cwd_of()
+        if target is not None:
+            target = os.path.expanduser(target)
+            target = target if os.path.isabs(target) else os.path.join(cwd, target)
+        into = checked_out_branch(target or cwd)
+        if into is None:
+            return "a merge into a checkout whose branch cannot be told"
+        if into not in ("main", "master"):
+            return "a merge into %s" % (into or "a detached HEAD")
+        return None
     return "git %s" % sub
 
 
@@ -255,44 +263,35 @@ def _merge_crew_forms_ok(tokens, branch):
     return rest == [branch]
 
 
-def _merge_crew_verdict(command, cwd, branch):
-    """None when the checkout is not main/master (the ordinary rules apply), else
-    `(0, "")` or the refusal (2, message)."""
+def _merge_crew_verdict(command, cwd_of, branch):
+    """`(0, "")` or the refusal `(2, message)` for any Bash command of a merge crew. The guard
+    reads the command as a shell would (quotes and backslashes removed), so `g''it` is git;
+    it is a tripwire for a crew that follows its work order, not a sandbox: a program that
+    builds a git command itself is beyond a string guard."""
     def refuse(what):
-        return 2, ("prorab guard: %s is forbidden in the main checkout of a merge crew; "
-                   "ask the foreman" % what)
-    checked_out = checked_out_branch(cwd)
-    if checked_out is None:
-        return 2, "prorab guard: cannot tell the checked-out branch; ask the foreman"
-    if checked_out not in ("main", "master"):
-        return None
+        return 2, ("prorab guard: %s is forbidden for a merge crew; ask the foreman" % what)
     if re.search(r"\$\(|`|<\(|>\(", command):
-        return refuse("a command substitution around git")
+        return refuse("a command substitution")
     segments = _segments(command)
     if segments is None:
         return refuse("a command that cannot be read")
     merges = 0
     for tokens in segments:
+        if "eval" in tokens:
+            return refuse("eval")
         if not _is_git(tokens[0]):
+            if "$" in tokens[0]:
+                return refuse("a command word built by expansion")
             if any(_GIT_WORD.search(t) for t in tokens):
                 return refuse("git run through another command")
             continue
         if any(re.search(r"[<>]", t) for t in tokens):
             return refuse("git with a redirection")
-        words, i = tokens[1:], 0
-        # a merge is `git [-C dir] merge ...`; find the subcommand the way _merge_crew_git does
-        while i < len(words) and words[i].startswith("-"):
-            i += 2 if words[i] == "-C" else 1
-        sub = words[i] if i < len(words) else None
-        if sub == "merge":
-            merges += 1
-            problem = _merge_crew_git(tokens[:1] + words[:i] + ["status"], cwd)
-            if problem is None and not _merge_crew_forms_ok(words[i + 1:], branch):
-                problem = "this merge"
-        else:
-            problem = _merge_crew_git(tokens, cwd)
+        problem = _merge_crew_git(tokens, cwd_of, branch)
         if problem is not None:
             return refuse(problem)
+        if "merge" in tokens[1:]:
+            merges += 1
     if merges and len(segments) > 1:
         return refuse("a merge in a compound command")
     return 0, ""
@@ -337,10 +336,7 @@ def _decide(raw, d, merge_branch=None):
             _merge_branch_checked(merge_branch)
         except ValueError:
             return 2, "prorab guard: the merge branch of this crew's settings is not usable"
-        if _GIT_WORD.search(command):
-            verdict = _merge_crew_verdict(command, cwd_of(), merge_branch)
-            if verdict is not None:
-                return verdict
+        return _merge_crew_verdict(command, cwd_of, merge_branch)
     if _MERGE.search(folded):
         cwd = cwd_of()
         target = _dash_c_dir(folded)

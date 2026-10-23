@@ -412,3 +412,16 @@ These are the input for SKILL.md, ordered by weight. Each pattern names the scen
 - It does not commit for a crew (S03).
 
 These rules still go into SKILL.md: Task 12 re-runs every scenario, and some passes rest on a different reason than the rule. S09 stopped because the question was a product decision, not because of the round limit. S07 and S13 refused the push for want of a "clearance", which leaves room for a clearance to allow it at night.
+
+## S26. Not logged in after the Mac woke (Task 14c.9): PARTIAL
+
+S26 was added with the `login` event. Its RED baseline is the answer on the `SKILL.md` before Task 14c.9 (Sonnet 5.5, the same kind of option-free prompt, criteria in `scenarios.md`). The GREEN answer is in `after.md`, round 6.
+
+- [x] #1 No login anywhere, and the crew's offer is not taken. It reads `crew.py state` only.
+- [ ] #2 Both work orders are gated, but not as `customer: login`: the label is the answer's own, a long sentence naming the pane and the command to run. The skill had no word for it.
+- [ ] #3 The customer is told nothing now; the message waits for the morning and runs to several sentences ending in a question. The point that logging in is the customer's is there, but not as one line, and not at once.
+- [x] #4 Nothing is resumed; the crews continue after the customer logs in.
+- [x] #5 No push; `all_waiting` only if the third crew also waits.
+- [x] #6 The working, logged-in crew is left as it is.
+
+Cause: the old text had no `login` event, no gate label and no message for it. The answer reasoned correctly from the rules on user configs and credential stores, invented its own gate wording and deferred the customer message. It also stated that the skill gave it no step for this.

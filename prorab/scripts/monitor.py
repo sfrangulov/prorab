@@ -33,7 +33,7 @@ EVENT_ORDER = ("emergency_stop", "emergency_released", "gone", "login", "consent
 # What a poll under the emergency stop keeps of its own state: readings and spend are still
 # logged; every dedupe mark is dropped, so what happened meanwhile is raised after the release.
 STOP_KEEPS = ("last_reading", "spend", "rate", "week_burn", "poll_errors", "last_error",
-              "emergency", "due", "next_due", "awake", "awake_missing")
+              "emergency", "due", "next_due", "awake", "awake_missing", "shift_key")
 
 
 # ---- log and state files --------------------------------------------------------------
@@ -77,6 +77,12 @@ def remove_mark(path):
 def readings(since=None):
     """Limit readings from monitor.log (same reader as the scheduler's burn rate)."""
     return scheduler.readings(since=since)
+
+
+def _readings_since(d, now):
+    """The part of the log the rates and the burn need: the week and the burn horizon (read
+    as days, generous: working hours span more than their number in wall hours)."""
+    return now - 7 * 86400 - d["week"]["burn_horizon_working_h"] * 86400
 
 
 def load_mem():
@@ -199,8 +205,8 @@ def real_deps():
         "budget": journal.budget,
         # both read files in this process (transcripts, the log); neither starts a process
         "shift_spend": journal.shift_spend,
-        "rates": lambda d, now: limits.rates(readings(), d, now),
-        "week_burn": lambda d, now: limits.week_burn(readings(), d, now),
+        "rates": lambda d, now: limits.rates(readings(_readings_since(d, now)), d, now),
+        "week_burn": lambda d, now: limits.week_burn(readings(_readings_since(d, now)), d, now),
         "override": journal.override,
         "own_context": _own_context,
         "crews": journal.crews,
@@ -429,7 +435,13 @@ def poll(crews, d, mem, now, *, deps=None):
     dp = real_deps() if deps is None else deps
     work = copy.deepcopy(mem)
     stopping = os.path.exists(d["emergency"]["stop_path"])   # the one file test of a poll
-    out = _poll(crews, d, work, now, dp, stopping)
+    try:
+        out = _poll(crews, d, work, now, dp, stopping)
+    except BaseException:
+        # the pauses already sent must not be sent again on the next poll
+        if isinstance(work.get("emergency"), dict):
+            mem["emergency"] = work["emergency"]
+        raise
     if stopping:
         # nothing but the emergency events is raised, and no dedupe mark is advanced
         kept = {k: work[k] for k in STOP_KEEPS if k in work}
@@ -465,6 +477,14 @@ def _poll(crews, d, mem, now, dp, stopping=False):
 
     if callable(crews):
         crews = crews(kv_arg)
+
+    # a new shift (night or not, another week start): the spend and the rate cached before it
+    # are the old shift's; the next projection reads both fresh, as the plan does
+    shift_key = [kv_get("shift.night"), kv_get("shift.week_start")]
+    if mem.get("shift_key") != shift_key:
+        mem.pop("spend", None)
+        mem.pop("rate", None)
+        mem["shift_key"] = shift_key
 
     # the emergency stop: every registered crew with a listed agent is paused once; the
     # release is announced once
@@ -563,7 +583,9 @@ def _poll(crews, d, mem, now, dp, stopping=False):
         guard("events_prune", _prune_events, d["hooks"]["events_dir"], now,
               d["hooks"]["events_retention_s"])
 
-    for name in (crews if listed is not None else ()):
+    # without the kv snapshot the `exiting` marks and `hooks.enabled` read as unset: no crew
+    # event is raised from such a poll
+    for name in (crews if listed is not None and isinstance(kv_snap, dict) else ()):
         if _exiting(kv_get("crew.%s.exiting" % name), now, d["crew"]["exit_window_s"]):
             continue  # a script is exiting this crew: no event, the episode state stays as it was
         a = _find_agent(name, listed, kv)
@@ -760,17 +782,20 @@ def _poll(crews, d, mem, now, dp, stopping=False):
         mem.pop("last_reading", None)
 
     # limit: fires when a component of the state gets worse; falling back re-arms it
-    cap = scheduler.cap_for(now, resets_at, d["night"]["morning"], d,
-                            night=kv_get("shift.night") == "1", week_known=week is not None)
+    day = d["limits"]["five_hour"]
+    cap = guard("cap", scheduler.cap_for, now, resets_at, d["night"]["morning"], d,
+                night=kv_get("shift.night") == "1", week_known=week is not None,
+                default={"mode": "day", "no_new_mass": day["no_new_mass"], "stop": day["stop"]})
     if have_lim and not override:
         cur = _limit_state(lim, cap)
         prev = mem.get("limit")
         if not isinstance(prev, list) or len(prev) != len(cur):
             prev = [0, False]  # the state of an older form reads as empty
-        proj = guard("week", limits.week_now, lim, None, d, now,
-                     burn=unmeasured or (mem.get("week_burn") or {}).get("value") or {},
-                     **_week_inputs(mem, kv_get, week,
-                                    lambda: guard("budget", dp["budget"], kv=kv_arg)))
+        inputs = guard("week_inputs", _week_inputs, mem, kv_get, week,
+                       lambda: guard("budget", dp["budget"], kv=kv_arg))
+        proj = (guard("week", limits.week_now, lim, None, d, now,
+                      burn=unmeasured or (mem.get("week_burn") or {}).get("value") or {},
+                      **inputs) if inputs is not None else None)
         notice = proj is not None and _week_notice(mem, proj)
         if notice or any(c > p for c, p in zip(cur, prev)):
             line = "limit %s %s %s %s" % (_fmt(five), _fmt(week), source, cap["mode"])

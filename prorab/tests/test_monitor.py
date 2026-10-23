@@ -527,6 +527,72 @@ class TestMonitorPoll(PollBase):
         self.assertEqual(plan["week"]["allows"], "no_new_mass")
         self.assertEqual(events, ["limit 10 66 sensor day week:no_new_mass"])
 
+    def test_a_new_shift_reads_spend_and_rate_fresh(self):
+        """Night-shift variant of the week test: the figures cached before the shift began are
+        dropped when `shift.night` or the week start changes, so the next projection reads the
+        shift's own spend and rate, as `scheduler.py plan` does."""
+        self.week_world()
+        self.s.limits = self.wk(20.0, 88.0)
+        self.assertEqual(self.poll(), [])  # a day poll: spend 0 and no seven-day rate cached
+        self.s.kv = {"shift.night": "1", "shift.week_start": "88"}
+        self.s.spend = dict(self.s.spend, usd=60.0)
+        self.s.rate = {"five_hour": {"usd_per_pp": 5.0, "source": "default"},
+                       "seven_day": {"usd_per_pp": 10.0, "source": "estimated"}}
+        # $40 left at 10 $/pp: 4 pp, projected 92: no notice; the stale cache said 98
+        self.assertEqual(self.poll(self.now + 90), [])
+        self.assertEqual(self.mem["rate"]["week_usd_per_pp"], 10.0)
+        self.assertEqual(self.mem["spend"]["value"]["usd"], 60.0)
+
+    def test_a_malformed_week_start_does_not_raise_out_of_the_poll(self):
+        self.week_world()
+        self.s.kv = {"shift.night": "1", "shift.week_start": "abc"}
+        self.s.limits = self.wk(20.0, 88.0)
+        self.poll()
+        self.assertTrue(any(e.startswith("week_inputs") for e in self.mem["poll_errors"]),
+                        self.mem["poll_errors"])
+
+    def test_a_failing_cap_does_not_raise_out_of_the_poll(self):
+        with mock.patch.object(monitor.scheduler, "cap_for", side_effect=ValueError("bad")):
+            self.poll()
+        self.assertTrue(any(e.startswith("cap") for e in self.mem["poll_errors"]),
+                        self.mem["poll_errors"])
+
+    def test_emergency_paused_is_kept_when_the_rest_of_the_poll_raises(self):
+        self.d["emergency"]["stop_path"] = os.path.join(self.tmp.name, "STOP")
+        open(self.d["emergency"]["stop_path"], "w").close()
+        with mock.patch.object(monitor, "_limit_state", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.poll()
+        self.assertEqual(self.mem["emergency"]["paused"], ["b1"])
+        self.poll(self.now + 90)
+        self.assertEqual(self.s.calls["pause"], ["b1"])  # not paused a second time
+
+    def test_a_failed_kv_snapshot_skips_the_crew_events_of_the_poll(self):
+        self.s.crews = {"b1": st("gone")}
+        deps = self.s.deps()
+
+        def broken():
+            raise OSError("kv down")
+        deps["kv_all"] = broken
+        out = monitor.poll(["b1"], self.d, self.mem, self.now, deps=deps)
+        self.assertNotIn("gone b1", out)
+        self.assertTrue(any(e.startswith("kv") for e in self.mem["poll_errors"]))
+        self.assertEqual(monitor.poll(["b1"], self.d, self.mem, self.now + 90,
+                                      deps=self.s.deps()), ["gone b1"])
+
+    def test_the_real_rates_and_burn_read_the_log_since_the_week(self):
+        deps = monitor.real_deps()
+        seen = []
+        with mock.patch.object(monitor.scheduler, "readings",
+                               side_effect=lambda since=None: seen.append(since) or []), \
+                mock.patch.object(monitor.limits, "rates", return_value={}), \
+                mock.patch.object(monitor.limits, "week_burn", return_value={}):
+            deps["rates"](D, self.now)
+            deps["week_burn"](D, self.now)
+        week_s = 7 * 86400
+        horizon_s = D["week"]["burn_horizon_working_h"] * 86400
+        self.assertEqual(seen, [self.now - week_s - horizon_s] * 2)
+
     def test_monitor_measures_an_unmeasured_burn_again(self):
         self.week_world()
         self.s.limits = self.wk(20.0, 50.0)

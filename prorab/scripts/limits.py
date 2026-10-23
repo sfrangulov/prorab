@@ -507,7 +507,8 @@ def week_now(lim, readings, d, now, *, night, budget, week_rise_pp, shift_usd,
     """The one reading of the week, for the monitor and for ``scheduler.py plan``: the burn
     (measured from `readings`, unless the caller holds one it already measured), the off-hours
     work of an active night shift and the projection over both. `readings` is not read when
-    `burn` is given."""
+    `burn` is given. The monitor caches a burn only when it was measured: that cache is
+    intended (the plan reads the log fresh, so the two agree while the burn stays measured)."""
     if burn is None:
         burn = week_burn(readings, d, now, tz)
     off = off_hours(night, budget, week_rise_pp, shift_usd, week_usd_per_pp)

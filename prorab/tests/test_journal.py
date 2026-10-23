@@ -1076,6 +1076,65 @@ class TestCloseWorkOrder(JournalBase):
         self.assertEqual(self.status(n), "closed")
 
 
+class TestAmend(JournalBase):
+    def run_cli(self, *argv):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = journal.main(list(argv))
+        return rc, json.loads(buf.getvalue())
+
+    def body(self, bead):
+        return journal._show(bead).get("description")
+
+    def test_amend_appends_to_the_body_and_records_an_act(self):
+        n = journal.create_work_order("o", "T", "# Work order\n- C1: first", {"usd": 10})
+        got = journal.amend(n, "- C2: the customer's rule\nand more")
+        self.assertEqual(got["amendment"], 1)
+        body = self.body(n)
+        self.assertTrue(body.startswith("# Work order\n- C1: first\n\n## Amendment 1 ("))
+        self.assertTrue(body.endswith(")\n- C2: the customer's rule\nand more"))
+        self.assertEqual(got["body"], body)
+        self.assertEqual(journal.acts(n, "answer"), ["[amendment 1] - C2: the customer's rule"])
+
+    def test_second_amendment_is_numbered_two(self):
+        n = new_work_order()
+        journal.amend(n, "one")
+        self.assertEqual(journal.amend(n, "two")["amendment"], 2)
+        self.assertIn("## Amendment 2 (", self.body(n))
+        self.assertEqual(len(journal.acts(n, "answer")), 2)
+
+    def test_amend_refuses_a_closed_work_order_and_a_stage(self):
+        n = new_work_order()
+        s = journal.create_stage(n, "One", "b")
+        with self.assertRaises(journal.JournalError):
+            journal.amend(s, "x")
+        journal.close_work_order(n, "done")
+        with self.assertRaises(journal.JournalError):
+            journal.amend(n, "x")
+        self.assertEqual(self.body(n), "b")
+        self.assertEqual(journal.acts(n, "answer"), [])
+
+    def test_amended_criteria_are_seen_by_criteria_ids(self):
+        import crew
+        n = journal.create_work_order("o", "T", "- C1: first", {"usd": 10})
+        journal.amend(n, "- C2: new\n- C1: stricter")
+        self.assertEqual(crew.criteria_ids(self.body(n)), ["C1", "C2"])
+
+    def test_amend_cli_reads_a_file(self):
+        n = new_work_order()
+        path = os.path.join(self.tmp.name, "amend.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("- C2: from a file\n")
+        rc, out = self.run_cli("amend", n, "--file", path)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["amendment"], 1)
+        self.assertIn("- C2: from a file", self.body(n))
+        with self.assertRaises(SystemExit):
+            self.run_cli("amend", n, "--file", os.path.join(self.tmp.name, "missing.md"))
+
+
 class TestOverrideHistory(JournalBase):
     def test_history_written_on_set_and_closed_on_expiry(self):
         journal.set_override("g1")

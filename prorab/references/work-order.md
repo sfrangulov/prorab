@@ -157,6 +157,10 @@ Added a CSV export of the daily report.
 The CSV has not been opened in a spreadsheet application.
 ```
 
+## Amending a work order
+
+A customer rule given mid-goal changes the criteria of a work order that is already issued. Put the added or tightened criteria (each line starting with its C-id, an existing id for a changed criterion) into a file and run `journal.py amend WORK_ORDER --file FILE`: it appends an "Amendment <n>" section to the body, records an `answer` act and prints the whole new body. `crew.py check_report` reads every C-id of the body, so the report must answer the new ones. Send the new body plus the passport with `crew.py send_work_order NAME TEXT --work-order WORK_ORDER`: the file is rewritten and the crew gets the "Changed work order" line naming it. A closed work order, or a stage, is refused.
+
 ## A merge work order
 
 A crew cannot merge into `main` from its worktree. A merge is its own work order, started only on the customer's decision: the foreman records an `answer` act on the work order that starts with `[customer decision] merge <branch>` and quotes the customer's words, then runs `crew.py start SITE_PATH WORK_ORDER NAME CALLER_PANE --main-checkout` (crew hooks on, the main checkout on `main` or `master` and clean, no other crew in it; the script refuses otherwise and starts nothing). The crew works in the site's main checkout, not in a worktree, with guard settings of its own for this work order. Use the template above with these changes:

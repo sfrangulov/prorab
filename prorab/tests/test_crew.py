@@ -836,6 +836,20 @@ class TestSendState(CrewBase):
         with open(path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "second\nversion")
 
+    def test_amended_work_order_reaches_a_running_crew_as_one_changed_line(self):
+        self.j.kv["crew.a1.work_order"] = "N1"
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        crew.send_work_order("a1", "Work order\nC1: first")
+        crew.send_work_order("a1", "Work order\nC1: first\n\n## Amendment 1\nC2: new")
+        prompts = [c for c in self.calls() if c.startswith("agent prompt")]
+        path = os.path.join(self.home, ".cache", "prorab", "work-orders", "N1.md")
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(prompts[0].startswith("agent prompt a1 " + self.sent_line() + " --wait"))
+        changed = crew._template("Changed work order").format(path=path)
+        self.assertTrue(prompts[1].startswith("agent prompt a1 " + changed + " --wait"))
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("C2: new", fh.read())
+
     def test_multiline_goes_by_file(self):
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.assertEqual(crew.deliver("a1", "one\ntwo", "N1"), "accepted")

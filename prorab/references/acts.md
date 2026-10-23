@@ -116,7 +116,7 @@ Continue from where you stopped.
 
 ## Changed work order
 
-Sent by `crew.py restart` after a `--resume` when the work order differs from the one the crew was last given; the work-order file is rewritten first.
+Sent by `crew.py restart` after a `--resume`, and by `crew.py send_work_order` to a running crew, when the work order differs from the one the crew was last given (an amended work order, `work-order.md`); the work-order file is rewritten first.
 
 ```
 The work order changed since you last read it: read the file {path}, then continue from where you stopped.

@@ -962,9 +962,12 @@ def send_work_order(name, text, work_order=None):
         return _STOPPED
     work_order = work_order or journal.kv_get(_kv(name, "work_order"))
     path = message_file(work_order, text, name=work_order)
-    result = deliver(name, _template("Message by file").format(path=path), work_order)
+    fp = _fingerprint(text)
+    given = journal.kv_get(_kv(name, "delivered"))  # an earlier version was read: say it changed
+    heading = "Changed work order" if given is not None and given != fp else "Message by file"
+    result = deliver(name, _template(heading).format(path=path), work_order)
     if result == "accepted":
-        journal.kv_set(_kv(name, "delivered"), _fingerprint(text))
+        journal.kv_set(_kv(name, "delivered"), fp)
         if work_order:
             journal.issue_set(work_order, "issued", name=name)
     return result

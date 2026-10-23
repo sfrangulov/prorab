@@ -540,6 +540,28 @@ def acts(bead, kind=None):
     return out
 
 
+def amend(work_order, text):
+    """Append a "## Amendment <n> (<UTC time>)" section with `text` to an open work order's
+    body and record an `answer` act "[amendment <n>] <first line>". Criteria are read from the
+    whole body, so an amended criterion keeps its id and a new one adds one. n counts the
+    amendments so far. Returns ``{"work_order", "amendment", "body"}``."""
+    text = (text or "").strip()
+    if not text:
+        raise JournalError("the amendment is empty")
+    item = _show(work_order)
+    if WORK_ORDER_LABEL not in (item.get("labels") or []) or item.get("parent"):
+        raise JournalError("%s is not a work order" % work_order)
+    if item.get("status") == "closed":
+        raise JournalError("work order %s is closed" % work_order)
+    body = item.get("description") or ""
+    n = 1 + max([int(m) for m in re.findall(r"^## Amendment (\d+) \(", body, re.M)] or [0])
+    stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+    body = "%s\n\n## Amendment %d (%s)\n%s" % (body, n, stamp, text)
+    _run(["update", work_order, "-d", body])
+    add_act(work_order, "answer", "[amendment %d] %s" % (n, text.splitlines()[0]))
+    return {"work_order": work_order, "amendment": n, "body": body}
+
+
 # ---- labels -----------------------------------------------------------------
 
 def add_label(bead, label):
@@ -1337,6 +1359,8 @@ def main(argv=None):
     p.add_argument("bead"); p.add_argument("kind"); p.add_argument("text")
     p = sub.add_parser("acts")
     p.add_argument("bead"); p.add_argument("--kind")
+    p = sub.add_parser("amend")
+    p.add_argument("work_order"); p.add_argument("--file", required=True)
     p = sub.add_parser("budget")
     p.add_argument("--set", action="append", default=[])
     p = sub.add_parser("machine")
@@ -1474,6 +1498,16 @@ def main(argv=None):
         return _emit({"ok": True})
     if a.cmd == "acts":
         return _emit(acts(a.bead, a.kind))
+    if a.cmd == "amend":
+        try:
+            with open(a.file, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, ValueError) as e:
+            raise SystemExit("cannot read the amendment file %s: %s" % (a.file, e))
+        try:
+            return _emit(amend(a.work_order, text))
+        except JournalError as e:
+            raise SystemExit(str(e))
     if a.cmd == "budget":
         kw = {k: float(v) for k, v in _pairs(a.set).items()}
         if kw:

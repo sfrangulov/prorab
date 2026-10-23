@@ -129,9 +129,12 @@ def _result_text(block):
 
 
 def guard_refusals(path, since=None):
-    """Refusals of Claude Code's worktree guard in a transcript: user entries holding a
-    `tool_result` whose text has `GUARD_REFUSAL`, stamped at or after `since` (epoch seconds).
-    Counted per entry: the line repeats the text in `toolUseResult`. Raises OSError."""
+    """Refusals of Claude Code's worktree guard in a transcript: user entries holding an error
+    `tool_result` (`is_error` true) whose text, leading whitespace stripped, starts with
+    `GUARD_REFUSAL`, stamped at or after `since` (epoch seconds). A tool result that merely
+    quotes the text (a Read of the work order) is no refusal. An entry with a missing or
+    unparseable stamp counts: an undercount would let a hidden refusal pass. Counted per
+    entry: the line repeats the text in `toolUseResult`. Raises OSError."""
     n = 0
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -147,14 +150,26 @@ def guard_refusals(path, since=None):
             content = msg.get("content") if isinstance(msg, dict) else None
             if not isinstance(content, list) or not any(
                     isinstance(b, dict) and b.get("type") == "tool_result"
-                    and GUARD_REFUSAL in _result_text(b) for b in content):
+                    and b.get("is_error") is True
+                    and _result_text(b).lstrip().startswith(GUARD_REFUSAL) for b in content):
                 continue
             if since is not None:
                 ts = _parse_ts(entry.get("timestamp"))
-                if ts is None or ts < since:
+                if ts is not None and ts < since:
                     continue
             n += 1
     return n
+
+
+def session_paths(worktree, sessions, home=None):
+    """The crew's own session transcripts, by id (no subagent files); those not found are left
+    out."""
+    out = []
+    for session_id in sessions:
+        path = _session_transcript(worktree, session_id, home)
+        if path and path not in out:
+            out.append(path)
+    return out
 
 
 _META = "is" + "Meta"  # Claude Code's flag on entries it writes itself (no message to the crew)

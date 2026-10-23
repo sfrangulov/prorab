@@ -1820,7 +1820,7 @@ def cleanup(site_path, work_order):
 _CRITERION_ID = re.compile(r"^[ \t]*(?:[-*+][ \t]+)?(?:\|[ \t]*)?\**(C\d+)\b", re.M)
 _LIVE_CRITERION = re.compile(
     r"^[ \t]*(?:[-*+][ \t]+)?(?:\|[ \t]*)?\**(C\d+)\**[ \t]*\(live\)", re.M | re.I)
-_CID = re.compile(r"\bC\d+\b")
+_CID = re.compile(r"(?<![\w./\\-])C\d+\b(?![./\\-]?\w)")   # a whole token, not `src/C3.py`
 _HEADING = re.compile(r"^ {0,3}#{1,4}\s+(.+?)\s*#*\s*$")
 _ROW = re.compile(r"^\s*\|\s*(C\d+)\s*\|\s*([^|]*?)\s*(?:\|\s*([^|]*?)\s*)?\|?\s*$")
 _RESULT = re.compile(r"^[\s>*_-]*Result[\s*_]*:[\s*_]*(.+?)[\s*_`.]*$", re.I | re.M)
@@ -2142,11 +2142,17 @@ def _check_report_cli(name, work_order, stage=None, base=None):
         started = journal.stage_info(stage)["started_at"]
         if started is not None:
             counted = slots.runs("heavy", worktree, since=float(started))
-            path = _transcript_for(name)
+            # every session of the work order (a restarted crew has several), the crew's own
+            # files only: the work order's template says the count excludes its subagents
+            sessions = (journal.issue(work_order) or {}).get("sessions") or []
+            paths = transcript.session_paths(worktree, sessions)
+            if not paths and _transcript_for(name):
+                paths = [_transcript_for(name)]
             try:
-                if not path:
+                if not paths:
                     raise OSError("no transcript of the crew")
-                guard_counted = transcript.guard_refusals(path, since=float(started))
+                guard_counted = sum(transcript.guard_refusals(p, since=float(started))
+                                    for p in paths)
             except OSError as e:
                 guard_missing = "transcript unreadable (%s)" % e
         else:

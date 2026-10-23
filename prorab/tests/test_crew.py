@@ -2315,6 +2315,19 @@ class TestCheckReport(CrewBase):
             "## Stubs\n- `src/rates.py` - fixed table - C1 and C9\n"))
         self.has(p, "stub item names an unknown criterion")
 
+    def test_check_report_stub_criterion_id_is_a_whole_token(self):
+        # a path or name holding C<n> names no criterion
+        p = self.problems(text=self.stubs_report("## Stubs\n- `src/C3.py` - fixed table\n"))
+        self.has(p, "stub item names no criterion: `src/C3.py` - fixed table")
+        self.assertFalse(any("unknown criterion" in x for x in p), p)
+        r = self.check(text=self.stubs_report(
+            "## Stubs\n- `src/C3.py` - fixed table - C1\n",
+            rows="| C1 | stub | fixed table is fine |\n| C2 | done | |\n"))
+        self.assertTrue(r["ok"], r)
+        for item in ("`src/C1.py` - table", "`C1_rates` - table", "`x-C1` - table"):
+            self.has(self.problems(text=self.stubs_report("## Stubs\n- %s\n" % item)),
+                     "names no criterion")
+
     def guard_report(self, guard):
         return make_report(guard=guard, tail="\nResult: delivered\nCommit: %s\n" % self.sha)
 
@@ -2584,11 +2597,14 @@ class TestWorkOrderSpend(CrewBase):
         self.route("agent list", ok({"agents": [agent_entry(cwd=wt)]}))
         with mock.patch.object(crew.slots, "runs", return_value=9) as runs, \
                 mock.patch.object(crew, "summary", return_value="r"), \
-                mock.patch.object(crew, "_transcript_for", return_value="/home/user/t.jsonl"), \
+                mock.patch.object(crew.transcript, "session_paths",
+                                  return_value=["/home/user/t.jsonl"]) as paths, \
                 mock.patch.object(crew.transcript, "guard_refusals", return_value=2) as refs, \
                 mock.patch.object(crew, "check_report", return_value={"ok": True}) as chk:
+            self.j.issue_set("N1", "issued", sessions=["s1"])
             crew._check_report_cli("a1", "N1", stage="N1.1")
         runs.assert_called_once_with("heavy", wt, since=100.0)
+        paths.assert_called_once_with(wt, ["s1"])
         refs.assert_called_once_with("/home/user/t.jsonl", since=100.0)
         kw = chk.call_args.kwargs
         self.assertEqual((kw["heavy_limit"], kw["cleared"], kw["heavy_counted"]), (4, True, 9))
@@ -2620,26 +2636,53 @@ class TestWorkOrderSpend(CrewBase):
 
     def test_cli_check_report_verified_count_passes(self):
         with mock.patch.object(crew.slots, "runs", return_value=3), \
-                mock.patch.object(crew, "_transcript_for", return_value="/home/user/t.jsonl"), \
+                mock.patch.object(crew.transcript, "session_paths",
+                                  return_value=["/home/user/t.jsonl"]), \
                 mock.patch.object(crew.transcript, "guard_refusals", return_value=0):
             r = self._cli_check("N1.1", 100)
         self.assertTrue(r["ok"], r)
 
     def test_cli_check_report_counts_the_transcripts_guard_refusals(self):
         with mock.patch.object(crew.slots, "runs", return_value=3), \
-                mock.patch.object(crew, "_transcript_for", return_value="/home/user/t.jsonl"), \
+                mock.patch.object(crew.transcript, "session_paths",
+                                  return_value=["/home/user/t.jsonl"]), \
                 mock.patch.object(crew.transcript, "guard_refusals", return_value=2):
             r = self._cli_check("N1.1", 100)
         self.assertTrue(any("reported 0, the transcript counts 2" in p for p in r["problems"]),
                         r["problems"])
 
+    def test_cli_check_report_counts_every_session_of_the_stage(self):
+        # a restarted crew: the refusal of the earlier session counts too
+        wt = os.path.join(self.dir, "wt-cli")
+        os.makedirs(wt, exist_ok=True)
+        refusal = {"type": "user", "timestamp": "2026-10-21T10:00:06Z", "message": {"content": [{
+            "type": "tool_result", "is_error": True,
+            "content": crew.transcript.GUARD_REFUSAL + " /home/user/w, but this command cd's."}]}}
+        paths = []
+        for sid, n in (("s1", 1), ("s2", 2)):
+            paths.append(os.path.join(self.dir, sid + ".jsonl"))
+            with open(paths[-1], "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(refusal) + "\n")
+                if n == 2:
+                    fh.write(json.dumps(refusal) + "\n")
+        self.j.issue_set("N1", "issued", sessions=["s1", "s2"])
+        started = crew.transcript._parse_ts("2026-10-21T09:00:00Z")
+        with mock.patch.object(crew.slots, "runs", return_value=3), \
+                mock.patch.object(crew.transcript, "session_paths", return_value=paths) as sp:
+            r = self._cli_check("N1.1", started)
+        sp.assert_called_once_with(wt, ["s1", "s2"])
+        self.assertTrue(any("reported 0, the transcript counts 3" in p for p in r["problems"]),
+                        r["problems"])
+
     def test_cli_check_report_unreadable_transcript_is_not_verifiable(self):
         with mock.patch.object(crew.slots, "runs", return_value=3):
-            with mock.patch.object(crew, "_transcript_for", return_value=None):
+            with mock.patch.object(crew.transcript, "session_paths", return_value=[]), \
+                    mock.patch.object(crew, "_transcript_for", return_value=None):
                 r = self._cli_check("N1.1", 100)
             self.assertTrue(any("guard refusals not verifiable" in p for p in r["problems"]),
                             r["problems"])
-            with mock.patch.object(crew, "_transcript_for", return_value="/home/user/none.jsonl"):
+            with mock.patch.object(crew.transcript, "session_paths",
+                                   return_value=["/home/user/none.jsonl"]):
                 r = self._cli_check("N1.1", 100)
         self.assertTrue(any("guard refusals not verifiable" in p for p in r["problems"]),
                         r["problems"])

@@ -469,6 +469,50 @@ class TestCost(unittest.TestCase):
         with self.assertRaises(OSError):
             transcript.guard_refusals(os.path.join(FIX, "no-such.jsonl"))
 
+    def test_guard_refusals_only_real_errors_that_start_with_the_text(self):
+        path = os.path.join(FIX, "transcript_guard_refusal.jsonl")
+        # the fixture also holds a non-error Read of the work order quoting the marker (string
+        # and list content) and an error result with the marker in the middle: none counts
+        self.assertEqual(transcript.guard_refusals(path), 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "s.jsonl")
+            text = transcript.GUARD_REFUSAL + " /home/user/w, but this command cd's."
+            line = {"type": "user", "timestamp": "2026-10-21T10:00:00Z",
+                    "message": {"content": [{"type": "tool_result", "is_error": True,
+                                             "content": "\n  " + text}]}}
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(line) + "\n")
+            self.assertEqual(transcript.guard_refusals(p), 1)  # leading whitespace is stripped
+            line["message"]["content"][0]["is_error"] = False
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(line) + "\n")
+            self.assertEqual(transcript.guard_refusals(p), 0)
+
+    def test_guard_refusals_without_a_timestamp_count(self):
+        # fail closed: an undercount would let a hidden refusal pass the equality check
+        base = {"type": "user", "message": {"content": [{
+            "type": "tool_result", "is_error": True,
+            "content": transcript.GUARD_REFUSAL + " /home/user/w, but ..."}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "s.jsonl")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(base) + "\n")
+                fh.write(json.dumps(dict(base, timestamp="not a time")) + "\n")
+                fh.write(json.dumps(dict(base, timestamp="2026-10-21T08:00:00Z")) + "\n")
+            self.assertEqual(transcript.guard_refusals(p, since=_ts(9, 0)), 2)
+            self.assertEqual(transcript.guard_refusals(p), 3)
+
+    def test_session_paths_are_the_crews_own_sessions(self):
+        with tempfile.TemporaryDirectory() as home:
+            wt = "/home/user/projects/demo-app/.claude/worktrees/prorab-x1"
+            d = os.path.join(home, ".claude", "projects", transcript.project_slug(wt))
+            os.makedirs(os.path.join(d, "s1", "subagents"))
+            for name in ("s1.jsonl", "s2.jsonl", os.path.join("s1", "subagents", "agent-a.jsonl")):
+                with open(os.path.join(d, name), "w", encoding="utf-8") as fh:
+                    fh.write("{}\n")
+            got = transcript.session_paths(wt, ["s1", "s2", "s3"], home)
+            self.assertEqual(got, [os.path.join(d, "s1.jsonl"), os.path.join(d, "s2.jsonl")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -39,8 +39,9 @@ HANDOVER_MARKER = "HANDOVER READY"
 # The only drop decision: an act `answer` starting with this line (see acts.md).
 DROP_MARKER = "[customer decision] drop"
 
-REPORT_SECTIONS = ("Summary", "Behaviour", "Changed files", "Verification", "Residual risks")
-CRITERION_STATUSES = ("done", "not applicable", "deferred", "blocked")
+REPORT_SECTIONS = ("Summary", "Behaviour", "Changed files", "Verification", "Stubs",
+                   "Residual risks")
+CRITERION_STATUSES = ("done", "not applicable", "deferred", "blocked", "stub")
 OUTCOMES = ("delivered", "no changes", "blocked", "abandoned")
 # `limit_died` and `login` (a restart that stopped at a login screen) are never counted
 RESTART_REASONS = ("gone", "hung", "limit_died", "login")
@@ -1426,6 +1427,9 @@ def cleanup(site_path, work_order):
 # ---- stage report check -------------------------------------------------------
 
 _CRITERION_ID = re.compile(r"^[ \t]*(?:[-*+][ \t]+)?(?:\|[ \t]*)?\**(C\d+)\b", re.M)
+_LIVE_CRITERION = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+)?(?:\|[ \t]*)?\**(C\d+)\**[ \t]*\(live\)", re.M | re.I)
+_CID = re.compile(r"\bC\d+\b")
 _HEADING = re.compile(r"^ {0,3}#{1,4}\s+(.+?)\s*#*\s*$")
 _ROW = re.compile(r"^\s*\|\s*(C\d+)\s*\|\s*([^|]*?)\s*(?:\|\s*([^|]*?)\s*)?\|?\s*$")
 _RESULT = re.compile(r"^[\s>*_-]*Result[\s*_]*:[\s*_]*(.+?)[\s*_`.]*$", re.I | re.M)
@@ -1443,6 +1447,11 @@ def criteria_ids(work_order_text):
         if cid not in out:
             out.append(cid)
     return out
+
+
+def live_criteria(work_order_text):
+    """The `C<n>` ids marked `(live)` right after the id: `- C2 (live): ...`, `| C2 (live) |`."""
+    return [m.group(1) for m in _LIVE_CRITERION.finditer(work_order_text)]
 
 
 def _sections(text):
@@ -1489,8 +1498,42 @@ def _check_heavy(text, heavy_limit, cleared, heavy_counted, unverifiable=None):
     return problems
 
 
+def _check_stubs(sections, rows, criteria, live):
+    """No stub passes as working: the Stubs section against the criteria table, and a `(live)`
+    criterion's `done` against a `LIVE C<n>` item under Verification."""
+    problems, backed = [], {}
+    if "Stubs" in sections:
+        lines = sections["Stubs"]
+        items = _items(lines)
+        bare = " ".join(ln.strip() for ln in lines if ln.strip())
+        if not items and bare.strip(" *_`.").lower() == "none":
+            items = ["none"]
+        if not items:
+            problems.append("Stubs: write none or list each stub")
+        elif not (len(items) == 1 and items[0].strip(" *_`.").lower() == "none"):
+            for item in items:
+                ids = _CID.findall(item)
+                if not ids:
+                    problems.append("stub item names no criterion: %s" % item)
+                for cid in ids:
+                    backed.setdefault(cid, item)
+    for cid in criteria:
+        status = rows[cid][0] if cid in rows else None
+        if status == "done" and cid in backed:
+            problems.append("criterion %s: done but backed by a stub: %s" % (cid, backed[cid]))
+        elif status == "stub" and cid not in backed and "Stubs" in sections:
+            problems.append("criterion %s: status stub but no Stubs item names it" % cid)
+    checks = _items(sections.get("Verification", []))
+    for cid in live:
+        if cid in rows and rows[cid][0] == "done" and not any(
+                re.search(r"\bLIVE\s+%s\b" % cid, it) for it in checks):
+            problems.append("criterion %s (live): done without a LIVE %s check under "
+                            "Verification" % (cid, cid))
+    return problems
+
+
 def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, cleared=False,
-                 heavy_counted=None, unverifiable=None):
+                 heavy_counted=None, unverifiable=None, live=()):
     """Read-only check of a stage report against its work order and the worktree's git."""
     problems, warnings = [], []
     problems += _check_heavy(text, heavy_limit, cleared, heavy_counted, unverifiable)
@@ -1513,6 +1556,9 @@ def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, c
                             % (cid, status, ", ".join(CRITERION_STATUSES)))
         elif status != "done" and not reason:
             problems.append("criterion %s: status %r needs a reason" % (cid, status))
+        elif status == "stub":
+            warnings.append("criterion %s: stub — accept only if the work order allows it" % cid)
+    problems += _check_stubs(sections, rows, criteria, live)
     m = _RESULT.search(text)
     outcome = m.group(1).strip().lower() if m else None
     if outcome is None:
@@ -1647,7 +1693,8 @@ def _check_report_cli(name, work_order, stage=None, base=None):
     return check_report(summary(name), criteria_ids(description),
                         journal.work_order_files(work_order), worktree, base,
                         heavy_limit=journal.estimate(work_order)["heavy_runs_per_stage"],
-                        cleared=cleared, heavy_counted=counted, unverifiable=missing)
+                        cleared=cleared, heavy_counted=counted, unverifiable=missing,
+                        live=live_criteria(description))
 
 
 def _accept_cli(work_order, stage, act_file):

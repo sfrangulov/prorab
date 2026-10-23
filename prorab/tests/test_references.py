@@ -279,6 +279,11 @@ class TestWorkOrder(unittest.TestCase):
         for line in ("C-id | status | reason", "Result: <", "Commit: <", "Heavy runs: <",
                      "SKIP: <n>"):
             self.assertIn(line, t)
+        # no stub passes as working: the template names the status, the marker and the check
+        for word in ("stub", "(live)", "LIVE C<n>", "Never accept stub data as done"):
+            self.assertIn(word, t)
+        self.assertEqual(crew.live_criteria(t), [])  # the placeholder id is not a criterion
+        self.assertEqual(crew._items(crew._sections(self.example)["Stubs"]), ["none"])
         self.assertIn("crew.py check_report NAME WORK_ORDER --stage STAGE", self.text)
 
         with tempfile.TemporaryDirectory() as tmp, \

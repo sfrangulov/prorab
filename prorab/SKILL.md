@@ -24,9 +24,9 @@ Rules here, mechanics in scripts (`<file> …`: `python3 scripts/<file> …` fro
 
 ## The cycle
 
-1. Goal: `brainstorming` with the customer, once.
+1. Goal: `brainstorming` with the customer, once; no goal or criterion takes a stub as done.
 2. Plan: `writing-plans`; tasks become WOs and stages.
-3. Work orders (`references/work-order.md`): `journal.py work-order SITE TITLE --body TEXT --estimate-usd USD`; `journal.py stage WO TITLE --file PATH --duration MIN`.
+3. Work orders (`references/work-order.md`): `journal.py work-order SITE TITLE --body TEXT --estimate-usd USD`, then `stage` per stage.
 4. Issuing: `scheduler.py plan`; `crew.py start SITE_PATH WO NAME "$HERDR_PANE_ID"`; `journal.py stage-start STAGE`; FILE: the filled template plus `journal.py passport SITE`; `crew.py send_work_order NAME "$(cat FILE)" --work-order WO` (kept in `~/.cache/prorab/work-orders/`).
 5–8. Monitor, Acceptance, Context; `shift.py report`.
 

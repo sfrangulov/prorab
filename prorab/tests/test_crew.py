@@ -2172,6 +2172,7 @@ def make_report(**kw):
                       "| C1 | done | |\n| C2 | not applicable | no UI in this stage |\n"),
         "Changed files": "## Changed files\n- `src/a.py` - new module\n",
         "Verification": "## Verification\n- `python3 -m unittest` SKIP: 0\n",
+        "Stubs": "## Stubs\n- none\n",
         "Residual risks": "## Residual risks\nNone.\n",
     }
     parts.update(kw.get("sections", {}))
@@ -2204,6 +2205,72 @@ class TestCheckReport(CrewBase):
     def test_criteria_ids(self):
         text = "Intro\nC1. first\n- C2: second\n| C3 | third |\n  C4 fourth\nsee C5 here\nC1 again\n"
         self.assertEqual(crew.criteria_ids(text), ["C1", "C2", "C3", "C4"])
+
+    def test_live_criteria_ids(self):
+        text = ("C1. plain\n- C2 (live): rates from the bank\n| C3 (live) | device |\n"
+                "- **C4** (live): bold\n- C5: not live (live) later\nsee C6 (live)\n"
+                "- C7 (LIVE): upper\n")
+        self.assertEqual(crew.live_criteria(text), ["C2", "C3", "C4", "C7"])
+        self.assertEqual(crew.criteria_ids(text), ["C1", "C2", "C3", "C4", "C5", "C7"])
+
+    def stubs_report(self, stubs, rows=None, verification=None):
+        sections = {"Stubs": stubs}
+        if rows is not None:
+            sections["Behaviour"] = "## Behaviour\n" + rows
+        if verification is not None:
+            sections["Verification"] = "## Verification\n" + verification
+        return make_report(sections=sections,
+                           tail="\nResult: delivered\nCommit: %s\n" % self.sha)
+
+    def test_check_report_stubs_section_required(self):
+        text = make_report(sections={"Stubs": ""},
+                           tail="\nResult: delivered\nCommit: %s\n" % self.sha)
+        self.has(self.problems(text=text), "missing section: Stubs")
+        self.has(self.problems(text=self.stubs_report("## Stubs\n")),
+                 "Stubs: write none or list each stub")
+
+    def test_check_report_stubs_none_passes(self):
+        for body in ("## Stubs\n- none\n", "## Stubs\n- None.\n", "## Stubs\nnone\n"):
+            self.assertTrue(self.check(text=self.stubs_report(body))["ok"], body)
+
+    def test_check_report_stub_backing_done_is_refused(self):
+        p = self.problems(text=self.stubs_report(
+            "## Stubs\n- `src/rates.py` - fixed rate table - C1\n"))
+        self.has(p, "criterion C1: done but backed by a stub: `src/rates.py`")
+
+    def test_check_report_stub_without_criterion(self):
+        p = self.problems(text=self.stubs_report("## Stubs\n- `src/rates.py` - fixed table\n"))
+        self.has(p, "stub item names no criterion: `src/rates.py` - fixed table")
+
+    def test_check_report_stub_status_needs_an_item(self):
+        rows = "| C1 | stub | fixed rates are fine here |\n| C2 | done | |\n"
+        self.has(self.problems(text=self.stubs_report("## Stubs\n- none\n", rows=rows)),
+                 "criterion C1: status stub but no Stubs item names it")
+        r = self.check(text=self.stubs_report(
+            "## Stubs\n- `src/rates.py` - fixed table - C1\n", rows=rows))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["warnings"], ["criterion C1: stub — accept only if the work order "
+                                         "allows it"])
+        # a stub status keeps the rule that a reason is needed
+        self.has(self.problems(text=self.stubs_report(
+            "## Stubs\n- `x` - y - C1\n", rows="| C1 | stub | |\n| C2 | done | |\n")),
+            "criterion C1: status 'stub' needs a reason")
+
+    def test_check_report_live_done_needs_live_item(self):
+        tail = "\nResult: delivered\nCommit: %s\n" % self.sha
+
+        def run(verification):
+            text = make_report(sections={"Verification": "## Verification\n" + verification},
+                               tail=tail)
+            return crew.check_report(text, ["C1", "C2"], ["src/"], self.wt, live=["C1"])
+        r = run("- `python3 -m unittest` SKIP: 0\n")
+        self.assertFalse(r["ok"])
+        self.has(r["problems"], "criterion C1 (live): done without a LIVE C1 check under "
+                                "Verification")
+        self.assertTrue(run("- `python3 -m unittest` SKIP: 0\n"
+                            "- LIVE C1 `rates.py --real` - 1 EUR = 1.08 USD - SKIP: 0\n")["ok"])
+        # a LIVE item for another criterion does not count
+        self.assertFalse(run("- `x` SKIP: 0\n- LIVE C2 `y` SKIP: 0\n")["ok"])
 
     def test_check_report_ok(self):
         r = self.check()
@@ -2423,8 +2490,8 @@ class TestWorkOrderSpend(CrewBase):
         self.j.kv["crew.a1.worktree"] = wt
         self.j.kv["stage.N1.1.started_at"] = 100
         self.j.estimates["N1"] = {"heavy_runs_per_stage": 4}
-        self.j.bd = lambda args, json_out=True: [{"description": "C1. a", "labels":
-                                                  ["clearance:granted"]}]
+        self.j.bd = lambda args, json_out=True: [{"description": "C1. a\n- C2 (live): b",
+                                                  "labels": ["clearance:granted"]}]
         self.route("agent list", ok({"agents": [agent_entry(cwd=wt)]}))
         with mock.patch.object(crew.slots, "runs", return_value=9) as runs, \
                 mock.patch.object(crew, "summary", return_value="r"), \
@@ -2433,6 +2500,7 @@ class TestWorkOrderSpend(CrewBase):
         runs.assert_called_once_with("heavy", wt, since=100.0)
         kw = chk.call_args.kwargs
         self.assertEqual((kw["heavy_limit"], kw["cleared"], kw["heavy_counted"]), (4, True, 9))
+        self.assertEqual(kw["live"], ["C2"])
 
     def _cli_check(self, stage, started):
         wt = os.path.join(self.dir, "wt-cli")

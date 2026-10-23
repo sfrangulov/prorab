@@ -20,7 +20,7 @@ The foreman writes every work order from the template below, for a crew that kno
 - Crew: Claude.
 
 ## Goal and why it matters
-<What is to be achieved and why, for a reader who knows nothing about the task: the problem, who needs the result, the decisions already taken, the design document if there is one.>
+<What is to be achieved and why, for a reader who knows nothing about the task: the problem, who needs the result, the decisions already taken, the design document if there is one. Never accept stub data as done: no "built-in fixed data" for a live feature.>
 
 ## Stages
 Every stage ends at its stop point: commit, leave no background command running, send the stage report (section Report format) as your last message and wait for the foreman's answer. Never start the next stage on your own.
@@ -61,7 +61,10 @@ Bead <passport id>. Its text follows this work order: worktree setup, quick chec
 The foreman checks these facts at acceptance:
 - C1: <a checkable fact: a command and its expected output, a file and its content, a commit>
 - C2: <...>
+- C<n> (live): <a fact that needs the real world: a network source, a device, another service>
 - Cn: <...>
+
+`(live)` right after the id marks a criterion that only the real thing can prove. Where a stub is acceptable, the criterion says so.
 
 ## Report format
 At every stop point your last message is the stage report, as plain text in the chat: the foreman reads it from the transcript and checks it with a script. Use this form:
@@ -89,12 +92,17 @@ Heavy runs: <n>
 ## Verification
 - `<exact command>` - <the line of its output that shows the result> - SKIP: <n>
 
+## Stubs
+- `<path or symbol>` - <what it fakes> - C<n>
+
 ## Residual risks
 <what may still be wrong, or none>
 ```
 
-- Five sections with these headings: Summary, Behaviour, Changed files, Verification, Residual risks.
-- One table row per acceptance criterion. The status is done, not applicable, deferred or blocked; every status but done needs a reason.
+- Six sections with these headings: Summary, Behaviour, Changed files, Verification, Stubs, Residual risks.
+- One table row per acceptance criterion, with the bare id (`| C2 | done | |`, even for a `(live)` criterion). The status is done, not applicable, deferred, blocked or stub; every status but done needs a reason.
+- Stubs lists every hardcoded or stub data source the work rests on (a fixed table standing in for a live feed, a service mocked in the product code, sample data, a placeholder), each as `- \`<path or symbol>\` - <what it fakes> - C<n>`, or the single item `- none`. A stub's criterion is `stub`, never `done`.
+- A `(live)` criterion is `done` only with one Verification item marked `LIVE C<n>`: a real run against the real thing, with its command in backticks, its output and `SKIP: <n>`, not a mocked test.
 - Result: delivered, no changes, blocked or abandoned. With delivered, `Commit:` is a commit on `prorab/<id>` made since the base, Verification holds at least one check command, and Changed files lists exactly the files of `git diff --name-only <base branch>...HEAD` (the whole branch, not only this stage), one path in backticks per item.
 - Heavy runs: the heavy runs of this stage through `slots.py`, 0 if none. The check compares the number with the log of `slots.py`; a report without the line, or with another number, is rejected.
 - Every item under Verification is one check command in backticks, with its output and `SKIP: <n>`, the number of skipped tests (0 if none). "Tests are green" without a command is not accepted; remarks go under Residual risks.
@@ -130,6 +138,9 @@ Added a CSV export of the daily report.
 
 ## Verification
 - `/home/user/projects/prorab/prorab/scripts/slots.py run --kind heavy -- python3 -m unittest discover -s tests` - `Ran 14 tests ... OK` - SKIP: 0
+
+## Stubs
+- none
 
 ## Residual risks
 The CSV has not been opened in a spreadsheet application.

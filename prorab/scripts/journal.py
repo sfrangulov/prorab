@@ -281,6 +281,8 @@ def close_stage_unaccepted(stage, act):
         raise JournalError("%s is not a stage of a work order" % stage)
     if item.get("status") == "closed":
         raise JournalError("stage %s is already closed" % stage)
+    if _open_gate(item):
+        raise JournalError("stage %s has an open gate: the customer answers it first" % stage)
     add_act(stage, "acceptance", act)
     _run(["close", stage])
 
@@ -1435,8 +1437,11 @@ def main(argv=None):
         accept_stage(a.stage, a.act)
         return _emit(stage_info(a.stage))
     if a.cmd == "stage-close":
-        with open(a.act_file, encoding="utf-8") as fh:
-            act = fh.read().strip()
+        try:
+            with open(a.act_file, encoding="utf-8") as fh:
+                act = fh.read().strip()
+        except (OSError, ValueError) as e:
+            raise SystemExit("cannot read the act file %s: %s" % (a.act_file, e))
         try:
             close_stage_unaccepted(a.stage, act)
         except JournalError as e:

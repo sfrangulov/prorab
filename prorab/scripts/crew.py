@@ -1790,8 +1790,9 @@ def _gone_branch(site_path, work_order):
     out anywhere."""
     default = _default_branch(site_path)
     checked_out = {w["branch"] for w in _worktrees(site_path)}
-    for b in ((journal.issue(work_order) or {}).get("branch"), "prorab/%s" % work_order,
-              "worktree-prorab-%s" % work_order):
+    own = ("prorab/%s" % work_order, "worktree-prorab-%s" % work_order)
+    recorded = (journal.issue(work_order) or {}).get("branch")   # only a name of its own counts
+    for b in ((recorded,) if recorded in own else ()) + own:
         if not b or b in ("main", "master", default) or b in checked_out:
             continue
         if _git_soft(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b],
@@ -1807,7 +1808,11 @@ def _cleanup_gone_worktree(site_path, work_order, dropped):
     branch = _gone_branch(site_path, work_order)
     if branch is None:
         return None
-    merged = _is_merged(site_path, branch)
+    # "merged" needs a default branch to be merged into: without main or master nothing is
+    # decided against whatever happens to be checked out
+    named = any(_git_soft(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b],
+                          site_path).returncode == 0 for b in ("main", "master"))
+    merged = named and _is_merged(site_path, branch)
     if not (merged or dropped):
         return {"status": "kept", "reason": "unmerged", "work_order_closed": False}
     p = _git_soft(["branch", "-D" if dropped and not merged else "-d", branch], site_path)
@@ -1825,6 +1830,10 @@ def _cleanup_gone_worktree(site_path, work_order, dropped):
 
 
 def cleanup(site_path, work_order):
+    if emergency_stop():
+        return {"status": _STOPPED}
+    if work_order in journal.working_work_orders():   # a live crew's branch is not merged work
+        return {"status": "kept", "reason": "crew_running", "work_order_closed": False}
     close_start_panes(work_order)
     for key in list(journal.kv_all()):   # a dropped work order leaves no consent watch behind
         if key.startswith("consent.%s." % work_order):

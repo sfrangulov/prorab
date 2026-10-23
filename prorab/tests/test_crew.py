@@ -87,6 +87,10 @@ class FakeJournal:
     def open_stages(self, work_order):
         return list(self.stages.get(work_order, []))
 
+    def working_work_orders(self):
+        return [self.kv["crew.%s.work_order" % n] for n in self.active
+                if self.kv.get("crew.%s.work_order" % n)]
+
     def all_stages(self, work_order):
         return list(self.stages.get(work_order, [])) + list(self.closed_stages.get(work_order, []))
 
@@ -1550,6 +1554,75 @@ class TestGit(CrewBase):
         git(repo, "checkout", "-q", "-b", "prorab/N1")   # merged into main, but checked out
         r = crew.cleanup(repo, "N1")
         self.assertEqual(r["status"], "absent")
+        self.assertIn("prorab/N1", git(repo, "branch", "--list", "prorab/N1"))
+
+    def test_cleanup_is_refused_while_a_crew_of_the_work_order_runs(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.j.active = ["a1"]
+        self.j.kv["crew.a1.work_order"] = "N1"
+        refused = {"status": "kept", "reason": "crew_running", "work_order_closed": False}
+        self.assertEqual(crew.cleanup(repo, "N1"), refused)   # the worktree path
+        self.assertTrue(os.path.isdir(wt))
+        self.drop_worktree(repo, wt)
+        self.assertEqual(crew.cleanup(repo, "N1"), refused)   # the gone-worktree path
+        self.assertIn("prorab/N1", git(repo, "branch", "--list", "prorab/N1"))
+        self.assertEqual(self.j.closed_work_orders, [])
+        self.j.active = ["a2"]   # another work order's crew does not hold it
+        self.j.kv["crew.a2.work_order"] = "N2"
+        self.assertEqual(crew.cleanup(repo, "N1")["status"], "removed")
+
+    def test_cleanup_is_refused_under_the_emergency_stop(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.drop_worktree(repo, wt)
+        stop_path = _defaults.load()["emergency"]["stop_path"]
+        os.makedirs(os.path.dirname(stop_path), exist_ok=True)
+        with open(stop_path, "w") as fh:
+            fh.write("")
+        self.addCleanup(lambda: os.path.exists(stop_path) and os.remove(stop_path))
+        self.assertEqual(crew.cleanup(repo, "N1"), {"status": crew._STOPPED})
+        self.assertIn("prorab/N1", git(repo, "branch", "--list", "prorab/N1"))
+        self.assertEqual(self.j.closed_work_orders, [])
+
+    def test_cleanup_gone_worktree_ignores_a_foreign_recorded_branch(self):
+        repo = self.make_repo()
+        git(repo, "branch", "prorab/N2")
+        git(repo, "branch", "develop")
+        for foreign in ("prorab/N2", "develop"):
+            self.j.issue_set("N1", "issued", branch=foreign)
+            self.assertEqual(crew.cleanup(repo, "N1"),
+                             {"status": "absent", "work_order_closed": False})
+        self.assertIn("prorab/N2", git(repo, "branch", "--list", "prorab/N2"))
+        self.assertIn("develop", git(repo, "branch", "--list", "develop"))
+        git(repo, "branch", "prorab/N1")   # its own default-named branch is still taken
+        self.assertEqual(crew.cleanup(repo, "N1")["branch"], "prorab/N1")
+        self.assertIn("prorab/N2", git(repo, "branch", "--list", "prorab/N2"))
+
+    def test_cleanup_gone_worktree_keeps_the_branch_without_main_or_master(self):
+        repo = self.make_repo()
+        git(repo, "branch", "prorab/N1")
+        git(repo, "branch", "-m", "main", "trunk")   # merged into whatever is checked out
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r, {"status": "kept", "reason": "unmerged", "work_order_closed": False})
+        self.assertIn("prorab/N1", git(repo, "branch", "--list", "prorab/N1"))
+        self.assertEqual(self.j.closed_work_orders, [])
+
+    def test_cleanup_gone_worktree_keeps_the_work_order_open_when_branch_d_is_refused(self):
+        repo = self.make_repo()
+        git(repo, "branch", "prorab/N1")
+        real = crew._git_soft
+
+        def refusing(args, cwd=None):
+            if args[:1] == ["branch"] and args[1:2] == ["-d"]:
+                return subprocess.CompletedProcess(["git"] + list(args), 1, "", "cannot delete")
+            return real(args, cwd)
+        crew._git_soft = refusing
+        self.addCleanup(setattr, crew, "_git_soft", real)
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual((r["status"], r["reason"], r["work_order_closed"]),
+                         ("kept", "branch", False))
+        self.assertEqual(self.j.closed_work_orders, [])
         self.assertIn("prorab/N1", git(repo, "branch", "--list", "prorab/N1"))
 
     def test_cleanup_main_checkout_has_no_branch_step(self):
@@ -3091,6 +3164,7 @@ class TestStartPanes(CrewBase):
         repo = self.repo
         wt = self.add_worktree(repo, "N1")
         self.stale_record()
+        self.j.active = []   # stopped: cleanup is refused while a crew of the work order is registered
         r = crew.cleanup(repo, "N1")
         self.assertEqual(r["status"], "removed")  # the worktree step ran
         self.assertEqual(self.j.issue("N1")["pane"], "w:p9")

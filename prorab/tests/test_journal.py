@@ -463,34 +463,54 @@ class TestJournal(JournalBase):
         n = new_work_order("A")
         s1 = journal.create_stage(n, "S1", "b")
         text = "[stage closed without acceptance]\nWho: x"
-        self.assertNotEqual(cli_exit("stage-close", n, "--act-file", self.act_file(text)), 0)
+        self.assertIn("not a stage of a work order",
+                      str(cli_exit("stage-close", n, "--act-file", self.act_file(text))))
         self.assertEqual(journal.acts(n, "acceptance"), [])
         self.assertEqual(journal.open_stages(n), [s1])
 
-    def test_stage_close_refuses_a_closed_stage_and_a_foreign_act(self):
+    def test_stage_close_refuses_a_foreign_act(self):
         n = new_work_order("A")
         s1 = journal.create_stage(n, "S1", "b")
-        s2 = journal.create_stage(n, "S2", "b")
-        self.assertNotEqual(cli_exit("stage-close", s1, "--act-file",
-                                     self.act_file("Verdict: accepted")), 0)
-        self.assertEqual(journal.open_stages(n), [s1, s2])
-        journal.bd(["close", s1])
-        self.assertNotEqual(cli_exit("stage-close", s1, "--act-file", self.act_file(
-            "[stage closed without acceptance]\nWho: x")), 0)
+        self.assertIn("must start with", str(cli_exit(
+            "stage-close", s1, "--act-file", self.act_file("Verdict: accepted"))))
+        self.assertEqual(journal.open_stages(n), [s1])
         self.assertEqual(journal.acts(s1, "acceptance"), [])
 
-    def test_stop_closes_after_a_closed_stage(self):
+    def test_stage_close_refuses_a_closed_stage(self):
         n = new_work_order("A")
         s1 = journal.create_stage(n, "S1", "b")
-        self.assertEqual(journal.all_stages(n), [s1])
-        cli("stage-close", s1, "--act-file", self.act_file(
-            "[stage closed without acceptance]\nWho: x"))
-        self.assertEqual(journal.open_stages(n), [])
-        self.assertEqual(journal.close_work_order(n, "every stage accepted or closed")["closed"], [n])
+        journal.bd(["close", s1])
+        self.assertIn("already closed", str(cli_exit("stage-close", s1, "--act-file", self.act_file(
+            "[stage closed without acceptance]\nWho: x"))))
+        self.assertEqual(journal.acts(s1, "acceptance"), [])
 
-    def test_stop_with_no_stages_says_so(self):
+    def test_stage_close_refuses_a_stage_with_an_open_gate(self):
+        n = new_work_order("A")
+        s1 = journal.create_stage(n, "S1", "b")
+        journal.wait_customer(s1, "a choice is needed")
+        msg = str(cli_exit("stage-close", s1, "--act-file", self.act_file(
+            "[stage closed without acceptance]\nWho: x")))
+        self.assertIn("open gate", msg)
+        self.assertIn(s1, msg)
+        self.assertEqual(journal.acts(s1, "acceptance"), [])
+        self.assertEqual(journal.open_stages(n), [s1])
+
+    def test_stage_close_reports_an_unreadable_act_file(self):
+        n = new_work_order("A")
+        s1 = journal.create_stage(n, "S1", "b")
+        missing = os.path.join(tempfile.gettempdir(), "prorab-no-such-act-file")
+        self.assertIn("act file", str(cli_exit("stage-close", s1, "--act-file", missing)))
+        self.assertEqual(journal.open_stages(n), [s1])
+
+    def test_all_stages_lists_closed_ones_too(self):
         n = new_work_order("A")
         self.assertEqual(journal.all_stages(n), [])
+        s1 = journal.create_stage(n, "S1", "b")
+        s2 = journal.create_stage(n, "S2", "b")
+        cli("stage-close", s1, "--act-file", self.act_file(
+            "[stage closed without acceptance]\nWho: x"))
+        self.assertEqual(journal.all_stages(n), [s1, s2])
+        self.assertEqual(journal.close_work_order(n, "r")["closed"], [s2, n])
 
     def test_open_stages_in_creation_order(self):
         # bd lists children newest first; the first open stage is the current one (R56)

@@ -137,8 +137,13 @@ def _kv_of(kv, key):
 def _recorded_base(worktree):
     """The commit the crew's worktree started from, as `start` recorded it (kv of the crew
     working there, else the issue record with that worktree); None for older records."""
-    real = os.path.realpath(worktree)
-    kv = journal.kv_all()
+    try:
+        return _recorded_base_of(os.path.realpath(worktree), journal.kv_all())
+    except journal.JournalError:  # no journal to ask: the caller falls back to the default branch
+        return None
+
+
+def _recorded_base_of(real, kv):
     for name in journal.crews(kv):
         wt, base = _kv_of(kv, _kv(name, "worktree")), _kv_of(kv, _kv(name, "base_commit"))
         if wt and base and os.path.realpath(wt) == real:

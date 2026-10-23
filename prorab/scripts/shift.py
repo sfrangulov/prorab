@@ -231,7 +231,9 @@ def handoff_prorab(caller_pane, act, timeout_s=600, poll_s=5):
 
 
 def _send_prompt(name, bead):
-    """The take-over prompt, once: `sent` goes on the bead right before it is sent."""
+    """The take-over prompt, once: `sent` goes on the bead right before it is sent. A kill
+    between the two leaves the prompt unsent and every retry skips it, so the wait times out
+    (accepted by the plan: no second successor)."""
     journal.bd(["update", bead, "--metadata", json.dumps({"sent": time.time()})])
     try:
         # the skill is command-only (disable-model-invocation): only its command loads it
@@ -242,17 +244,31 @@ def _send_prompt(name, bead):
 
 def _completed_takeover(caller_pane):
     """The result of an earlier handoff of `caller_pane` whose successor now holds the lock
-    (the latest shift bead whose `from` is the caller), else None. Reads the journal only."""
+    (the latest shift bead whose `from` is the caller), else None. A bead still open means the
+    first call never confirmed it: the confirmation of the normal wait runs here too (from the
+    bead's `sent`, else its creation) and only a complete one closes the bead."""
     beads = journal.bd(["list", "--label", SHIFT_LABEL, "--all", "--limit", "0"])
     mine = [b for b in beads if (b.get("metadata") or {}).get("from") == caller_pane]
     if not mine:
         return None
     last = max(mine, key=lambda b: b.get("created_at") or "")
     pane = last["metadata"].get("pane")
-    if pane and journal.kv_get("prorab:active") == pane:
-        return {"status": "handed_over", "new_pane": pane, "bead": last["id"],
-                "delivery": "resumed"}
-    return None
+    if not (pane and journal.kv_get("prorab:active") == pane):
+        return None
+    res = {"status": "handed_over", "new_pane": pane, "bead": last["id"],
+           "delivery": "resumed"}
+    if last.get("status") == "closed":  # the first call confirmed it and closed the bead
+        return res
+    began = last["metadata"].get("sent")
+    if not isinstance(began, (int, float)):
+        began = journal._iso_ts(last.get("created_at")) or 0.0
+    missing = _unconfirmed(pane, float(began), [])
+    if missing:
+        res["unconfirmed"] = missing
+        return res
+    journal.bd(["close", last["id"]])
+    res["confirmed"] = ["lock", "reconcile", "monitor"]
+    return res
 
 
 def _resend_prompt(pending):
@@ -265,7 +281,9 @@ def _resend_prompt(pending):
     if (journal.bd(["show", pending["bead"]])[0].get("metadata") or {}).get("sent"):
         return "resumed"
     try:
-        if herdr_cli.composer_text(herdr_cli.agent_visible(name)) != "":
+        screen = herdr_cli.agent_visible(name)
+        # a trust, login or consent screen of the fresh session gets no text and no key
+        if crew._screen_refusal(screen) or herdr_cli.composer_text(screen) != "":
             return "resumed"
     except herdr_cli.HerdrError:
         return "resumed"

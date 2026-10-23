@@ -935,6 +935,31 @@ class TestHandoff(ShiftBase):
         self.assertEqual(self.calls(), before)  # no pane, no agent, no prompt, no read
         self.assertEqual(len(journal.bd(["list", "--label", shift.SHIFT_LABEL, "--all"])), 1)
 
+    def reopen(self, bead):
+        journal.bd(["update", bead, "--status", "open"])
+        self.assertEqual(journal.bd(["show", bead])[0]["status"], "open")
+
+    def test_a_retry_with_an_open_bead_and_a_confirmed_successor_closes_it(self):
+        first = self.finished_handoff()
+        self.reopen(first["bead"])  # the first call died before it could close the bead
+        before = self.calls()
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
+        self.assertEqual((res["status"], res["new_pane"], res["bead"]),
+                         ("handed_over", "w:p9", first["bead"]))
+        self.assertEqual(res["confirmed"], ["lock", "reconcile", "monitor"])
+        self.assertEqual(journal.bd(["show", first["bead"]])[0]["status"], "closed")
+        self.assertEqual(self.calls(), before)
+
+    def test_a_retry_with_an_open_bead_does_not_confirm_from_the_lock_alone(self):
+        first = self.finished_handoff()
+        self.reopen(first["bead"])
+        journal.kv_clear("shift.reconciled")  # the successor never reconciled
+        res = shift.handoff_prorab("w:p1", "state", timeout_s=5, poll_s=0.01)
+        self.assertEqual(res["status"], "handed_over")
+        self.assertEqual(res["unconfirmed"], ["reconcile"])
+        self.assertNotIn("confirmed", res)
+        self.assertEqual(journal.bd(["show", first["bead"]])[0]["status"], "open")
+
     def test_a_retry_reports_the_latest_bead_of_the_caller_only(self):
         self.finished_handoff()
         journal.kv_set("prorab:active", "w:p5")  # the lock moved on again
@@ -983,6 +1008,15 @@ class TestHandoff(ShiftBase):
         self.assertLess(reads[0], self.calls().index(prompts[0]))  # read first
         self.assertTrue(journal.bd(["show", res["bead"]])[0]["metadata"]["sent"])
         self.assertEqual(len([c for c in self.calls() if c.startswith("pane split")]), 1)
+
+    def test_a_retry_sends_nothing_onto_a_trust_dialog(self):
+        self.killed_before_the_prompt()
+        self.route("agent read prorab-2 --source visible", fixture("consent", "trust.txt"))
+        self.route("pane send-keys", "")
+        self.confirm()
+        self.retry_with_lock_at_the_wait()
+        self.assertEqual([c for c in self.calls() if c.startswith("agent prompt")], [])
+        self.assertEqual([c for c in self.calls() if "send-keys" in c], [])
 
     def test_a_retry_leaves_a_busy_composer_alone(self):
         self.killed_before_the_prompt()

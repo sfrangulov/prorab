@@ -1,6 +1,9 @@
-.beads/
+.beads*
 logs/
+logs-backup-*/
+reports/
+.superpowers/
+.claude/worktrees/
 __pycache__/
 *.pyc
 *.gate.lock
-reports/

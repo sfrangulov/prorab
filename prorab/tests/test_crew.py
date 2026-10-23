@@ -196,6 +196,8 @@ class CrewBase(FakeBase):
                                           "PRORAB_LOG_DIR": os.path.join(self.dir, "logs")})
         p4.start()
         self.addCleanup(p4.stop)
+        # a delivery reads the screen first (final review, I4): a clean screen unless a test says otherwise
+        self.route("agent read", "plain screen\n")
         # the synthetic ~/.claude.json trusts the test sites (F1); tests of the trust replace it
         self.write_trust([SITE_DIR, os.path.join(self.dir, "repo")])
 
@@ -861,7 +863,8 @@ class TestSendState(CrewBase):
     def test_stalled_then_consent_returns_kind(self):
         self.route("agent prompt a1", err("agent_prompt_stalled"), exit_code=1)
         self.route("agent get a1", ok({"agent": {"agent_status": "working"}}))  # recover: stays stalled
-        self.route("agent read a1 --source visible", fixture("consent", "trust.txt"))
+        self.route_seq("agent read a1 --source visible",  # clean before the send, a dialog after
+                       ["plain screen\n", fixture("consent", "trust.txt")])
         self.assertEqual(crew.deliver("a1", "t", "N1"), "consent:trust")
         calls = self.calls()
         self.assertEqual([c for c in calls if "send-keys" in c], [])
@@ -869,13 +872,15 @@ class TestSendState(CrewBase):
 
     def test_unconfirmed_then_consent_returns_kind(self):
         self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
-        self.route("agent read a1 --source visible", fixture("consent", "mcp.txt"))
+        self.route_seq("agent read a1 --source visible",
+                       ["plain screen\n", fixture("consent", "mcp.txt")])
         self.assertEqual(crew.deliver("a1", "t", "N1"), "consent:mcp")
         self.assertEqual([c for c in self.calls() if "send-keys" in c], [])
 
     def test_deliver_names_the_login(self):
         self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
-        self.route("agent read a1 --source visible", fixture("login", "not_logged_in.txt"))
+        self.route_seq("agent read a1 --source visible",
+                       ["plain screen\n", fixture("login", "not_logged_in.txt")])
         self.assertEqual(crew.deliver("a1", "t", "N1"), "login")
         self.assertEqual([c for c in self.calls() if "send-keys" in c], [])
         self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
@@ -1014,10 +1019,36 @@ class TestSendState(CrewBase):
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         crew.pause("a1")
         crew.request_handover("a1")
-        calls = self.calls()
+        calls = [c for c in self.calls() if c.startswith("agent prompt")]
         self.assertIn("wait for the foreman's message", calls[0])
         self.assertIn("HANDOVER READY", calls[1])
         self.assertIn("next steps", calls[1])
+
+    def test_deliver_refuses_a_dialog_herdr_does_not_report_as_blocked(self):
+        """The screen is read before typing: nothing is sent into a dialog (final review, I4)."""
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
+        screens = {"consent:trust": fixture("consent", "trust.txt"),
+                   "consent:mcp": fixture("consent", "mcp.txt"),
+                   "login": fixture("login", "not_logged_in.txt"),
+                   "exit_dialog": fixture("exit", "worktree_exit.txt"),
+                   "limit_screen": fixture("limit_choice.txt")}
+        for expected, screen in screens.items():
+            self.route("agent read a1 --source visible", screen)
+            self.assertEqual(crew.deliver("a1", "t", "N1"), expected)
+        self.assertEqual([c for c in self.calls() if c.startswith(("agent prompt", "agent send"))], [])
+
+    def test_deliver_to_a_clean_screen_still_delivers(self):
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
+        self.assertEqual(crew.deliver("a1", "t", "N1"), "accepted")
+        self.assertEqual(len([c for c in self.calls() if c.startswith("agent prompt")]), 1)
+
+    def test_the_emergency_pause_is_refused_the_same_way(self):
+        self.route("agent prompt a1", ok({"agent": {"agent_status": "idle"}}))
+        self.route("agent read a1 --source visible", fixture("consent", "trust.txt"))
+        os.makedirs(os.path.dirname(crew._defaults.load()["emergency"]["stop_path"]), exist_ok=True)
+        with mock.patch.object(crew, "emergency_stop", return_value=True):
+            self.assertEqual(crew.pause("a1"), "consent:trust")
+        self.assertEqual([c for c in self.calls() if c.startswith("agent prompt")], [])
 
 
 class TestHandover(CrewBase):
@@ -1169,7 +1200,9 @@ class TestHandover(CrewBase):
     def test_restart_consent_prompt_sends_nothing(self):
         self.restart_routes()
         self.route("agent start a1", err("agent_not_ready"), exit_code=1)
-        self.route("pane read w:p9 --source visible", "Do you trust the files here?\nYes, I trust this folder\n")
+        self.route_seq("pane read w:p9 --source visible",  # clean before /exit, the dialog of the new session after
+                       ["plain screen\n",
+                        "Do you trust the files here?\nYes, I trust this folder\n"])
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.assertEqual(self.go()["status"], "needs_trust")
         calls = self.calls()
@@ -2695,6 +2728,26 @@ class TestExitDialog(CrewBase):
 
     def handover(self, timeout_s=2):
         return crew.complete_handover("a1", "N1", "t", timeout_s=timeout_s, poll_s=0.01)
+
+    def test_exit_refuses_a_screen_with_a_prompt_and_types_nothing(self):
+        for reason, screen in (("consent:trust", fixture("consent", "trust.txt")),
+                               ("login", fixture("login", "not_logged_in.txt")),
+                               ("limit_screen", fixture("limit_choice.txt"))):
+            self.listed(True)
+            self.screens(screen)
+            res = self.handover()
+            self.assertEqual((res["status"], res["step"], res["reason"]),
+                             ("restart_failed", "exit", reason))
+        self.assertNotIn(self.EXIT_CALL, self.calls())
+        self.assertEqual(self.keys(), [])
+        self.assertNotIn("crew.a1.exiting", self.j.kv)
+
+    def test_exit_on_a_clean_screen_still_types_exit(self):
+        self.listed(True, False)
+        self.screens(self.composer, self.composer)
+        self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
+        self.assertEqual(self.handover()["status"], "restarted")
+        self.assertIn(self.EXIT_CALL, self.calls())
 
     def test_exit_dialog_markers(self):
         self.assertEqual(crew.exit_dialog(fixture("exit", "worktree_exit.txt")), "worktree")

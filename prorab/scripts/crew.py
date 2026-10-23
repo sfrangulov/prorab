@@ -221,15 +221,34 @@ def message_file(work_order, text, name=None):
     return path
 
 
+def _screen_refusal(visible, exits=True):
+    """What on the bottom block of a crew screen forbids typing there: "login", "consent:<kind>",
+    "exit_dialog" (unless `exits` is false) or "limit_screen"; else None."""
+    if herdr_cli.not_logged_in(visible):
+        return "login"
+    kind = herdr_cli.consent_dialog(visible)
+    if kind is not None:
+        return "consent:%s" % kind
+    if exits and exit_dialog(visible) is not None:
+        return "exit_dialog"
+    if limits.limit_screen(visible, _defaults.load()) is not None:
+        return "limit_screen"
+    return None
+
+
 def deliver(name, text, work_order=None):
     """The only way a message reaches a crew. One line goes by `send`, several lines by a
     file named in one line. "stalled" is recovered without a second `prompt` (Enter only
     when the composer holds our line). Returns "accepted" | "blocked" | "stalled" |
-    "unconfirmed" | "consent:<kind>" | "login"."""
+    "unconfirmed" | "consent:<kind>" | "login" | "exit_dialog" | "limit_screen". The screen is
+    read first: a dialog herdr does not report as blocked still gets no text and no Enter."""
     work_order = work_order or journal.kv_get(_kv(name, "work_order"))
     text = text.strip("\n")
     if "\n" in text:
         text = _template("Message by file").format(path=message_file(work_order, text))
+    refused = _screen_refusal(herdr_cli.agent_visible(name))
+    if refused:
+        return refused
     result = herdr_cli.send(name, text)
     if result == "stalled":
         result = herdr_cli.recover_stalled(name, text)
@@ -764,8 +783,12 @@ def _exit(name, pane, timeout_s, poll_s):
     mark = _kv(name, "exiting")
     if not pane:
         return "not_exited"
-    if herdr_cli.bg_shells(_screen_of(pane)) > 0:
+    screen = _screen_of(pane)
+    if herdr_cli.bg_shells(screen) > 0:
         return "bg_shells"
+    refused = _screen_refusal(screen, exits=False)  # an exit dialog is answered by the loop below
+    if refused:
+        return refused  # "/exit" would end in Enter on someone's prompt: nothing is typed
     journal.kv_set(mark, time.time())
     result = "not_exited"
     try:
@@ -942,8 +965,9 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
     if left in ("bg_shells", "bg_work"):  # nothing but the saved act is recorded
         return {"status": "bg_shells", "bg_shells": herdr_cli.bg_shells(_screen_of(pane))}
     if left != "exited":
-        return {"status": "restart_failed", "step": "exit", "reason": "agent did not exit",
-                "pane_id": pane}
+        return {"status": "restart_failed", "step": "exit", "pane_id": pane,
+                "reason": left if left.startswith(("consent:", "login", "limit_")) \
+                else "agent did not exit"}
     journal.kv_clear(pending)
     journal.kv_set("handover.%s.last" % work_order, time.time())
     journal.set_spent(work_order, spend["usd"])  # the predecessor's dollars are in the worktree
@@ -1026,7 +1050,9 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
             left = _exit(a.get("name") or name, pane, timeout_s, poll_s)
             if left != "exited":
                 reason = {"bg_shells": "background shells are running",
-                          "bg_work": "background work is running"}.get(left, "agent did not exit")
+                          "bg_work": "background work is running"}.get(
+                              left, left if left.startswith(("consent:", "login", "limit_"))
+                              else "agent did not exit")
                 return {"status": "restart_failed", "reason": reason, "step": "exit",
                         "pane_id": pane}
     else:
@@ -1150,15 +1176,11 @@ def answer(name, choice=None, text=None):
         return _STOPPED
     work_order = journal.kv_get(_kv(name, "work_order"))
     visible = herdr_cli.agent_visible(name)
-    if herdr_cli.not_logged_in(visible):
-        return "login"     # logging in is the customer's: nothing is sent or pressed
-    kind = herdr_cli.consent_dialog(visible)
-    if kind is not None:
-        return "consent:%s" % kind
-    if exit_dialog(visible) is not None:
-        return "exit_dialog"  # the script that sent /exit answers it, never a work order
-    if limits.limit_screen(visible, _defaults.load()) is not None:
-        return "limit_screen"
+    # logging in is the customer's; the script that sent /exit answers its dialog, never a
+    # work order: nothing is sent or pressed
+    refused = _screen_refusal(visible)
+    if refused:
+        return refused
     dialog = herdr_cli.choice_state(visible)
     if dialog is None:
         if text is None:

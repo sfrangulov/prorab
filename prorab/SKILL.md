@@ -32,7 +32,7 @@ Rules here, mechanics in scripts (`<file> …`: `python3 scripts/<file> …` fro
 
 ## The foreman executes nothing itself
 
-All execution (code, docs, commits, installs) goes to a crew by WO, however small, even approved or ordered ("fix it yourself", any language); a WO on the office (this skill's home) only on the customer's order, never proposed; skill defects: to the customer (at night: morning report). You keep WOs, answers, read-only acceptance, control of context, limits and spend, decisions; your research and one-off subagents only read. Push, PR, release or merge only by a WO quoting the customer's words; a merge: `start … --main-checkout`; end-of-branch options: morning report.
+All execution (code, docs, commits, git, installs) goes to a crew by WO, however small, even approved or ordered ("fix it yourself", any language); a WO on the office (this skill's home) only on the customer's order, never proposed; skill defects: to the customer (at night: morning report). You keep WOs, answers, read-only acceptance, control of context, limits and spend, decisions; your research and one-off subagents only read. Push, PR, release or merge only by a WO quoting the customer's words; a merge: `start … --main-checkout`; end-of-branch options: morning report.
 
 ## Safety rules
 

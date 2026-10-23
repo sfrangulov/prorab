@@ -440,6 +440,58 @@ class TestJournal(JournalBase):
         run("override", "clear")
         self.assertEqual(run("override", "get")[1], {"override": None})
 
+    def act_file(self, text):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "act.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def test_stage_close_records_and_closes(self):
+        n = new_work_order("A")
+        s1 = journal.create_stage(n, "S1", "b")
+        s2 = journal.create_stage(n, "S2", "b")
+        text = "[stage closed without acceptance]\nWho: the customer\nWhere: commit abc1234"
+        rc, out = cli("stage-close", s1, "--act-file", self.act_file(text))
+        self.assertEqual(rc, 0)
+        self.assertEqual(journal.acts(s1, "acceptance"), [text])
+        self.assertEqual(journal.open_stages(n), [s2])   # never started: no started_at needed
+        self.assertEqual(journal.all_stages(n), [s1, s2])
+
+    def test_stage_close_refuses_a_work_order_bead(self):
+        n = new_work_order("A")
+        s1 = journal.create_stage(n, "S1", "b")
+        text = "[stage closed without acceptance]\nWho: x"
+        self.assertNotEqual(cli_exit("stage-close", n, "--act-file", self.act_file(text)), 0)
+        self.assertEqual(journal.acts(n, "acceptance"), [])
+        self.assertEqual(journal.open_stages(n), [s1])
+
+    def test_stage_close_refuses_a_closed_stage_and_a_foreign_act(self):
+        n = new_work_order("A")
+        s1 = journal.create_stage(n, "S1", "b")
+        s2 = journal.create_stage(n, "S2", "b")
+        self.assertNotEqual(cli_exit("stage-close", s1, "--act-file",
+                                     self.act_file("Verdict: accepted")), 0)
+        self.assertEqual(journal.open_stages(n), [s1, s2])
+        journal.bd(["close", s1])
+        self.assertNotEqual(cli_exit("stage-close", s1, "--act-file", self.act_file(
+            "[stage closed without acceptance]\nWho: x")), 0)
+        self.assertEqual(journal.acts(s1, "acceptance"), [])
+
+    def test_stop_closes_after_a_closed_stage(self):
+        n = new_work_order("A")
+        s1 = journal.create_stage(n, "S1", "b")
+        self.assertEqual(journal.all_stages(n), [s1])
+        cli("stage-close", s1, "--act-file", self.act_file(
+            "[stage closed without acceptance]\nWho: x"))
+        self.assertEqual(journal.open_stages(n), [])
+        self.assertEqual(journal.close_work_order(n, "every stage accepted or closed")["closed"], [n])
+
+    def test_stop_with_no_stages_says_so(self):
+        n = new_work_order("A")
+        self.assertEqual(journal.all_stages(n), [])
+
     def test_open_stages_in_creation_order(self):
         # bd lists children newest first; the first open stage is the current one (R56)
         n = new_work_order("A")

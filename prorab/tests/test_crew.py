@@ -54,6 +54,8 @@ class FakeJournal:
         self.closed_work_orders = []
         self.open_gates = set()
         self.close_fails = False
+        self.already_closed = False
+        self.closed_stages = {}
         self.shift = {"usd": 0.0, "work_orders": {}, "research": {}, "foreman_usd": 0.0}
 
     def bump_restarts(self, work_order):
@@ -85,13 +87,16 @@ class FakeJournal:
     def open_stages(self, work_order):
         return list(self.stages.get(work_order, []))
 
+    def all_stages(self, work_order):
+        return list(self.stages.get(work_order, [])) + list(self.closed_stages.get(work_order, []))
+
     def close_work_order(self, work_order, reason):
         if self.close_fails:
             err = real_journal.JournalError("bd close failed: open gate")
             err.closed = ["N1.2"]
             raise err
         self.closed_work_orders.append((work_order, reason))
-        return {"work_order": work_order, "closed": [], "already": False}
+        return {"work_order": work_order, "closed": [], "already": self.already_closed}
 
     def has_open_gate(self, bead):
         return bead in self.open_gates
@@ -1469,6 +1474,91 @@ class TestGit(CrewBase):
         self.assertEqual(crew.cleanup(repo, "N1"), {"status": "kept", "reason": "unmerged", "work_order_closed": False})
         self.assertTrue(os.path.isdir(wt))
 
+    def drop_worktree(self, repo, wt):
+        """What Claude Code does on exit for a no-change worktree: removes it, leaves the branch."""
+        git(repo, "worktree", "remove", wt)
+
+    def test_cleanup_gone_worktree_deletes_the_merged_branch(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.drop_worktree(repo, wt)
+        self.j.issue_set("N1", "issued", branch="prorab/N1")
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "removed")
+        self.assertIsNone(r["worktree"])
+        self.assertEqual(r["branch"], "prorab/N1")
+        self.assertTrue(r["work_order_closed"])
+        self.assertEqual(self.j.closed_work_orders, [("N1", "the branch merged")])
+        self.assertEqual(git(repo, "branch", "--list", "prorab/N1").strip(), "")
+        self.assertEqual(self.j.issue("N1")["decided"], "merged")
+
+    def test_cleanup_gone_worktree_finds_the_default_named_branches(self):
+        for branch in ("prorab/N1", "worktree-prorab-N1"):
+            repo = self.make_repo()
+            git(repo, "branch", branch)   # no record: both names are tried
+            r = crew.cleanup(repo, "N1")
+            self.assertEqual((r["status"], r["branch"]), ("removed", branch))
+            self.assertEqual(git(repo, "branch", "--list", branch).strip(), "")
+            shutil.rmtree(repo)
+
+    def test_cleanup_gone_worktree_prunes_a_stale_entry(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        shutil.rmtree(wt)   # the directory is gone, git still lists it
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual((r["status"], r["worktree"]), ("removed", None))
+        self.assertEqual(git(repo, "branch", "--list", "prorab/N1").strip(), "")
+        self.assertNotIn("prorab-N1", git(repo, "worktree", "list"))
+
+    def test_cleanup_gone_worktree_on_a_closed_work_order(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.drop_worktree(repo, wt)
+        self.j.already_closed = True
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "removed")
+        self.assertEqual(r["work_order_closed"], "already")
+        self.assertEqual(git(repo, "branch", "--list", "prorab/N1").strip(), "")
+
+    def test_cleanup_gone_worktree_keeps_an_unmerged_branch(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.commit(wt, "g.txt", "1\n", "one")
+        self.drop_worktree(repo, wt)
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r, {"status": "kept", "reason": "unmerged", "work_order_closed": False})
+        self.assertIn("prorab/N1", git(repo, "branch", "--list", "prorab/N1"))
+        self.assertEqual(self.j.closed_work_orders, [])
+
+    def test_cleanup_gone_worktree_drops_an_unmerged_branch_on_a_drop_decision(self):
+        repo = self.make_repo()
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        self.commit(wt, "g.txt", "1\n", "one")
+        self.drop_worktree(repo, wt)
+        self.j.add_act("N1", "answer", crew.DROP_MARKER + " (customer's words)")
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual((r["status"], r["worktree"], r["branch"]), ("removed", None, "prorab/N1"))
+        self.assertEqual(self.j.closed_work_orders, [("N1", "dropped by the customer")])
+        self.assertEqual(git(repo, "branch", "--list", "prorab/N1").strip(), "")
+
+    def test_cleanup_gone_worktree_neither_is_absent(self):
+        repo = self.make_repo()
+        self.assertEqual(crew.cleanup(repo, "N1"), {"status": "absent", "work_order_closed": False})
+
+    def test_cleanup_gone_worktree_never_deletes_the_checked_out_branch(self):
+        repo = self.make_repo()
+        git(repo, "checkout", "-q", "-b", "prorab/N1")   # merged into main, but checked out
+        r = crew.cleanup(repo, "N1")
+        self.assertEqual(r["status"], "absent")
+        self.assertIn("prorab/N1", git(repo, "branch", "--list", "prorab/N1"))
+
+    def test_cleanup_main_checkout_has_no_branch_step(self):
+        repo = self.make_repo()
+        git(repo, "branch", "prorab/N1")
+        self.j.issue_set("N1", "issued", main_checkout=True, branch="prorab/N1")
+        self.assertEqual(crew.cleanup(repo, "N1"), {"status": "absent", "work_order_closed": False})
+        self.assertIn("prorab/N1", git(repo, "branch", "--list", "prorab/N1"))
+
     def test_drop_marker_matches_acts_md(self):
         self.assertEqual(crew._template("Customer decision to drop the branch"),
                          crew.DROP_MARKER)
@@ -2762,6 +2852,28 @@ class TestStop(CrewBase):
             self.assertNotIn("crew.a1." + field, self.j.kv)
 
 
+class TestStopCloses(CrewBase):
+    def stop_it(self):
+        self.route("agent list", ok({"agents": []}))
+        return crew.stop("a1", "N1")
+
+    def test_stop_closes_after_a_closed_stage(self):
+        self.j.closed_stages["N1"] = ["N1.1"]   # accepted or closed by stage-close: none open
+        r = self.stop_it()
+        self.assertTrue(r["work_order_closed"])
+        self.assertEqual(self.j.closed_work_orders, [("N1", "every stage accepted or closed")])
+
+    def test_stop_with_no_stages_says_so(self):
+        r = self.stop_it()
+        self.assertTrue(r["work_order_closed"])
+        self.assertEqual(self.j.closed_work_orders, [("N1", "no stages")])
+
+    def test_stop_leaves_an_open_stage_open(self):
+        self.j.stages["N1"] = ["N1.1"]
+        self.assertFalse(self.stop_it()["work_order_closed"])
+        self.assertEqual(self.j.closed_work_orders, [])
+
+
 class TestStartPanes(CrewBase):
     """F2: a failed start's pane is reused or closed, never left empty."""
 
@@ -3429,8 +3541,9 @@ class TestStopClosesPane(CrewBase):
         return crew.stop("a1", "N1")
 
     def test_stop_closes_the_work_order_when_every_stage_is_accepted(self):
+        self.j.closed_stages["N1"] = ["N1.1"]
         r = self.stop_n1()
-        self.assertEqual(self.j.closed_work_orders, [("N1", "every stage accepted")])
+        self.assertEqual(self.j.closed_work_orders, [("N1", "every stage accepted or closed")])
         self.assertTrue(r["work_order_closed"])
 
     def test_stop_keeps_a_work_order_with_an_open_stage_open(self):

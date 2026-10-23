@@ -22,6 +22,20 @@ Did not match: <claim against fact, or nothing>
 Answer to the crew: <next stage within the estimate and clearances | fixes | work order closed>
 ```
 
+A stage another crew or the customer did is closed with `journal.py stage-close` before `crew.py stop`.
+
+## Stage closed without acceptance
+
+Written when a stage cannot be accepted because someone else did its work (another crew, the customer, a merge). Put the filled block into a file and record it with `journal.py stage-close STAGE --act-file FILE`: it records the block as the stage's acceptance act and closes the stage, which need not have been started. The first line must stay as it is. Then `crew.py stop` closes the work order once no stage and no gate is open.
+
+```
+[stage closed without acceptance]
+Stage: <stage id> <title>; work order <id>
+Who did the work: <the customer, another crew, which work order>
+Where: <the commit or merge, with the SHA and branch>
+Evidence checked: <command and output, files read>
+```
+
 ## Handover act
 
 The crew writes it as its last message, at the foreman's request (section Handover request), and ends it with the line HANDOVER READY. `crew.py complete_handover` saves it as a `handover` act on the work order without the marker line and appends two blocks the crew does not write: "Facts at handover" (`git status --short`, the branch's commits since the base, the open stages' statuses) and `Spend:` (`journal.spend_block`).

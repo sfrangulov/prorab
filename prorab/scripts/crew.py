@@ -1717,11 +1717,11 @@ def _close_work_order(work_order, reason):
     """The fields a result gains from closing the work order; a refused close is reported,
     never raised (the effects before it are already done)."""
     try:
-        journal.close_work_order(work_order, reason)
+        closed = journal.close_work_order(work_order, reason) or {}
     except JournalError as e:
         return {"work_order_closed": False, "close_error": str(e),
                 "closed": list(e.closed or [])}  # the beads closed before the failure
-    return {"work_order_closed": True}
+    return {"work_order_closed": "already" if closed.get("already") else True}
 
 
 def _ask_end_shells(name, work_order, path):
@@ -1766,7 +1766,8 @@ def stop(name, work_order, timeout_s=60, poll_s=1):
     res = {"status": "stopped", "tokens": tokens, "pane_closed": pane_closed,
            "work_order_closed": False}
     if not journal.open_stages(work_order) and not journal.has_open_gate(work_order):
-        res.update(_close_work_order(work_order, "every stage accepted"))
+        res.update(_close_work_order(work_order, "every stage accepted or closed"
+                                     if journal.all_stages(work_order) else "no stages"))
     return res
 
 
@@ -1777,25 +1778,74 @@ def _default_branch(site_path):
     return _git_soft(["rev-parse", "--abbrev-ref", "HEAD"], site_path).stdout.strip()
 
 
+def _is_merged(site_path, branch):
+    out = _git_soft(["branch", "--merged", _default_branch(site_path)], site_path).stdout
+    return branch in [ln.strip().lstrip("*+ ").strip() for ln in out.splitlines()]
+
+
+def _gone_branch(site_path, work_order):
+    """The work order's branch when its worktree is gone (Claude Code removes a no-change
+    worktree on exit and leaves the branch): the recorded one, else `prorab/<id>`, else
+    `worktree-prorab-<id>`, the first that exists. Never the default branch or one checked
+    out anywhere."""
+    default = _default_branch(site_path)
+    checked_out = {w["branch"] for w in _worktrees(site_path)}
+    for b in ((journal.issue(work_order) or {}).get("branch"), "prorab/%s" % work_order,
+              "worktree-prorab-%s" % work_order):
+        if not b or b in ("main", "master", default) or b in checked_out:
+            continue
+        if _git_soft(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % b],
+                     site_path).returncode == 0:
+            return b
+    return None
+
+
+def _cleanup_gone_worktree(site_path, work_order, dropped):
+    """`cleanup` for a work order without a worktree: its branch is removed when merged (or
+    dropped by the customer) and the work order closed; None when there is no branch."""
+    _git_soft(["worktree", "prune"], site_path)
+    branch = _gone_branch(site_path, work_order)
+    if branch is None:
+        return None
+    merged = _is_merged(site_path, branch)
+    if not (merged or dropped):
+        return {"status": "kept", "reason": "unmerged", "work_order_closed": False}
+    p = _git_soft(["branch", "-D" if dropped and not merged else "-d", branch], site_path)
+    if p.returncode != 0:
+        return {"status": "kept", "reason": "branch", "detail": p.stderr.strip(),
+                "work_order_closed": False}
+    rec = journal.issue(work_order)
+    if rec:
+        journal.issue_set(work_order, rec.get("state") or "issued",
+                          decided="merged" if merged else "dropped")
+    res = {"status": "removed", "worktree": None, "branch": branch}
+    res.update(_close_work_order(
+        work_order, "the branch merged" if merged else "dropped by the customer"))
+    return res
+
+
 def cleanup(site_path, work_order):
     close_start_panes(work_order)
     for key in list(journal.kv_all()):   # a dropped work order leaves no consent watch behind
         if key.startswith("consent.%s." % work_order):
             journal.kv_clear(key)
     # a main-checkout work order has no worktree and no branch of its own: nothing to remove
-    wt = None if (journal.issue(work_order) or {}).get("main_checkout") \
-        else _find_worktree(site_path, work_order)
+    main_checkout = (journal.issue(work_order) or {}).get("main_checkout")
+    wt = None if main_checkout else _find_worktree(site_path, work_order)
     dropped = any(a.startswith(DROP_MARKER) for a in journal.acts(work_order, "answer"))
+    if wt is not None and not os.path.isdir(wt["path"]):
+        wt = None   # git still lists a directory that is gone: the prune below forgets it
     if wt is None:
+        if not main_checkout:
+            res = _cleanup_gone_worktree(site_path, work_order, dropped)
+            if res is not None:
+                return res
         res = {"status": "absent", "work_order_closed": False}
         if dropped:
             res.update(_close_work_order(work_order, "dropped by the customer"))
         return res
     branch = wt["branch"]
-    merged = False
-    if branch:
-        out = _git_soft(["branch", "--merged", _default_branch(site_path)], site_path).stdout
-        merged = branch in [ln.strip().lstrip("*+ ").strip() for ln in out.splitlines()]
+    merged = bool(branch) and _is_merged(site_path, branch)
     if not (merged or dropped):
         return {"status": "kept", "reason": "unmerged", "work_order_closed": False}
     rm = ["worktree", "remove"] + (["--force"] if dropped and not merged else []) + [wt["path"]]

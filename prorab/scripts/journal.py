@@ -264,6 +264,27 @@ def accept_stage(stage, act):
     return minutes
 
 
+STAGE_CLOSED_MARKER = "[stage closed without acceptance]"
+
+
+def close_stage_unaccepted(stage, act):
+    """Record the act (kind `acceptance`, starting with `STAGE_CLOSED_MARKER`) on a stage
+    someone else did the work of and close it. Refused unless the bead is an open stage of a
+    work order; the stage need not have been started."""
+    if not act.startswith(STAGE_CLOSED_MARKER):
+        raise JournalError("the act must start with %s" % STAGE_CLOSED_MARKER)
+    item = _show(stage)
+    parent = item.get("parent") or next(
+        (d.get("id") for d in item.get("dependencies") or []
+         if d.get("dependency_type") == "parent-child"), None)
+    if not parent or WORK_ORDER_LABEL not in (_show(parent).get("labels") or []):
+        raise JournalError("%s is not a stage of a work order" % stage)
+    if item.get("status") == "closed":
+        raise JournalError("stage %s is already closed" % stage)
+    add_act(stage, "acceptance", act)
+    _run(["close", stage])
+
+
 def durations(kind):
     """Actual durations (minutes) of closed stages of the kind, oldest first."""
     items = bd(["list", "--label", "type:%s" % kind, "--status", "closed", "--limit", "0"])
@@ -449,6 +470,12 @@ def open_stages(work_order):
     newest first); the first one is the current stage."""
     items = bd(["list", "--parent", work_order, "--all", "--limit", "0"])
     return [c["id"] for c in sorted(items, key=_creation_order) if c.get("status") != "closed"]
+
+
+def all_stages(work_order):
+    """Ids of all the work order's stages, closed or not, in creation order."""
+    items = bd(["list", "--parent", work_order, "--all", "--limit", "0"])
+    return [c["id"] for c in sorted(items, key=_creation_order)]
 
 
 def working_work_orders():
@@ -1287,6 +1314,8 @@ def main(argv=None):
         sub.add_parser(name).add_argument("bead")
     p = sub.add_parser("stage-accept")
     p.add_argument("stage"); p.add_argument("act")
+    p = sub.add_parser("stage-close")
+    p.add_argument("stage"); p.add_argument("--act-file", required=True)
     sub.add_parser("durations").add_argument("kind")
     p = sub.add_parser("override")
     osub = p.add_subparsers(dest="ovcmd", required=True)
@@ -1405,6 +1434,14 @@ def main(argv=None):
     if a.cmd == "stage-accept":
         accept_stage(a.stage, a.act)
         return _emit(stage_info(a.stage))
+    if a.cmd == "stage-close":
+        with open(a.act_file, encoding="utf-8") as fh:
+            act = fh.read().strip()
+        try:
+            close_stage_unaccepted(a.stage, act)
+        except JournalError as e:
+            raise SystemExit(str(e))
+        return _emit({"ok": True, "stage": a.stage})
     if a.cmd == "durations":
         return _emit(durations(a.kind))
     if a.cmd == "override":

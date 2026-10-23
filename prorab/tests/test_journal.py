@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -238,6 +239,17 @@ class TestJournal(JournalBase):
         self.assertEqual(self.cli_restarts(n, "--bump"), {"restarts": 1})
         self.assertEqual(self.cli_restarts(n, "--bump"), {"restarts": 2})
         self.assertEqual(journal.kv_get("restarts.%s" % n), "2")
+
+    def test_concurrent_registers_keep_every_crew(self):
+        os.environ["PRORAB_CACHE"] = os.path.join(self.tmp.name, "cache")
+        self.addCleanup(os.environ.pop, "PRORAB_CACHE", None)
+        code = ("import sys; sys.path.insert(0, %r); import journal; "
+                "journal.register_crew(sys.argv[1])" % SCRIPTS_DIR)
+        names = ["c%d" % i for i in range(5)]
+        procs = [subprocess.Popen([sys.executable, "-c", code, n]) for n in names]
+        for p in procs:
+            self.assertEqual(p.wait(timeout=120), 0)
+        self.assertEqual(sorted(journal.crews()), names)
 
     def test_crews_registry(self):
         self.assertEqual(journal.crews(), [])

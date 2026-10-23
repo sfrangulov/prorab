@@ -5,12 +5,16 @@ Every bd call runs with BEADS_DIR set (default ~/projects/prorab/.beads, overrid
 with PRORAB_BEADS_DIR) and with the journal's parent directory as cwd.
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
+import functools
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +25,48 @@ ACT_KINDS = ("acceptance", "handover", "shift", "answer")
 WORK_ORDER_LABEL = "prorab:work-order"
 SPENT_KEYS = ("sessions", "runs", "tokens")
 ESTIMATE_KEYS = ("usd", "heavy_runs_per_stage")
+
+
+_THREAD_LOCK = threading.RLock()
+_HELD = [0, None]  # how deep this process holds the file lock, and its descriptor
+
+
+def lock_path():
+    base = os.environ.get("PRORAB_CACHE") or os.path.expanduser("~/.cache/prorab")
+    return os.path.join(base, "journal.lock")
+
+
+@contextlib.contextmanager
+def _locked():
+    """Serialise the journal's read-modify-write sequences across scripts (an `fcntl` lock
+    on a file in the cache dir; re-entrant within a process)."""
+    with _THREAD_LOCK:
+        if _HELD[0] == 0:
+            path = lock_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except BaseException:
+                os.close(fd)
+                raise
+            _HELD[1] = fd
+        _HELD[0] += 1
+        try:
+            yield
+        finally:
+            _HELD[0] -= 1
+            if _HELD[0] == 0:
+                fd, _HELD[1] = _HELD[1], None
+                os.close(fd)  # closing releases the flock
+
+
+def _serialized(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _locked():
+            return func(*args, **kwargs)
+    return wrapper
 
 
 class JournalError(Exception):
@@ -514,6 +560,7 @@ def set_machine(**kw):
         kv_set("machine.%s" % k, v)
 
 
+@_serialized
 def spend(work_order, sessions=0, runs=0, tokens=0):
     for name, n in (("sessions", sessions), ("runs", runs), ("tokens", tokens)):
         if not n:
@@ -621,6 +668,7 @@ def _foreman_sessions(kv):
     return [x for x in v.split(",") if x] if v else []
 
 
+@_serialized
 def add_foreman_session(session_id):
     """A foreman handover adds the new session; the shift's spend is kept."""
     names = _foreman_sessions(kv_all())
@@ -798,6 +846,7 @@ def iterations(stage, kind):
     return _kv_int(_iter_key(stage, kind))
 
 
+@_serialized
 def bump_iterations(stage, kind):
     key = _iter_key(stage, kind)
     n = _kv_int(key) + 1
@@ -860,6 +909,7 @@ def issue(work_order):
     return data if isinstance(data, dict) else None
 
 
+@_serialized
 def issue_set(work_order, state, **fields):
     """Record the issue state of a work order; fields merge into the existing record."""
     if state not in ISSUE_STATES:
@@ -1140,6 +1190,7 @@ def consent_done(work_order, kind, by="monitor", gate=None):
             "resolved": resolved}
 
 
+@_serialized
 def bump_restarts(work_order):
     n = _kv_int("restarts.%s" % work_order) + 1
     kv_set("restarts.%s" % work_order, n)
@@ -1158,12 +1209,14 @@ def _save_crews(names):
         kv_clear("crews.active")
 
 
+@_serialized
 def register_crew(name):
     names = crews()
     if name not in names:
         _save_crews(names + [name])
 
 
+@_serialized
 def unregister_crew(name):
     _save_crews([n for n in crews() if n != name])
 

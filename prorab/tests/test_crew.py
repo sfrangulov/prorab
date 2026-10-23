@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import os
 import re
@@ -589,7 +590,7 @@ class TestStart(CrewBase):
         self.j.files = {"N1": ["x"]}
         self.routes_for_start()
         r = crew.start(repo, "N1", "a1", "w:p1")
-        m = re.match(r"^agent start a1 --kind claude --pane w:p9 -- --session-id (\S+) "
+        m = re.match(r"^agent start a1 --kind claude --pane w:p9 --timeout 90000 -- --session-id (\S+) "
                      r"--add-dir (\S+) -w prorab-N1$", self.start_line())
         self.assertIsNotNone(m, self.start_line())
         uuid_str = m.group(1)
@@ -1115,7 +1116,7 @@ class TestHandover(CrewBase):
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         r = crew.complete_handover("a1", "N1", "Work order text", timeout_s=2, poll_s=0.01)
         self.assertEqual(r["status"], "restarted")
-        self.assertTrue(any(c.startswith("agent start a1 --kind claude --pane w:p9 -- ")
+        self.assertTrue(any(c.startswith("agent start a1 --kind claude --pane w:p9 --timeout 90000 -- ")
                             for c in self.calls()))
 
     def test_complete_handover_sequence(self):
@@ -1132,7 +1133,7 @@ class TestHandover(CrewBase):
         i_exit = calls.index("agent prompt a1 /exit --wait --until working --until done --until blocked --timeout 60000")
         i_cd = calls.index("pane run w:p9 cd %s" % self.wt)
         i_start = next(i for i, c in enumerate(calls)
-                       if c.startswith("agent start a1 --kind claude --pane w:p9 -- "))
+                       if c.startswith("agent start a1 --kind claude --pane w:p9 --timeout 90000 -- "))
         i_prompt = next(i for i, c in enumerate(calls)
                         if c.startswith("agent prompt a1 Read the file"))
         self.assertTrue(i_exit < i_cd < i_start < i_prompt)
@@ -1415,7 +1416,7 @@ class TestHandover(CrewBase):
         self.route("agent prompt a1", ok({"agent": {"agent_status": "working"}}))
         self.go()
         line = [c for c in self.calls() if c.startswith("agent start a1")][0]
-        m = re.match(r"^agent start a1 --kind claude --pane w:p9 -- --session-id (\S+) "
+        m = re.match(r"^agent start a1 --kind claude --pane w:p9 --timeout 90000 -- --session-id (\S+) "
                      r"--add-dir (\S+)$", line)
         self.assertIsNotNone(m, line)
         self.assertEqual(m.group(2), os.path.join(self.home, ".cache", "prorab", "work-orders"))
@@ -2057,7 +2058,7 @@ class TestRestart(CrewBase):
     def test_restart_resumes_below_soft(self):
         self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
         self.assertEqual(self.go()["status"], "resumed")
-        self.assertEqual(self.starts(), ["agent start a1 --kind claude --pane w:p9 -- "
+        self.assertEqual(self.starts(), ["agent start a1 --kind claude --pane w:p9 --timeout 90000 -- "
                                          "--resume old-session --add-dir %s" % self.files_dir()])
         self.assertEqual(self.j.restarts, {"N1": 1})
         self.assertIn("agent prompt a1 Continue from where you stopped. --wait --until working "
@@ -2073,7 +2074,7 @@ class TestRestart(CrewBase):
         self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
         self.assertEqual(self.go()["status"], "resumed")
         self.assertEqual(self.starts(), [
-            "agent start a1 --kind claude --pane w:p9 -- --resume old-session --add-dir %s "
+            "agent start a1 --kind claude --pane w:p9 --timeout 90000 -- --resume old-session --add-dir %s "
             "--settings %s" % (self.files_dir(), self.settings_path())])
         self.assertTrue(os.path.isfile(self.settings_path()))
         os.remove(self.settings_path())
@@ -2104,7 +2105,7 @@ class TestRestart(CrewBase):
         self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
         self.assertEqual(self.go()["status"], "resumed")
         self.assertEqual(self.starts(), [
-            "agent start a1 --kind claude --pane w:p9 -- --resume old-session --add-dir %s "
+            "agent start a1 --kind claude --pane w:p9 --timeout 90000 -- --resume old-session --add-dir %s "
             "--settings %s" % (self.files_dir(), merge)])
         with open(merge, encoding="utf-8") as fh:
             self.assertIn("guard --merge-branch prorab/x", fh.read())
@@ -2139,7 +2140,7 @@ class TestRestart(CrewBase):
         self.j.add_act("N1", "handover", "Act one")
         self.assertEqual(self.go()["status"], "restarted")
         (line,) = self.starts()
-        m = re.match(r"^agent start a1 --kind claude --pane w:p9 -- --session-id (\S+) "
+        m = re.match(r"^agent start a1 --kind claude --pane w:p9 --timeout 90000 -- --session-id (\S+) "
                      r"--add-dir (\S+)$", line)
         self.assertIsNotNone(m, line)
         self.assertNotEqual(m.group(1), "old-session")
@@ -2245,7 +2246,7 @@ class TestRestart(CrewBase):
         calls = self.calls()
         i_cd = calls.index("pane run w:p9 cd %s" % self.wt)
         i_start = next(i for i, c in enumerate(calls)
-                       if c.startswith("agent start a1 --kind claude --pane w:p9 -- --resume "))
+                       if c.startswith("agent start a1 --kind claude --pane w:p9 --timeout 90000 -- --resume "))
         self.assertTrue(i_cd < i_start)
         self.assertEqual(self.j.restarts, {"N1": 1})
 
@@ -2548,6 +2549,15 @@ class TestCheckReport(CrewBase):
         self.has(self.problems(text=self.passport_report("")), "missing section: For the passport")
         self.has(self.problems(text=self.passport_report("## For the passport\n")),
                  "For the passport: write none or list each note")
+
+    def test_check_report_refuses_a_placeholder_item_in_stubs_and_the_passport(self):
+        r = self.problems(text=self.stubs_report("## Stubs\n- <C1: what is hardcoded>\n"))
+        self.has(r, "template placeholder")
+        r = self.problems(text=self.passport_report("## For the passport\n- <a note>\n"))
+        self.has(r, "template placeholder")
+        r = self.check(text=self.passport_report(
+            "## For the passport\n- <a note>\n- the first run is slow\n"))
+        self.assertEqual(r["passport_notes"], ["the first run is slow"])
 
     def test_check_report_returns_the_passport_notes(self):
         for body in ("## For the passport\n- none\n", "## For the passport\nNone.\n"):
@@ -3955,7 +3965,7 @@ class TestNewSiteTrust(CrewBase):
                          (["enter"], "new-site trust", "w:p9", True))
         start = [c for c in self.calls() if c.startswith("agent start")]
         self.assertEqual(len(start), 1)
-        self.assertTrue(start[0].startswith("agent start %s --kind claude --pane w:p9 -- "
+        self.assertTrue(start[0].startswith("agent start %s --kind claude --pane w:p9 --timeout 90000 -- "
                                             "--session-id " % self.TRUST_NAME))
         self.assertNotIn(" -w ", start[0])
         calls = self.calls()
@@ -4614,7 +4624,7 @@ class TestMainCheckout(CrewBase):
         self.assertEqual(r["status"], "started")
         self.assertEqual((r["worktree"], r["branch"], r["main_checkout"], r["merge_branch"]),
                          (self.repo, "main", True, "prorab/x"))
-        m = re.match(r"^agent start a1 --kind claude --pane w:p9 -- --session-id (\S+) "
+        m = re.match(r"^agent start a1 --kind claude --pane w:p9 --timeout 90000 -- --session-id (\S+) "
                      r"--add-dir (\S+) --settings (\S+)$", self.start_line())
         self.assertIsNotNone(m, self.start_line())
         self.assertEqual(m.group(2), os.path.join(self.home, ".cache", "prorab", "work-orders"))
@@ -4880,6 +4890,121 @@ class TestMainCheckout(CrewBase):
                                          {"usd": 0}, 1, 0.01)
         self.assertEqual((r["status"], r["step"]), ("restart_failed", "settings"))
         self.assertEqual([c for c in self.calls() if c.startswith("agent start")], before)
+
+
+class TestFinalMinors(CrewBase):
+    """The final review's cheap Minors M7, M8, M9, M13, M14 (fix wave 1, 15.10)."""
+
+    def touch_stop(self):
+        path = os.path.join(self.home, ".cache", "prorab", "STOP")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w"):
+            pass
+
+    def test_ask_predecessor_is_refused_under_the_emergency_stop(self):
+        self.touch_stop()
+        self.j.issue_set("N1", "issued", worktree=os.path.join(self.dir, "wt"))
+        with mock.patch.object(crew.subprocess, "run") as run:
+            r = crew.ask_predecessor("N1", "sess-9", os.path.join(self.dir, "wt"), "q")
+        self.assertEqual(r, "emergency_stop")
+        run.assert_not_called()
+        self.assertEqual(self.j.spent, [])
+
+    def test_agent_start_asks_herdr_for_90_seconds(self):
+        self.j.files = {"N1": ["x"]}
+        self.route("agent start a1", ok({}))
+        calls = []
+        real = herdr_cli.run
+
+        def spy(args, **kw):
+            calls.append(list(args))
+            return real(args, **kw)
+        with mock.patch.object(herdr_cli, "run", spy):
+            crew._start_session("a1", "w:p9", (("--session-id", "s"),))
+        (start,) = [c for c in calls if c[:2] == ["agent", "start"]]
+        i = start.index("--timeout")
+        self.assertEqual(start[i + 1], "90000")
+        self.assertLess(i, start.index("--"))
+
+    def test_a_restart_start_that_times_out_but_has_an_agent_goes_on(self):
+        self.route("agent start a1", err("timeout"), exit_code=1)
+        self.route("pane read w:p9 --source visible", fixture("composer", "empty.txt"))
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.assertEqual(crew._start_session("a1", "w:p9", (("--session-id", "s"),)), (None, ""))
+
+    def test_a_restart_start_that_times_out_without_an_agent_fails_as_before(self):
+        self.route("agent start a1", err("timeout"), exit_code=1)
+        self.route("pane read w:p9 --source visible", "~/projects/demo-app  main\n$\n")
+        self.route("agent list", ok({"agents": []}))
+        failed, _ = crew._start_session("a1", "w:p9", (("--session-id", "s"),))
+        self.assertEqual((failed["status"], failed["step"]), ("restart_failed", "agent_start"))
+
+    def test_a_restart_start_that_times_out_on_a_dialog_names_the_dialog(self):
+        self.route("agent start a1", err("timeout"), exit_code=1)
+        self.route("pane read w:p9 --source visible", fixture("consent", "trust.txt"))
+        self.route("agent list", ok({"agents": []}))
+        failed, _ = crew._start_session("a1", "w:p9", (("--session-id", "s"),))
+        self.assertEqual(failed, {"status": "needs_trust", "pane_id": "w:p9"})
+
+    def test_answer_records_the_act_only_when_the_text_was_accepted(self):
+        self.j.kv["crew.a1.work_order"] = "N1"
+        self.route("agent list", ok({"agents": [agent_entry(status="working")]}))
+        self.route("agent read a1 --source visible", "just a prompt\n")
+        self.route("agent prompt a1", err("agent_prompt_stalled"), exit_code=1)
+        self.route("agent get a1", ok({"agent": {"agent_status": "working"}}))
+        self.assertEqual(crew.answer("a1", text="go on"), "stalled")
+        self.assertEqual(self.j.act_log, [])
+
+    def test_the_exit_dialog_needs_its_rule_or_its_footer(self):
+        quoted = ("Exiting worktree session\n 1. Keep worktree\n 2. Remove worktree\n")
+        self.assertIsNone(crew.exit_dialog(quoted))
+        self.assertIsNone(crew.exit_dialog("Background work is running\n 1. Exit and stop\n"))
+        self.assertEqual(crew.exit_dialog(quoted + " Enter to confirm \u00b7 Esc to cancel\n"),
+                         "worktree")
+        self.assertEqual(crew.exit_dialog("\u2594" * 40 + "\n" + quoted), "worktree")
+
+    def test_a_stalled_exit_clears_the_composer(self):
+        wt = self.real_wt()
+        self.j.kv.update({"crew.a1.pane": "w:p9", "crew.a1.work_order": "N1",
+                          "crew.a1.worktree": wt})
+        self.j.active = ["a1"]
+        typed = fixture("composer", "empty.txt").replace("\u276f", "\u276f\u00a0/exit", 1)
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+        self.route("pane read w:p9 --source visible", typed)
+        self.route("agent prompt a1", err("agent_prompt_stalled"), exit_code=1)
+        self.route("pane send-keys w:p9", "")
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9")}))
+        self.assertEqual(crew._exit("a1", "w:p9", 0.05, 0.01), "not_exited")
+        self.assertIn("pane send-keys w:p9 ctrl+u", self.calls())
+
+    def test_main_returns_a_json_error_for_oserror_and_keyerror(self):
+        for exc in (OSError("disk"), KeyError("pane")):
+            err_out = io.StringIO()
+            with mock.patch.object(crew, "state", side_effect=exc), \
+                    mock.patch.object(self.j, "JournalError", real_journal.JournalError,
+                                      create=True), \
+                    mock.patch("sys.stderr", err_out):
+                code = crew.main(["state", "a1"])
+            self.assertEqual(code, 1)
+            self.assertIn("error", json.loads(err_out.getvalue()))
+
+    def test_check_report_cli_falls_back_to_the_crews_transcript(self):
+        wt = os.path.join(self.dir, "wt-cli")
+        os.makedirs(wt)
+        self.j.kv["crew.a1.worktree"] = wt
+        self.j.kv["stage.N1.1.started_at"] = 100
+        self.j.estimates["N1"] = {"heavy_runs_per_stage": 4}
+        self.j.bd = lambda args, json_out=True: [{"description": "C1. a", "labels": []}]
+        with mock.patch.object(crew.slots, "runs", return_value=0), \
+                mock.patch.object(crew, "summary", return_value="r"), \
+                mock.patch.object(crew.transcript, "session_paths", return_value=[]), \
+                mock.patch.object(crew, "_transcript_for", return_value="/home/user/cur.jsonl"), \
+                mock.patch.object(crew.transcript, "guard_refusals", return_value=1) as refs, \
+                mock.patch.object(crew, "check_report", return_value={"ok": True}) as chk:
+            crew._check_report_cli("a1", "N1", stage="N1.1")
+        refs.assert_called_once_with("/home/user/cur.jsonl", since=100.0)
+        kw = chk.call_args.kwargs
+        self.assertEqual((kw["guard_counted"], kw["guard_unverifiable"]), (1, None))
 
 
 class TestCli(unittest.TestCase):

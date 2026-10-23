@@ -134,7 +134,9 @@ def guard_refusals(path, since=None):
     `GUARD_REFUSAL`, stamped at or after `since` (epoch seconds). A tool result that merely
     quotes the text (a Read of the work order) is no refusal. An entry with a missing or
     unparseable stamp counts: an undercount would let a hidden refusal pass. Counted per
-    entry: the line repeats the text in `toolUseResult`. Raises OSError."""
+    entry: the line repeats the text in `toolUseResult`. The `is_error` result format is
+    Claude Code's own and is pinned by the fixture `transcript_guard_refusal.jsonl`: a change
+    there shows as that test failing. Raises OSError."""
     n = 0
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:

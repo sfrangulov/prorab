@@ -276,6 +276,10 @@ def deliver(name, text, work_order=None):
     return result
 
 
+# herdr waits 30 s for the agent's first prompt by default; the subprocess bound is 90 s
+_AGENT_START_TIMEOUT = ["--timeout", "90000"]
+
+
 def _claude_args(*pairs):
     return ["--"] + [x for pair in pairs for x in pair]
 
@@ -635,6 +639,7 @@ def start(site_path, work_order, name, caller_pane, main_checkout=False):
                       sessions=earlier + [session_id], site=site_path, **mode)
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
+                      + _AGENT_START_TIMEOUT
                       + _claude_args(("--session-id", session_id), ("--add-dir", _files_dir()),
                                      *(() if main_checkout
                                        else (("-w", "prorab-%s" % work_order),)),
@@ -839,7 +844,8 @@ def _new_site_trust(site_path, work_order, pane):
                       sessions=list(rec.get("sessions") or []) + [session_id])
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
-                      + _claude_args(("--session-id", session_id)), timeout_s=90)
+                      + _AGENT_START_TIMEOUT + _claude_args(("--session-id", session_id)),
+                      timeout_s=90)
     except herdr_cli.HerdrError as e:
         if e.code not in ("agent_not_ready", "timeout"):
             raise
@@ -1107,12 +1113,20 @@ def accept(work_order, stage, act_text):
 _OPTION_ONE = re.compile(r"^\s*(?:\u276f\s*)?1\.\s")  # the first row of a numbered dialog
 
 
+_EXIT_RULE = "\u2594"  # the heavy rule above Claude Code's dialogs
+_EXIT_FOOTER = "enter to confirm"
+
+
 def exit_dialog(visible):
     """The dialog Claude Code shows after `/exit`, read in the bottom block only: "worktree"
     (the keep-or-remove question of a `-w` session), "bg_work" (background work is running),
-    else None. Words above the bottom block are no dialog."""
+    else None. Words above the bottom block are no dialog, nor are words without the dialog's
+    `\u2594` rule or its "Enter to confirm" footer."""
     d = _defaults.load()["screen"]
     low = herdr_cli.bottom_block(visible, d["tail_lines"]).lower()
+    if not any(_EXIT_FOOTER in ln or ln.lstrip().startswith(_EXIT_RULE * 3)
+               for ln in low.splitlines()):
+        return None  # words alone are no dialog: a crew may quote them
     wt = d["worktree_exit"]
     if wt["marker"] in low and any(wt["keep"] in ln for ln in low.splitlines()):
         return "worktree"
@@ -1153,6 +1167,7 @@ def _exit(name, pane, timeout_s, poll_s):
     the exit and cleared here on every result but "exited": the caller clears it after
     its follow-up."""
     mark = _kv(name, "exiting")
+    stalled = False
     if not pane:
         return "not_exited"
     screen = _screen_of(pane)
@@ -1166,7 +1181,7 @@ def _exit(name, pane, timeout_s, poll_s):
     try:
         if exit_dialog(screen) is None:  # an open exit dialog is answered below, never typed onto
             try:
-                herdr_cli.send(name, "/exit")
+                stalled = herdr_cli.send(name, "/exit") == "stalled"
             except herdr_cli.HerdrError:
                 pass
         deadline = time.monotonic() + timeout_s
@@ -1189,6 +1204,10 @@ def _exit(name, pane, timeout_s, poll_s):
     finally:
         if result != "exited":
             journal.kv_clear(mark)
+    if stalled and result == "not_exited":
+        # the typed `/exit` stays in the composer: the next delivery would land behind it
+        if (herdr_cli.composer_text(_screen_of(pane)) or "").startswith("/exit"):
+            _press(pane, "ctrl+u", "stalled_exit", name)
     return result
 
 
@@ -1310,14 +1329,21 @@ def _start_session(name, pane, claude_args, want_screen=False, work_order=None):
     settings = _settings_pairs(_crews_work_order(name, work_order))
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
-                      + _claude_args(*claude_args, *settings), timeout_s=90)
+                      + _AGENT_START_TIMEOUT + _claude_args(*claude_args, *settings),
+                      timeout_s=90)
     except herdr_cli.HerdrError as e:
         failed = {"status": "restart_failed", "step": "agent_start", "reason": str(e),
                   "pane_id": pane}
-        if e.code != "agent_not_ready":
+        if e.code not in ("agent_not_ready", "timeout"):
             return failed, ""
         screen = herdr_cli.pane_visible(pane)
-        return (_consent_result(screen, pane) or failed), screen
+        consent = _consent_result(screen, pane)
+        if consent:
+            return consent, screen
+        if e.code == "timeout" and herdr_cli.agent(name):
+            # herdr gave up waiting but the agent is there: go on, as `start` would
+            return None, screen if want_screen else ""
+        return failed, screen
     return None, (herdr_cli.pane_visible(pane) if want_screen else "")
 
 
@@ -1681,7 +1707,8 @@ def answer(name, choice=None, text=None):
         if text is None:
             raise ValueError("no dialog is open: text is required")
         result = deliver(name, text, work_order)
-        _record_answer(work_order, "answer to crew %s: %s" % (name, text))
+        if result == "accepted":  # anything else was not delivered: nothing to record
+            _record_answer(work_order, "answer to crew %s: %s" % (name, text))
         return result
     labels, current = dialog
     if choice is not None:
@@ -2053,6 +2080,12 @@ def _live_field(item, cid):
     return False
 
 
+def _placeholder(item):
+    """A template placeholder left in a report: `<...>` as the whole item."""
+    item = item.strip(" *_`")
+    return item.startswith("<") and item.endswith(">")
+
+
 def _check_passport(sections):
     """`(problems, notes)` of the section "For the passport": the single item `none`, or the
     notes a newcomer to the site would trip over, which the foreman writes into the passport."""
@@ -2065,7 +2098,10 @@ def _check_passport(sections):
         items = ["none"]
     if not items:
         return ["For the passport: write none or list each note"], []
-    return [], [it for it in items if it.strip(" *_`.").lower() != "none"]
+    problems = ["For the passport: a template placeholder, not a note: %s" % it
+                for it in items if _placeholder(it)]
+    return problems, [it for it in items
+                      if it.strip(" *_`.").lower() != "none" and not _placeholder(it)]
 
 
 def _check_stubs(sections, rows, criteria, live):
@@ -2082,6 +2118,9 @@ def _check_stubs(sections, rows, criteria, live):
             problems.append("Stubs: write none or list each stub")
         elif not (len(items) == 1 and items[0].strip(" *_`.").lower() == "none"):
             for item in items:
+                if _placeholder(item):
+                    problems.append("Stubs: a template placeholder, not a stub: %s" % item)
+                    continue
                 ids = _CID.findall(item)
                 if not ids:
                     problems.append("stub item names no criterion: %s" % item)
@@ -2271,7 +2310,9 @@ def report_fix(name, work_order, stage, problems):
 def ask_predecessor(work_order, session_id, cwd, question):
     """Manual tool: ask a fork of a finished session a question; the session itself is not
     changed. Costs one run of the work order; `cwd` must lie in its worktree, so the run's
-    transcript counts in the work order's dollars."""
+    transcript counts in the work order's dollars. Refused under the emergency stop."""
+    if emergency_stop():
+        return _STOPPED
     if not _under(cwd, _issue_worktree(work_order)):
         raise ValueError("cwd %s is outside the worktree of work order %s" % (cwd, work_order))
     journal.spend(work_order, runs=1)
@@ -2381,7 +2422,8 @@ def main(argv=None):
         func = {"check_report": _check_report_cli, "report_fix": _report_fix_cli,
                 "accept": _accept_cli, "spend": work_order_spend}.get(c)
         result = (func or globals()[c])(**args)
-    except (herdr_cli.HerdrError, journal.JournalError, ValueError, RuntimeError) as e:
+    except (herdr_cli.HerdrError, journal.JournalError, ValueError, RuntimeError,
+            OSError, KeyError) as e:
         print(json.dumps({"error": str(e), "code": getattr(e, "code", None)},
                          ensure_ascii=False), file=sys.stderr)
         return 1

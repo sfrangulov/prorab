@@ -22,7 +22,7 @@ Three live runs on toy sites, herdr 0.9.5, Claude Code 2.1.306-2.1.307, bd 1.3.1
 - A fresh session without a status-line response shows no 5h bar: `Opus 5.5 . xhigh | 0.0% | branch | <1m` (runs 1, 2).
 - Prompt suggestions: setting `promptSuggestionEnabled` (false turns them off); env `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` wins over it (run 1, from the binary). Confirmed live: a crew started with `--settings` holding only `{"promptSuggestionEnabled": false}` shows a bare composer at start and after its turn (runs 2, 3, check 7). The crew settings file of Task 14 carries it; never the customer's own config.
 - Grey suggestions predicted the customer's answer several times (`trust accepted, start the crew`, `gate resolved, restart the crew`, `Keep the branch; issue the fix work order for the defects`); Enter on them would have answered for the customer. The rule "never Enter on an empty composer" stays (runs 1, 2, 3). Whether an Enter would start a turn with the suggestion was not tried.
-- New UI cards: `Heads up . <a line about the session>` with `1: Learn more   2: Knew this already   0: Dismiss` above the composer (runs 1, 3); parsers read consent None, choice None, composer empty. Fix: 14c.7 (pending at writing).
+- New UI cards: `Heads up . <a line about the session>` with `1: Learn more   2: Knew this already   0: Dismiss` above the composer (runs 1, 3); parsers read consent None, choice None, composer empty. Fix: 14c.7 (e39def8).
 - Multi-line prompt (check 1): `herdr agent prompt` with three lines is executed; the transcript's user message is the plain text, no `<pasted_content>` wrapper (run 2). The one-line rule stays.
 - Argument path (check 2): `claude "<one line>"` with `-w` and `--session-id` in a fresh worktree keeps the initial prompt; no trust question once the site is trusted (run 2).
 - `--add-dir ~/.cache/prorab/work-orders` (check 5): a crew in the default permission mode (`--permission-mode default`) reads `<id>.md` there with Read and no permission prompt; in the customer's mode too (run 2).
@@ -76,10 +76,10 @@ Three live runs on toy sites, herdr 0.9.5, Claude Code 2.1.306-2.1.307, bd 1.3.1
 - 2 The shift report counted one session of three and 103 573 tokens, omitted the emergency stop, and overwrote the same-day report: every session counted, an `## Emergency stop` section, a second report goes to `<date>-2.md` (bc9d25c).
 - 3 The Pause line "Finish the current step" contradicted the hook's "Do not retry": the emergency pause asks for no tool call and no retry (6dfd505).
 - 4 `--caller_pane` vs `--caller-pane` (the subcommands are spelled with underscores, `restart` takes the option): every long option also takes its underscore spelling (b68f93d). Trap for old notes: `start` takes `caller_pane` positionally.
-- 5 The key press of the exit dialog left no trace: a `logs/keys.log` row per press (14c.5, pending at writing).
+- 5 The key press of the exit dialog left no trace: every key pressed in a crew pane is logged as one JSON line in `logs/keys.log` with a required reason; the exit dialog presses go through it (e39def8).
 - 6 `consent_done` could fire while the prompt was still on screen when herdr said `idle`: fires only once the prompt is seen gone (60a2006).
-- 7 The `Heads up` numbered card read as nothing and could hold any words: parsers ignore the card (14c.7, pending at writing).
-- 8 `settled` withheld for about 50 minutes while shells were listed: a crew whose last text is its final report (stage report or `HANDOVER READY`) is settled even with listed shells (R109; 14c.8, pending at writing).
+- 7 The `Heads up` numbered card read as nothing and could hold any words: the parsers skip the card's lines (`notice_card_span`), so its words never read as a choice, a marker or "N shells" (e39def8).
+- 8 `settled` withheld for about 50 minutes while shells were listed: a crew whose last text is its final report (stage report or `HANDOVER READY`) is settled even with listed shells (R109; 3137975, the final report read in-process from the transcript).
 - Other observations of run 3: `crew.stop` adds only the current session's tokens (inside finding 2); `journal.py` leaves a finished work order `open` (finding 1); the monitor killed with TaskStop leaves its `monitor-<pane>.json` marker; the stage report is visible to `check_report` only if the new session repeats it.
 
 ## Findings 9-12 (23 October) and the fix that answered each (Task 14c.9, R113)

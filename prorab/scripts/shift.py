@@ -353,8 +353,8 @@ def _finished_branches(work_orders):
     lines = []
     for wo in work_orders:
         rec = journal.issue(wo["id"]) or {}
-        if wo.get("status") != "closed" or not rec.get("worktree"):
-            continue
+        if wo.get("status") != "closed" or not rec.get("worktree") or rec.get("decided"):
+            continue  # a decided branch is no open decision
         wt = rec["worktree"]
         detail = ""
         if os.path.isdir(wt):
@@ -397,17 +397,29 @@ def _work_order_budget_lines(sp, d):
     return lines
 
 
-def _counts_lines(work_orders, kv):
+def _counts_lines(sp, kv):
+    """Per work order of the shift: the tokens of every transcript it left (cache reads left
+    out), the crew sessions of its issue record (the kv counter only for a record without the
+    list) and the kv count of agent runs."""
     lines = []
-    for wo in work_orders:
-        c = {k: int(kv.get("spent.%s.%s" % (wo["id"], k)) or 0) for k in journal.SPENT_KEYS}
-        if any(c.values()):
-            lines.append("- %s: tokens %d, sessions %d, agent runs %d"
-                         % (wo["id"], c["tokens"], c["sessions"], c["runs"]))
+    records = journal.issues(kv=kv)
+    for wo in sorted(sp["work_orders"]):
+        rec = records.get(wo) or {}
+        sessions = rec.get("sessions")
+        if isinstance(sessions, list):
+            count = len(set(sessions))
+        else:
+            count = int(kv.get("spent.%s.sessions" % wo) or 0)
+        files = transcript.work_order_files(rec["worktree"], sessions or [])
+        t = transcript.cost(files, _defaults.load())["tokens"]
+        tokens = t["input"] + t["cache_write"] + t["output"]
+        runs = int(kv.get("spent.%s.runs" % wo) or 0)
+        if tokens or count or runs:
+            lines.append("- %s: tokens %d, sessions %d, agent runs %d" % (wo, tokens, count, runs))
     return lines
 
 
-def _budget(sp, d, kv, lim, rates, start, work_orders):
+def _budget(sp, d, kv, lim, rates, start):
     b = journal.budget(kv)
     lines = _work_order_budget_lines(sp, d)
     for key, r in sorted(sp["research"].items()):
@@ -434,7 +446,7 @@ def _budget(sp, d, kv, lim, rates, start, work_orders):
     machine = transcript.cost(transcript.machine_files(since=start), d, since=start)["usd"]
     lines.append("- Machine spend over the shift: %s (every session on this machine, the "
                  "customer's own included)" % _usd(machine))
-    counts = _counts_lines(work_orders, kv)
+    counts = _counts_lines(sp, kv)
     if counts:
         lines += ["", "Counts per work order (for the record, not budget):"] + counts
     return lines
@@ -553,6 +565,39 @@ def _incidents(work_orders, start):
     return lines or ["No incidents."]
 
 
+def _emergency_lines(d, start):
+    """The emergency stop as the monitor saw it since the shift began, each stop paired with
+    the next release; the times are the monitor's polls."""
+    stops = []  # [on_ts, paused, released_ts]
+    for r in scheduler.readings(since=start):
+        for ev in r.get("events") or []:
+            if not isinstance(ev, str):
+                continue
+            word, _, names = ev.partition(" ")
+            if word == "emergency_stop":
+                stops.append([r["ts"], names.strip(), None])
+            elif word == "emergency_released":
+                for s in stops:
+                    if s[2] is None:
+                        s[2] = r["ts"]
+                        break
+    still_on = os.path.exists(d["emergency"]["stop_path"])
+    lines = []
+    for on, names, off in stops:
+        paused = "none" if names in ("", "-") else names
+        line = "- on at %s (seen by the monitor; crews paused: %s); " % (_clock(on), paused)
+        if off is not None:
+            line += "released at %s" % _clock(off)
+        elif still_on:
+            line += "still on when this report was written"
+        else:
+            line += "its release was not seen by the monitor"
+        lines.append(line)
+    if still_on and not stops:
+        lines.append("- on now (the stop file exists; the monitor did not see it in this shift)")
+    return lines
+
+
 def _override_section(d, rec, now):
     since, until = float(rec["since"]), rec.get("until")
     end = now if until is None else float(until)
@@ -587,7 +632,8 @@ def _without_limits(d, kv, start, now):
 
 
 def report(date, out_dir):
-    """Write `out_dir/<date>.md` and return its path; ends the night shift."""
+    """Write `out_dir/<date>.md` (else the first free `<date>-2.md`, `<date>-3.md`, ...; an
+    earlier report is never overwritten) and return its path; ends the night shift."""
     d = _defaults.load()
     now = time.time()
     kv = journal.kv_all()
@@ -606,16 +652,28 @@ def report(date, out_dir):
     branches = _finished_branches(work_orders)
     if branches:
         section("Finished branches", branches)
-    section("Budget", _budget(sp, d, kv, lim, rates, start, work_orders))
+    section("Budget", _budget(sp, d, kv, lim, rates, start))
     section("Limits", _limits_lines(d, now, lim, kv, sp, rates))
     section("Incidents", _incidents(work_orders, start))
+    stop = _emergency_lines(d, start)
+    if stop:
+        section("Emergency stop", stop)
     free = _without_limits(d, kv, start, now)
     if free:
         section("Without limits", free)
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "%s.md" % date)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(parts).rstrip("\n") + "\n")
+    body = "\n".join(parts).rstrip("\n") + "\n"
+    n = 1
+    while True:
+        path = os.path.join(out_dir, "%s%s.md" % (date, "" if n == 1 else "-%d" % n))
+        try:
+            fh = open(path, "x", encoding="utf-8")
+        except FileExistsError:
+            n += 1
+            continue
+        with fh:
+            fh.write(body)
+        break
     journal.kv_set("shift.spent.usd", sp["usd"])
     journal.kv_clear("shift.night")
     return path

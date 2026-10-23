@@ -256,6 +256,93 @@ class TestReport(ShiftBase):
         self.assertIn("Exporter", text)
         self.assertNotIn("## Without limits", text)
 
+    def stop_file(self):
+        path = self.d["emergency"]["stop_path"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8"):
+            pass
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_report_counts_every_crew_session(self):
+        n = journal.create_work_order("o", "Importer", "b", {"usd": 10})
+        wt = "/home/user/projects/demo-app-a"
+        journal.issue_set(n, "issued", worktree=wt, sessions=["s1", "s2", "s3"])
+        self.start_shift()
+        for i, sid in enumerate(("s1", "s2", "s3"), 1):
+            self.write_transcript(wt, sid, [("m%d" % i, T0 + 60 * i, float(i))])
+        journal.spend(n, sessions=1, runs=2, tokens=43011)
+        old = new_work_order("Old")
+        journal.issue_set(old, "issued", worktree="/home/user/projects/demo-app-old")
+        journal.kv_set("shift.closed_before", old)
+        journal.kv_set("spent.%s.sessions" % old, 5)
+        text = self.report_text()
+        self.assertIn("- %s: tokens 1500000, sessions 3, agent runs 2" % n, text)
+        self.assertNotIn("- %s: tokens" % old, text)
+
+    def test_report_counts_fall_back_to_kv_without_a_session_list(self):
+        n = journal.create_work_order("o", "Importer", "b", {"usd": 10})
+        journal.issue_set(n, "issued", worktree="/home/user/projects/demo-app-a")
+        self.start_shift()
+        journal.spend(n, sessions=2, runs=3)
+        self.assertIn("- %s: tokens 0, sessions 2, agent runs 3" % n, self.report_text())
+
+    def test_report_names_the_emergency_stop(self):
+        self.start_shift()
+        self.write_log([{"ts": T0 + 600, "events": ["emergency_stop a1"]},
+                        {"ts": T0 + 660, "events": ["emergency_released a1"]}])
+        text = self.report_text()
+        section = text.split("## Emergency stop")[1].split("\n## ")[0]
+        self.assertGreater(text.index("## Emergency stop"), text.index("## Incidents"))
+        self.assertIn("- on at %s (seen by the monitor; crews paused: a1); released at %s"
+                      % (shift._clock(T0 + 600), shift._clock(T0 + 660)), section)
+
+    def test_report_emergency_stop_still_on_or_unseen(self):
+        self.start_shift()
+        self.write_log([{"ts": T0 + 600, "events": ["emergency_stop -"]}])
+        first = self.stop_file()
+        want = "- on at %s (seen by the monitor; crews paused: none); " % shift._clock(T0 + 600)
+        self.assertIn(want + "still on when this report was written", self.report_text())
+        os.remove(first)
+        self.assertIn(want + "its release was not seen by the monitor",
+                      self.report_text("2026-10-23"))
+
+    def test_report_stop_file_without_an_event(self):
+        self.start_shift()
+        self.stop_file()
+        self.assertIn("- on now (the stop file exists; the monitor did not see it in this "
+                      "shift)", self.report_text())
+
+    def test_report_without_an_emergency_stop_has_no_section(self):
+        self.start_shift()
+        self.write_log([{"ts": T0 + 60, "events": []}])
+        self.assertNotIn("## Emergency stop", self.report_text())
+
+    def test_second_report_of_a_date_never_overwrites_the_first(self):
+        self.start_shift()
+        out = os.path.join(self.tmp.name, "reports")
+        first = shift.report("2026-10-22", out)
+        with open(first, "rb") as fh:
+            body = fh.read()
+        second = shift.report("2026-10-22", out)
+        third = shift.report("2026-10-22", out)
+        self.assertEqual([os.path.basename(p) for p in (first, second, third)],
+                         ["2026-10-22.md", "2026-10-22-2.md", "2026-10-22-3.md"])
+        with open(first, "rb") as fh:
+            self.assertEqual(fh.read(), body)
+
+    def test_report_skips_decided_branches(self):
+        self.start_shift()
+        a, _ = self.accepted_work_order("Kept")
+        b, _ = self.accepted_work_order("Decided")
+        journal.issue_set(a, "issued", worktree="/home/user/projects/demo-app-a")
+        journal.issue_set(b, "issued", worktree="/home/user/projects/demo-app-b",
+                          decided={"choice": "keep"})
+        text = self.report_text()
+        branches = text.split("## Finished branches")[1].split("\n## ")[0]
+        self.assertIn("prorab/%s" % a, branches)
+        self.assertNotIn("prorab/%s" % b, text)
+
     def test_report_branch_options(self):
         self.start_shift()
         n, _ = self.accepted_work_order("Importer")
@@ -279,7 +366,7 @@ class TestReport(ShiftBase):
         self.assertIn("3.43 pp of the window", text)
         self.assertIn("$100.00", text)  # the shift budget
         self.assertIn("Machine spend over the shift: $12.00", text)
-        self.assertIn("tokens 1500, sessions 2, agent runs 3", text)
+        self.assertIn("tokens 3000000, sessions 2, agent runs 3", text)
         self.assertIn("3.50 $/pp (default)", text)
         self.assertIn("week rate: 10.00 $/pp (default)", text)
         self.assertIn("1.20 pp of the week", text)

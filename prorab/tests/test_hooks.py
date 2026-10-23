@@ -96,7 +96,8 @@ class TestSettings(HooksBase):
         self.assertEqual(bash["hooks"][0]["command"], "python3 -I %s guard" % HOOKS_PY)
         for event in ("Stop", "Notification", "PreCompact", "SessionStart"):
             (entry,) = data["hooks"][event]
-            self.assertEqual(entry["hooks"][0]["command"], "python3 -I %s tap" % HOOKS_PY)
+            self.assertEqual(entry["hooks"][0]["command"],
+                             "python3 -I %s tap || true" % HOOKS_PY)  # a tap never blocks
 
     def stop_command(self):
         with open(hooks.write_settings(self.d), encoding="utf-8") as fh:
@@ -568,6 +569,34 @@ class TestSettingsCli(HooksBase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(), self.d["hooks"]["settings_path"])
         self.assertTrue(os.path.isfile(self.d["hooks"]["settings_path"]))
+
+
+class TestFinalMinorM4(HooksBase):
+    def test_the_hook_commands_name_the_real_path_not_a_link(self):
+        import importlib.util
+        link = os.path.join(self.tmp.name, "link")
+        os.symlink(SCRIPTS_DIR, link)
+        spec = importlib.util.spec_from_file_location("hooks_via_link",
+                                                      os.path.join(link, "hooks.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        data = mod.settings_dict(self.d)
+        (_, bash) = data["hooks"]["PreToolUse"]
+        self.assertIn(os.path.realpath(HOOKS_PY), bash["hooks"][0]["command"])
+        self.assertNotIn(link, json.dumps(data))
+
+    def test_a_guard_whose_imports_fail_exits_2(self):
+        folder = os.path.join(self.tmp.name, "broken")
+        os.makedirs(folder)
+        with open(HOOKS_PY, encoding="utf-8") as src, \
+                open(os.path.join(folder, "hooks.py"), "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+        with open(os.path.join(folder, "_defaults.py"), "w", encoding="utf-8") as fh:
+            fh.write("raise ImportError('broken')\n")
+        p = subprocess.run([sys.executable, "-I", os.path.join(folder, "hooks.py"), "guard"],
+                           input='{"tool_name": "Bash", "tool_input": {"command": "ls"}}',
+                           capture_output=True, text=True, env=dict(os.environ))
+        self.assertEqual(p.returncode, 2, p.stderr)
 
 
 if __name__ == "__main__":

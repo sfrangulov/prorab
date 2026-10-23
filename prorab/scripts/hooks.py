@@ -18,7 +18,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import _defaults  # noqa: E402
+try:
+    import _defaults  # noqa: E402
+except Exception:  # a failed import must not let a guarded call through: the guard exits 2
+    _defaults = None
 
 STOP_REASON = ("prorab emergency stop: the customer stopped all crews. Do not retry; end your "
                "turn and wait for the foreman.")
@@ -62,10 +65,13 @@ def settings_dict(d=None, merge_branch=None):
     guard_words = ["guard"]
     if merge_branch is not None:
         guard_words += ["--merge-branch", _merge_branch_checked(merge_branch)]
-    script = os.path.abspath(__file__)
+    script = os.path.realpath(__file__)  # not through a link that may be removed later
 
     def entry(kind, matcher=None, *more):
-        item = {"hooks": [{"type": "command", "command": _command(script, kind, *more)}]}
+        # a missing script exits 2, which for a Stop hook would block stopping: the tap
+        # only records, so its failure is never reported
+        command = _command(script, kind, *more) + (" || true" if kind == "tap" else "")
+        item = {"hooks": [{"type": "command", "command": command}]}
         if matcher:
             item["matcher"] = matcher
         return item
@@ -421,4 +427,11 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    except SystemExit:
+        raise
+    except BaseException:
+        # any failure of the guard denies (exit 2 blocks the call; exit 1 would let it run)
+        code = 2 if sys.argv[1:2] == ["guard"] else 1
+    sys.exit(code)

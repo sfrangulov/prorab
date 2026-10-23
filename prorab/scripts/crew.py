@@ -550,9 +550,9 @@ def start(site_path, work_order, name, caller_pane):
     return result
 
 
-def _register_started(site_path, work_order, name, pane, session_id):
-    """The tail of `start` once Claude Code runs in `pane`: find the worktree, name the
-    branch, record the issue, register the crew."""
+def _locate_worktree(site_path, work_order):
+    """The work order's worktree in the site, its branch (renamed to `prorab/<id>` when it can
+    be) and the commit it starts from: (path, branch, commit), each None when unknown."""
     wt = _find_worktree(site_path, work_order)
     worktree = wt["path"] if wt else None
     branch = wt["branch"] if wt else None
@@ -560,11 +560,17 @@ def _register_started(site_path, work_order, name, pane, session_id):
     if wt and branch != want:
         if _git_soft(["branch", "-m", want], worktree).returncode == 0:
             branch = want
-
     base_commit = None
     if worktree:
         p = _git_soft(["rev-parse", "HEAD"], worktree)
         base_commit = p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
+    return worktree, branch, base_commit
+
+
+def _register_started(site_path, work_order, name, pane, session_id):
+    """The tail of `start` once Claude Code runs in `pane`: find the worktree, name the
+    branch, record the issue, register the crew."""
+    worktree, branch, base_commit = _locate_worktree(site_path, work_order)
     if worktree:  # so the spend stays attributable after the crew is gone
         extra = {"base_commit": base_commit} if base_commit else {}
         journal.issue_set(work_order, (journal.issue(work_order) or {}).get("state", "issuing"),
@@ -875,6 +881,40 @@ def _cd_failure(pane, worktree, timeout_s, poll_s):
     return {"status": "restart_failed", "step": "cd", "reason": reason, "pane_id": pane}
 
 
+def _enter_for_restart(name, work_order, pane, worktree, timeout_s, poll_s):
+    """Put the shell in `pane` where the new session starts: (failed result or None, new).
+    The worktree normally; once Claude Code has removed it on exit (nothing in it was
+    changed) the site, and `new` is the `-w` pair that makes the new session create it again."""
+    if os.path.isdir(worktree):
+        return _cd_failure(pane, worktree, timeout_s, poll_s), ()
+    site = journal.kv_get(_kv(name, "site")) or (journal.issue(work_order) or {}).get("site")
+    if not site:
+        return {"status": "restart_failed", "step": "cd", "pane_id": pane,
+                "reason": "the worktree is gone and the site is unknown"}, ()
+    return (_cd_failure(pane, site, timeout_s, poll_s),
+            (("-w", "prorab-%s" % work_order),))
+
+
+def _adopt_new_worktree(name, work_order, worktree, new):
+    """After a session started with `-w`: find the worktree it made (and rename its branch),
+    record it as `_register_started` does; returns the worktree path the crew works in."""
+    if not new:
+        return worktree
+    site = journal.kv_get(_kv(name, "site")) or (journal.issue(work_order) or {}).get("site")
+    found, branch, base_commit = _locate_worktree(site, work_order)
+    if not found:
+        return worktree
+    rec = journal.issue(work_order)
+    if rec:
+        extra = {"base_commit": base_commit} if base_commit else {}
+        journal.issue_set(work_order, rec.get("state", "issued"), worktree=found, **extra)
+    for field, value in (("worktree", found), ("branch", branch or ""),
+                         ("base_commit", base_commit)):
+        if value is not None:
+            journal.kv_set(_kv(name, field), value)
+    return found
+
+
 def _start_session(name, pane, claude_args, want_screen=False):
     """`agent start` in `pane`. Returns (error result or None, screen text). A consent
     screen maps as in `start`; the screen is read only when it is needed."""
@@ -981,14 +1021,15 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
 
 def _restart_after_exit(name, work_order, work_order_text, worktree, pane, spend, timeout_s,
                         poll_s):
-    failed = _cd_failure(pane, worktree, timeout_s, poll_s)
+    failed, new = _enter_for_restart(name, work_order, pane, worktree, timeout_s, poll_s)
     if failed:
         return failed
     session_id = str(uuid.uuid4())
     failed, _screen = _start_session(
-        name, pane, (("--session-id", session_id), ("--add-dir", _files_dir())))
+        name, pane, (("--session-id", session_id), ("--add-dir", _files_dir())) + new)
     if failed:
         return failed
+    worktree = _adopt_new_worktree(name, work_order, worktree, new)
     _set_session(name, worktree, session_id, work_order)
     try:
         sent = deliver(name, _handover_text(work_order, work_order_text), work_order)
@@ -1059,7 +1100,8 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
         if not caller_pane:
             return {"status": "restart_failed", "reason": "pane is gone and no caller pane"}
         try:
-            pane, ident = _open_pane(caller_pane, worktree)
+            pane, ident = _open_pane(caller_pane, worktree if os.path.isdir(worktree)
+                                     else journal.kv_get(_kv(name, "site")) or worktree)
         except herdr_cli.HerdrError as e:
             return {"status": "restart_failed", "step": "split", "reason": str(e),
                     "pane_id": caller_pane}
@@ -1068,7 +1110,7 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
         rec = journal.issue(work_order)
         if rec:
             journal.issue_set(work_order, rec["state"], pane=pane, pane_identity=ident)
-    failed = _cd_failure(pane, worktree, timeout_s, poll_s)
+    failed, new = _enter_for_restart(name, work_order, pane, worktree, timeout_s, poll_s)
     if failed:
         return failed
 
@@ -1076,7 +1118,7 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
     path = _transcript_for(name)
     ctx = _context(old, path, _defaults.load())
     files = ("--add-dir", _files_dir())
-    if old and not (ctx and ctx["soft"]):
+    if old and not new and not (ctx and ctx["soft"]):  # a new worktree has no session to resume
         failed, screen = _start_session(name, pane, (("--resume", old), files), True)
         marker = _defaults.load()["screen"]["resume_failed"].lower()
         shown = herdr_cli.bottom_block(screen, _defaults.load()["screen"]["tail_lines"]).lower()
@@ -1103,9 +1145,10 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
             return {"status": "resumed", "pane_id": pane, "session_id": old,
                     "work_order_sent": changed}
     session_id = str(uuid.uuid4())
-    failed, _screen = _start_session(name, pane, (("--session-id", session_id), files))
+    failed, _screen = _start_session(name, pane, (("--session-id", session_id), files) + new)
     if failed:
         return failed
+    worktree = _adopt_new_worktree(name, work_order, worktree, new)
     _set_session(name, worktree, session_id, work_order)
     if counted:
         journal.bump_restarts(work_order)

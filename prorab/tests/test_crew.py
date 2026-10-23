@@ -201,6 +201,12 @@ class CrewBase(FakeBase):
         # the synthetic ~/.claude.json trusts the test sites (F1); tests of the trust replace it
         self.write_trust([SITE_DIR, os.path.join(self.dir, "repo")])
 
+    def real_wt(self):
+        """A worktree directory that exists (a restart looks for it after the exit)."""
+        wt = os.path.join(self.dir, "site", ".claude", "worktrees", "prorab-N1")
+        os.makedirs(wt)
+        return wt
+
     def trust_file(self):
         return os.path.join(self.home, ".claude.json")
 
@@ -1054,7 +1060,7 @@ class TestSendState(CrewBase):
 class TestHandover(CrewBase):
     def setUp(self):
         super().setUp()
-        self.wt = "/home/user/projects/demo-app/.claude/worktrees/prorab-N1"
+        self.wt = self.real_wt()
         self.j.kv["crew.a1.worktree"] = self.wt
         self.write_transcript("/work", "sess-1", "Act: done A\nHANDOVER READY")
         self.route("agent read a1 --source visible", "idle\n")
@@ -1287,7 +1293,8 @@ class TestHandover(CrewBase):
                          crew.transcript.transcript_path(self.wt, m.group(1)))
 
     def test_cd_command_is_shell_quoted(self):
-        wt = "/home/user/it's a/prorab-N1"
+        wt = os.path.join(self.dir, "it's a", "prorab-N1")
+        os.makedirs(wt)
         self.j.kv["crew.a1.worktree"] = wt
         self.restart_routes(wt)
         self.route("agent start a1", ok({}))
@@ -1743,7 +1750,7 @@ def fingerprint(text):
 class TestRestart(CrewBase):
     def setUp(self):
         super().setUp()
-        self.wt = "/home/user/projects/demo-app/.claude/worktrees/prorab-N1"
+        self.wt = self.real_wt()
         self.j.kv.update({"crew.a1.worktree": self.wt, "crew.a1.pane": "w:p9",
                           "crew.a1.session": "old-session", "crew.a1.work_order": "N1"})
         self.route("agent list", ok({"agents": []}))
@@ -1843,6 +1850,49 @@ class TestRestart(CrewBase):
         self.assertIn("--resume old-session", first)
         self.assertIn("--session-id", second)
         self.assertNotIn("--resume", second)
+
+    def vanished_worktree(self):
+        """The worktree is gone (Claude Code removed it on exit); the site is a real repo that
+        shows the new one after `-w`."""
+        repo = self.make_repo()
+        os.rmdir(self.wt)
+        self.j.kv["crew.a1.site"] = repo
+        self.j.issue_set("N1", "issued", worktree=self.wt, site=repo, base_commit="stale")
+        fresh = self.add_worktree(repo, "N1")  # what the new `-w` session creates
+        return repo, fresh
+
+    def test_a_vanished_worktree_restarts_with_w_in_the_site(self):
+        repo, fresh = self.vanished_worktree()
+        self.write_transcript("/work", "old-session", "x", tokens=(130000, 0, 0))
+        self.j.kv["crew.a1.transcript"] = crew.transcript.transcript_path(
+            "/work", "old-session", self.home)
+        self.route("pane get w:p9", ok({"pane": {"pane_id": "w:p9", "foreground_cwd": repo}}))
+        self.assertEqual(self.go()["status"], "restarted")
+        self.assertIn("pane run w:p9 cd %s" % repo, self.calls())
+        self.assertNotIn("pane run w:p9 cd %s" % self.wt, self.calls())
+        (start,) = self.starts()
+        self.assertIn("-w prorab-N1", start)
+        self.assertNotIn("--resume", start)
+        self.assertEqual(os.path.realpath(self.j.kv["crew.a1.worktree"]), os.path.realpath(fresh))
+        self.assertEqual(self.j.kv["crew.a1.branch"], "prorab/N1")
+        self.assertEqual(os.path.realpath(self.j.issue("N1")["worktree"]), os.path.realpath(fresh))
+        self.assertEqual(self.j.issue("N1")["base_commit"], git(fresh, "rev-parse", "HEAD").strip())
+        self.assertEqual(self.j.kv["crew.a1.base_commit"], self.j.issue("N1")["base_commit"])
+        self.assertEqual(self.j.kv["crew.a1.transcript"], crew.transcript.transcript_path(
+            self.j.kv["crew.a1.worktree"], self.j.kv["crew.a1.session"]))
+
+    def test_a_vanished_worktree_is_not_resumed(self):
+        repo, fresh = self.vanished_worktree()  # below soft: it would resume otherwise
+        self.route("pane get w:p9", ok({"pane": {"pane_id": "w:p9", "foreground_cwd": repo}}))
+        self.assertEqual(self.go()["status"], "restarted")
+        self.assertNotIn("--resume", self.starts()[0])
+        self.assertIn("-w prorab-N1", self.starts()[0])
+
+    def test_a_vanished_worktree_and_an_unknown_site_fails_at_cd(self):
+        os.rmdir(self.wt)
+        r = self.go()
+        self.assertEqual((r["status"], r["step"]), ("restart_failed", "cd"))
+        self.assertIn("site is unknown", r["reason"])
 
     def test_sessions_grow_on_a_new_session_never_on_a_resume(self):
         self.j.issue_set("N1", "issued", worktree=self.wt, sessions=["old-session"])
@@ -2694,7 +2744,7 @@ class TestExitDialog(CrewBase):
 
     def setUp(self):
         super().setUp()
-        self.wt = "/home/user/projects/demo-app/.claude/worktrees/prorab-N1"
+        self.wt = self.real_wt()
         self.j.kv.update({"crew.a1.worktree": self.wt, "crew.a1.pane": "w:p9",
                           "crew.a1.session": "old-session", "crew.a1.work_order": "N1"})
         self.j.active = ["a1"]
@@ -2797,6 +2847,35 @@ class TestExitDialog(CrewBase):
         self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
         self.assertEqual(self.handover()["status"], "restarted")
         self.assertEqual(self.keys_lines(), [])
+
+    def test_handover_after_a_worktree_that_vanished_on_exit(self):
+        repo = self.make_repo()
+        self.j.kv["crew.a1.site"] = repo
+        self.j.issue_set("N1", "issued", worktree=self.wt, site=repo)
+        self.listed(True, False)
+        self.screens(self.composer, self.composer)
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", cwd=repo)}))
+        fresh = []
+
+        def vanish(*a, **k):  # `/exit` removes the worktree; the new `-w` session makes one
+            if os.path.isdir(self.wt):
+                os.rmdir(self.wt)
+            return real_exit(*a, **k)
+        real_exit = crew._exit
+        real_start = crew._start_session
+
+        def start(name, pane, args, want_screen=False):
+            fresh.append(self.add_worktree(repo, "N1"))
+            return real_start(name, pane, args, want_screen)
+        with mock.patch.object(crew, "_exit", vanish), \
+                mock.patch.object(crew, "_start_session", start):
+            res = self.handover()
+        self.assertEqual(res["status"], "restarted")
+        self.assertIn("pane run w:p9 cd %s" % repo, self.calls())
+        self.assertTrue([c for c in self.calls()
+                         if c.startswith("agent start") and "-w prorab-N1" in c])
+        self.assertEqual(os.path.realpath(self.j.kv["crew.a1.worktree"]), os.path.realpath(fresh[0]))
+        self.assertEqual(os.path.realpath(self.j.issue("N1")["worktree"]), os.path.realpath(fresh[0]))
 
     def test_failed_press_is_logged_as_failed(self):
         self.route("pane send-keys w:p9", "", exit_code=1, stderr="no such pane")

@@ -1,0 +1,10 @@
+● Ready for the next work order.
+
+✦ Heads up · demo-app has a long session with many tool calls
+ 1: Learn more   2: Knew this already   0: Dismiss
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 · xhigh │ ▓▓░░░░░░░░ 17.0% │ ⎇ main (+0,-0)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

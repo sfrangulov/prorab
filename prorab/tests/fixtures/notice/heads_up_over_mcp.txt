@@ -1,0 +1,12 @@
+● Ready for the next work order.
+
+✦ Heads up · demo-app has a long session with many tool calls
+ 1: Learn more   2: Knew this already   0: Dismiss
+
+ New MCP server found in .mcp.json: demo-server
+
+ ❯ 1. Use this and all future MCP servers in this project
+   2. Use this MCP server
+   3. Continue without using this MCP server
+
+ Enter to confirm · Esc to cancel

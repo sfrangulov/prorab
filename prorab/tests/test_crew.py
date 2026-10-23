@@ -1483,6 +1483,31 @@ class TestAnswer(CrewBase):
         self.route("agent read a1 --source visible", fixture("consent", "api_key.txt"))
         self.assertEqual(crew.answer("a1", choice=1), "consent:api_key")
 
+    def keys_lines(self):
+        return TestKeysLogged.keys_lines(self)
+
+    def test_answer_choice_keys_are_logged(self):
+        self.route("agent read a1 --source visible", DIALOG)
+        crew.answer("a1", choice=2)
+        (line,) = self.keys_lines()
+        self.assertEqual((line["target"], line["crew"], line["keys"], line["why"], line["ok"]),
+                         ("a1", "a1", ["down", "enter"], "choice", True))
+
+    def test_answer_free_text_keys_are_logged(self):
+        self.route("agent read a1 --source visible", DIALOG)
+        self.route("pane send-text", "")
+        self.route("agent list", ok({"agents": [agent_entry(status="working")]}))
+        crew.answer("a1", text="my own words")
+        self.assertEqual([(ln["keys"], ln["why"]) for ln in self.keys_lines()],
+                         [(["down", "down", "down"], "free_text"), (["enter"], "free_text")])
+
+    def test_answer_presses_nothing_on_a_notice_card(self):
+        self.route("agent read a1 --source visible", fixture("notice", "heads_up.txt"))
+        with self.assertRaises(ValueError) as cm:
+            crew.answer("a1", choice=1)
+        self.assertIn("no dialog is open", str(cm.exception))
+        self.assertFalse([c for c in self.calls() if "send-keys" in c])
+
     def test_answer_presses_nothing_on_the_login_screen(self):
         for screen in (fixture("login", "select_method.txt"),
                        fixture("login", "not_logged_in.txt")):
@@ -1511,6 +1536,15 @@ class TestAnswer(CrewBase):
         self.assertIn("Read the file " + self.home, prompts[0])
         self.assertEqual(os.listdir(os.path.join(self.home, ".cache", "prorab", "work-orders")),
                          ["N1-1.md"])
+
+
+class TestKeysLogged(CrewBase):
+    def keys_lines(self):
+        try:
+            with open(herdr_cli.keys_log_path(), encoding="utf-8") as fh:
+                return [json.loads(ln) for ln in fh.read().splitlines()]
+        except FileNotFoundError:
+            return []
 
 
 class TestWaitLimit(CrewBase):
@@ -1549,6 +1583,14 @@ class TestWaitLimit(CrewBase):
         self.assertEqual(self.j.act_log[0][:2], ("N1", "answer"))
         self.assertTrue(self.j.act_log[0][2].startswith(
             "crew waits for the limit reset until "))
+
+    def test_wait_limit_keys_are_logged(self):
+        up, stop, _, _ = self.screens()
+        self.route_seq("agent read a1 --source visible", [up, stop, stop])
+        crew.wait_limit("a1")
+        lines = TestKeysLogged.keys_lines(self)
+        self.assertEqual([(ln["keys"], ln["why"], ln["crew"]) for ln in lines],
+                         [(["up"], "limit_choice", "a1"), (["enter"], "limit_choice", "a1")])
 
     def test_wait_limit_moves_then_rereads_then_enter(self):
         up, stop, _, _ = self.screens()
@@ -2615,6 +2657,44 @@ class TestExitDialog(CrewBase):
         i_cd = calls.index("pane run w:p9 cd %s" % self.wt)
         i_start = next(i for i, c in enumerate(calls) if c.startswith("agent start a1"))
         self.assertTrue(i_exit < i_key < i_cd < i_start)
+
+    def keys_lines(self):
+        return TestKeysLogged.keys_lines(self)
+
+    def test_exit_dialog_press_is_logged(self):
+        self.listed(True, True, False)
+        self.screens(self.composer, self.dialog)
+        self.route("pane get w:p9", self.shell)
+        crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        (line,) = self.keys_lines()
+        self.assertEqual((line["keys"], line["why"], line["target"], line["crew"], line["ok"]),
+                         (["1"], "worktree_exit", "w:p9", "a1", True))
+
+    def test_bg_work_esc_is_logged(self):
+        self.listed(True)
+        self.screens(self.composer, fixture("exit", "bg_work.txt"))
+        self.route("pane get w:p9", self.shell)
+        crew.stop("a1", "N1", timeout_s=2, poll_s=0.01)
+        (line,) = self.keys_lines()
+        self.assertEqual((line["keys"], line["why"], line["target"]), (["esc"], "bg_work", "w:p9"))
+
+    def test_exit_without_a_dialog_logs_nothing(self):
+        self.listed(True, False)
+        self.screens(self.composer, self.composer)
+        self.route_seq("pane get w:p9", [self.shell, self.shell, self.inwt])
+        self.assertEqual(self.handover()["status"], "restarted")
+        self.assertEqual(self.keys_lines(), [])
+
+    def test_failed_press_is_logged_as_failed(self):
+        self.route("pane send-keys w:p9", "", exit_code=1, stderr="no such pane")
+        self.listed(True)
+        self.screens(self.composer, self.dialog)
+        self.route("pane get w:p9", ok({"pane": pane_info("w:p9", agent="claude")}))
+        r = crew.stop("a1", "N1", timeout_s=0.3, poll_s=0.01)
+        self.assertEqual(r["status"], "not_exited")
+        (line,) = self.keys_lines()
+        self.assertEqual((line["keys"], line["why"], line["ok"]), (["1"], "worktree_exit", False))
+        self.assertIn("no such pane", line["error"])
 
     def test_exit_dialog_key_pressed_once(self):
         self.listed(True)

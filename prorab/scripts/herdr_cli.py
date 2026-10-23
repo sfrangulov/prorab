@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -172,15 +173,73 @@ def agent_visible(name):
     return _text(["agent", "read", name, "--source", "visible"])
 
 
-def send_keys(name, keys):
-    run_ack(["agent", "send-keys", name] + list(keys))
+def keys_log_path():
+    """`keys.log` in $PRORAB_LOG_DIR, else in the monitor's directory."""
+    return os.path.join(os.environ.get("PRORAB_LOG_DIR")
+                        or os.path.expanduser("~/projects/prorab/logs"), "keys.log")
+
+
+def log_keys(target, keys, why, crew=None, ok=True, error=None):
+    """Append one JSON line to the keys log: a key a script pressed in a crew pane, what it
+    answered (`why`) and the outcome. Any OSError is swallowed: a log never stops an exit or
+    an answer."""
+    line = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "target": target, "crew": crew,
+            "keys": list(keys), "why": why, "ok": ok, "error": error}
+    try:
+        path = keys_log_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def send_keys(name, keys, why):
+    """Press keys in a crew's pane by agent name, and log the outcome (`why`: what the keys
+    answer). A failed press is logged, then raised as before."""
+    try:
+        run_ack(["agent", "send-keys", name] + list(keys))
+    except HerdrError as e:
+        log_keys(name, keys, why, crew=name, ok=False, error=str(e))
+        raise
+    log_keys(name, keys, why, crew=name)
+
+
+_CARD_MARK = "\u2726"
+_CARD_END = "0: Dismiss"
+
+
+def notice_card_span(lines):
+    """(first, last) line indexes of Claude Code's numbered "Heads up" card: the last line
+    whose stripped text starts with `✦` and the first line at or below it holding
+    `0: Dismiss`; None when either is missing (anything else stays plain screen text)."""
+    first = next((i for i in range(len(lines) - 1, -1, -1)
+                  if lines[i].strip().startswith(_CARD_MARK)), None)
+    if first is None:
+        return None
+    last = next((i for i in range(first, len(lines)) if _CARD_END in lines[i]), None)
+    return None if last is None else (first, last)
+
+
+def without_notice_card(text):
+    """The text without the lines of its notice card, if it shows one."""
+    lines = text.splitlines()
+    span = notice_card_span(lines)
+    if span is None:
+        return text
+    return "\n".join(lines[:span[0]] + lines[span[1] + 1:])
 
 
 def bottom_block(visible, n):
-    """The last `n` non-empty lines of a screen. Screen markers are searched only
-    there: old output above may contain the same words."""
+    """The last `n` non-empty lines of a screen, minus the lines of a notice card among
+    them (the window is not widened). Screen markers are searched only there: old output
+    above may contain the same words, and a card's line is written about the session."""
     lines = [ln for ln in visible.splitlines() if ln.strip()]
-    return "\n".join(lines[-n:] if n > 0 else [])
+    lines = lines[-n:] if n > 0 else []
+    span = notice_card_span(lines)
+    if span is not None:
+        lines = lines[:span[0]] + lines[span[1] + 1:]
+    return "\n".join(lines)
 
 
 # Consent prompts the foreman never answers: (kind, case-insensitive markers); first match
@@ -283,6 +342,7 @@ def choice_state(visible):
     before the last option), up to the footer hint. Numbered lines printed above
     the dialog do not become options.
     """
+    visible = without_notice_card(visible)
     if consent_dialog(visible) is not None or not_logged_in(visible):
         return None
     if "Enter to select" not in visible or "↑/↓ to navigate" not in visible:
@@ -311,6 +371,7 @@ def choice_dialog(visible):
 
 
 def bg_shells(visible):
+    visible = without_notice_card(visible)
     found = [0]
     for pat in (r"· (\d+) shells?", r"(\d+) shells?(?:, \d+ monitors?)? still running"):
         found += [int(x) for x in re.findall(pat, visible)]
@@ -398,7 +459,7 @@ def recover_stalled(name, text, timeout_ms=None):
     n = min(_defaults.load()["send"]["composer_match_chars"], len(text))
     if not shown or n == 0 or shown[:n] != text[:n]:
         return "stalled"
-    send_keys(name, ["enter"])
+    send_keys(name, ["enter"], "stalled_enter")
     try:
         data = run(["agent", "wait", name] + _wait_args(ms, ("working", "blocked")),
                    timeout_s=ms // 1000 + 30)

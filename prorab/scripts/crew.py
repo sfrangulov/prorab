@@ -712,13 +712,16 @@ def _screen_of(pane):
         return ""
 
 
-def _press(pane, key):
-    """One key into the pane, by the pane (the agent that owns the dialog is leaving). A
-    failed press is not retried: the exit then runs out of time."""
+def _press(pane, key, why, name):
+    """One key into the pane, by the pane (the agent that owns the dialog is leaving), logged
+    in the keys log with its outcome. A failed press is not retried: the exit then runs out
+    of time."""
     try:
         herdr_cli.run_ack(["pane", "send-keys", pane, key])
-    except herdr_cli.HerdrError:
-        pass
+    except herdr_cli.HerdrError as e:
+        herdr_cli.log_keys(pane, [key], why, crew=name, ok=False, error=str(e))
+        return
+    herdr_cli.log_keys(pane, [key], why, crew=name)
 
 
 def _agent_left(pane):
@@ -754,9 +757,9 @@ def _exit(name, pane, timeout_s, poll_s):
             dialog = exit_dialog(_screen_of(pane))
             if dialog == "worktree" and not pressed:
                 pressed = True
-                _press(pane, "1")
+                _press(pane, "1", "worktree_exit", name)
             elif dialog == "bg_work":
-                _press(pane, "esc")
+                _press(pane, "esc", "bg_work", name)
                 result = "bg_work"
                 break
             if time.monotonic() >= deadline:
@@ -1153,14 +1156,14 @@ def answer(name, choice=None, text=None):
     delta = target - current
     keys = ["down"] * delta if delta > 0 else ["up"] * -delta
     if choice is not None:
-        herdr_cli.send_keys(name, keys + ["enter"])
+        herdr_cli.send_keys(name, keys + ["enter"], "choice")
         _record_answer(work_order, "choice for crew %s: %d. %s" % (name, choice, labels[target]))
     else:
         if keys:
-            herdr_cli.send_keys(name, keys)
+            herdr_cli.send_keys(name, keys, "free_text")
         pane = (herdr_cli.agent(name) or {}).get("pane_id") or journal.kv_get(_kv(name, "pane"))
         herdr_cli.run_ack(["pane", "send-text", pane, text])
-        herdr_cli.send_keys(name, ["enter"])
+        herdr_cli.send_keys(name, ["enter"], "free_text")
         _record_answer(work_order, "answer to crew %s (free text): %s" % (name, text))
     return _status(name)
 
@@ -1180,7 +1183,7 @@ def wait_limit(name):
         delta = found["wait_option"] - found["highlighted"]
         keys = ["down"] * delta if delta > 0 else ["up"] * -delta
         if keys:
-            herdr_cli.send_keys(name, keys)
+            herdr_cli.send_keys(name, keys, "limit_choice")
         # Enter only after the screen shows "Stop and wait" highlighted: a move that landed
         # elsewhere must never confirm "Upgrade"
         again = limits.limit_screen(herdr_cli.agent_visible(name), d)
@@ -1189,7 +1192,7 @@ def wait_limit(name):
                 or again["highlighted"] != again["wait_option"]
                 or not again["options"][again["highlighted"]].lower().startswith(wait)):
             return {"status": "unknown_limit_dialog"}
-        herdr_cli.send_keys(name, ["enter"])
+        herdr_cli.send_keys(name, ["enter"], "limit_choice")
     elif herdr_cli.choice_state(herdr_cli.bottom_block(visible, d["screen"]["tail_lines"])):
         return {"status": "unknown_limit_dialog"}
     resets_at = found["resets_at"]

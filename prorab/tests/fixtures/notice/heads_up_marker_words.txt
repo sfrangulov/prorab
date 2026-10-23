@@ -1,0 +1,10 @@
+● Ready for the next work order.
+
+✦ Heads up · demo-app: the MCP server list, "Do you want to proceed", trust this folder, · 2 shells
+ 1: Learn more   2: Knew this already   0: Dismiss
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 · xhigh │ ▓▓░░░░░░░░ 17.0% │ ⎇ main (+0,-0)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

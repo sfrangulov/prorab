@@ -53,7 +53,7 @@ class FakeBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = self.tmp.name
-        saved = {k: os.environ.get(k) for k in ("PATH", "FAKE_HERDR_DIR", "HERDR_ENV")}
+        saved = {k: os.environ.get(k) for k in ("PATH", "FAKE_HERDR_DIR", "HERDR_ENV", "PRORAB_LOG_DIR")}
 
         def restore():
             for k, v in saved.items():
@@ -65,7 +65,16 @@ class FakeBase(unittest.TestCase):
         os.environ["PATH"] = FAKES + os.pathsep + os.environ.get("PATH", "")
         os.environ["FAKE_HERDR_DIR"] = self.dir
         os.environ["HERDR_ENV"] = "1"
+        os.environ["PRORAB_LOG_DIR"] = os.path.join(self.dir, "logs")
         self.routes = {}
+
+    def keys_lines(self):
+        """The lines of the keys log, parsed."""
+        try:
+            with open(herdr_cli.keys_log_path(), encoding="utf-8") as fh:
+                return [json.loads(ln) for ln in fh.read().splitlines()]
+        except FileNotFoundError:
+            return []
 
     def route(self, prefix, body, exit_code=0, name=None, stderr=None):
         self._n = getattr(self, "_n", 0) + 1
@@ -199,7 +208,7 @@ class TestRun(FakeBase):
 
     def test_send_keys(self):
         self.route("agent send-keys a1 down enter", "")
-        herdr_cli.send_keys("a1", ["down", "enter"])
+        herdr_cli.send_keys("a1", ["down", "enter"], "choice")
         self.assertIn("agent send-keys a1 down enter", self.calls())
 
     def test_run_empty_stdout_names_command_rc_and_stderr(self):
@@ -231,7 +240,7 @@ class TestRun(FakeBase):
 
     def test_send_keys_takes_silent_success(self):
         self.route("agent send-keys a1 enter", "")
-        herdr_cli.send_keys("a1", ["enter"])
+        herdr_cli.send_keys("a1", ["enter"], "choice")
         self.assertIn("agent send-keys a1 enter", self.calls())
 
     def test_non_json_error_is_cli_error(self):
@@ -475,6 +484,75 @@ class TestRecoverStalled(FakeBase):
             self.setup_agent(status, "ours.txt")
             self.assertEqual(herdr_cli.recover_stalled("a1", self.TEXT), "stalled")
             self.assertEqual(self.keys(), [])
+
+
+class TestKeysLog(FakeBase):
+    def test_recover_stalled_enter_is_logged(self):
+        TestRecoverStalled.setup_agent(self, "idle", "ours.txt")
+        self.assertEqual(herdr_cli.recover_stalled("a1", TestRecoverStalled.TEXT), "accepted")
+        (line,) = self.keys_lines()
+        self.assertEqual((line["target"], line["crew"], line["keys"], line["why"], line["ok"],
+                          line["error"]), ("a1", "a1", ["enter"], "stalled_enter", True, None))
+        self.assertIn("ts", line)
+
+    def test_unwritable_keys_log_never_stops_a_press(self):
+        blocker = os.path.join(self.dir, "not-a-dir")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        os.environ["PRORAB_LOG_DIR"] = blocker
+        self.route("agent send-keys a1 enter", "")
+        herdr_cli.send_keys("a1", ["enter"], "choice")
+        self.assertIn("agent send-keys a1 enter", self.calls())
+
+    def test_failed_send_keys_is_logged_and_raised(self):
+        self.route("agent send-keys a1 enter", "", exit_code=1, stderr="boom")
+        with self.assertRaises(herdr_cli.HerdrError):
+            herdr_cli.send_keys("a1", ["enter"], "choice")
+        (line,) = self.keys_lines()
+        self.assertFalse(line["ok"])
+        self.assertIn("boom", line["error"])
+
+
+class TestNoticeCard(unittest.TestCase):
+    def test_notice_card_is_no_dialog(self):
+        import crew
+        import limits
+        import _defaults
+        screen = fixture("notice", "heads_up.txt")
+        self.assertIsNone(herdr_cli.consent_dialog(screen))
+        self.assertIsNone(herdr_cli.choice_state(screen))
+        self.assertEqual(herdr_cli.composer_text(screen), "")
+        self.assertEqual(herdr_cli.bg_shells(screen), 0)
+        self.assertIsNone(crew.exit_dialog(screen))
+        self.assertIsNone(limits.limit_screen(screen, _defaults.load()))
+
+    def test_notice_card_words_are_never_markers(self):
+        screen = fixture("notice", "heads_up_marker_words.txt")
+        self.assertIsNone(herdr_cli.consent_dialog(screen))
+        self.assertEqual(herdr_cli.bg_shells(screen), 0)
+        plain = screen.replace("\u2726 ", "")
+        # the line holds several markers: the first kind in CONSENT_KINDS wins
+        self.assertEqual(herdr_cli.consent_dialog(plain), "trust")
+
+    def test_notice_card_needs_its_last_line(self):
+        screen = fixture("notice", "heads_up_marker_words.txt").replace("0: Dismiss", "")
+        self.assertIsNone(herdr_cli.notice_card_span(screen.splitlines()))
+        self.assertEqual(herdr_cli.consent_dialog(screen), "trust")
+        self.assertEqual(herdr_cli.bg_shells(screen), 2)
+
+    def test_dialog_below_a_notice_card_is_still_read(self):
+        self.assertEqual(herdr_cli.consent_dialog(fixture("notice", "heads_up_over_mcp.txt")),
+                         "mcp")
+
+    def test_login_below_a_notice_card_is_still_read(self):
+        login = fixture("login", "not_logged_in.txt")
+        card = fixture("notice", "heads_up.txt").split("\n\n")[1]
+        self.assertTrue(herdr_cli.not_logged_in(card + "\n" + login))
+
+    def test_card_span(self):
+        lines = fixture("notice", "heads_up.txt").splitlines()
+        self.assertEqual(herdr_cli.notice_card_span(lines), (2, 3))
+        self.assertNotIn("Heads up", herdr_cli.without_notice_card("\n".join(lines)))
 
 
 class TestConsent(unittest.TestCase):

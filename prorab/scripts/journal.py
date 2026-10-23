@@ -490,7 +490,8 @@ def working_work_orders():
     return out
 
 
-_BODY_PATH = re.compile(r"^[ \t]*-[ \t]+Path:[ \t]*`?(/\S*?)`?(?:\.(?=\s|$)|\s|$)", re.M)
+_BODY_PATH_TICKS = re.compile(r"^[ \t]*-[ \t]+Path:[ \t]*`(/[^`\n]*)`", re.M)
+_BODY_PATH = re.compile(r"^[ \t]*-[ \t]+Path:[ \t]*(/.*?)(?:\.[ \t]+You work|\.?[ \t]*$)", re.M)
 
 
 def work_order_site(work_order):
@@ -499,8 +500,9 @@ def work_order_site(work_order):
     site = (issue(work_order) or {}).get("site")
     if site:
         return site
-    m = _BODY_PATH.search((_show(work_order).get("description") or ""))
-    return m.group(1) if m else None
+    body = _show(work_order).get("description") or ""
+    m = _BODY_PATH_TICKS.search(body) or _BODY_PATH.search(body)
+    return m.group(1).strip() if m else None
 
 
 def ready_work_orders():
@@ -553,6 +555,7 @@ def acts(bead, kind=None):
     return out
 
 
+@_serialized
 def amend(work_order, text):
     """Append a "## Amendment <n> (<UTC time>)" section with `text` to an open work order's
     body and record an `answer` act "[amendment <n>] <first line>". Criteria are read from the

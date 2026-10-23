@@ -90,7 +90,7 @@ Three live runs on toy sites, herdr 0.9.5, Claude Code 2.1.306-2.1.307, bd 1.3.1
 
 ## Live-run procedure: the office journal stays out of tests (fix wave 1, item 12)
 - A live test runs from a lab folder with `PRORAB_BEADS_DIR` set to that folder's own `.beads` (`PRORAB_BEADS_DIR=<lab>/.beads python3 .../journal.py ensure` makes it there). Every script of the run, the monitor included, gets the same variable; none runs against the office journal.
-- At the end of the run check that the office journal gained no work order: its list of open work orders (`journal.py ready-work-orders` without the variable) is the one it had before the run.
+- At the end of the run check that the office journal gained no work order: its list of ready work orders (`journal.py ready-work-orders` without the variable) is the one it had before the run.
 - A work order whose site folder is gone (a lab folder removed) is listed under `stale` by `scheduler.py plan` and as a "stale work order" note by `shift.py preflight`, and is never offered; close it with `journal.py close-work-order` on the customer's leave.
 
 ## Open items (not seen by any run)

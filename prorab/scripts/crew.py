@@ -1359,15 +1359,30 @@ def _named_paths(line):
     return re.findall(r"`([^`\n]+)`", line) + re.findall(r"[^\s`]+\.md\b", line)
 
 
+def _other_words(line):
+    """The words of a line besides its named paths."""
+    rest = re.sub(r"`[^`\n]+`", " ", line)
+    return re.findall(r"\w+", re.sub(r"[^\s`]+\.md\b", " ", rest))
+
+
+def _is_pointer(message):
+    """A last message that names a path and says at most 3 other words on each line."""
+    return bool(_named_paths(message)) and all(
+        len(_other_words(ln)) <= 3 for ln in message.splitlines() if ln.strip())
+
+
 def _act_file(message, worktree):
-    """The act a last message points at (no line of it without a named path): the first
+    """The act a pointer message names (see `_is_pointer`): the first
     path in backticks or word ending in .md whose real path (links resolved) lies inside the
     worktree or the work-orders directory and is a regular file of at most ACT_FILE_MAX
     bytes. Else None."""
     roots = [os.path.realpath(r) for r in (worktree, _files_dir())]
     for raw in _named_paths(message):
         path = os.path.expanduser(raw.strip())
-        real = os.path.realpath(path if os.path.isabs(path) else os.path.join(worktree, path))
+        try:
+            real = os.path.realpath(path if os.path.isabs(path) else os.path.join(worktree, path))
+        except ValueError:  # an embedded NUL
+            continue
         if not any(real == r or real.startswith(r + os.sep) for r in roots):
             continue
         try:
@@ -1401,10 +1416,14 @@ def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1,
     if not worktree:
         return {"status": "restart_failed", "reason": "worktree of the crew is unknown"}
     act = "\n".join(ln for ln in lines if ln.strip() != HANDOVER_MARKER).strip()
-    if all(_named_paths(ln) for ln in act.splitlines() if ln.strip()):  # no act text, only a pointer
-        act = _act_file(act, worktree)
-        if act is None:
-            return {"status": "act_missing"}
+    if not act:
+        return {"status": "act_missing"}
+    if _is_pointer(act):  # a file is the act when one resolves; else the message stays the act
+        found = _act_file(act, worktree)
+        if found is not None:
+            act = found
+        elif not any(_other_words(ln) for ln in act.splitlines()):
+            return {"status": "act_missing"}  # nothing but paths
     failed = _settings_failure(name, work_order, pane)  # before the act is saved, before /exit
     if failed:
         return failed
@@ -1968,6 +1987,7 @@ def _blocks(lines):
     out, indent = [], None
     for ln in lines:
         m = _ITEM.match(ln)
+        ln = ln.expandtabs(4)
         depth = len(ln) - len(ln.lstrip())
         if indent is not None and ln.strip() and depth > indent:
             out[-1].append(((m.group(1) or "") if m else ln).strip())

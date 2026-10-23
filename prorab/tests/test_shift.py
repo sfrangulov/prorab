@@ -174,6 +174,19 @@ class TestPreflight(ShiftBase):
         self.assertIn("/home/user/projects/gone-site", stale[0])
         self.assertFalse(any(live in p for p in problems), problems)
 
+    def test_preflight_a_site_path_with_a_space_is_read_whole(self):
+        spaced = os.path.join(self.tmp.name, "My Site")
+        os.makedirs(spaced)
+        n = self.site_work_order(spaced, "Spaced")
+        quoted = os.path.join(self.tmp.name, "Quoted Site")
+        os.makedirs(quoted)
+        q = journal.create_work_order("o", "Quoted", "- Path: `%s`. You work in it.\n" % quoted,
+                                      {"usd": 5})
+        problems = shift.preflight(self.d)
+        self.assertFalse(any(n in p or q in p for p in problems), problems)
+        self.assertEqual(journal.work_order_site(n), spaced)
+        self.assertEqual(journal.work_order_site(q), quoted)
+
     def test_preflight_stale_is_read_from_the_issue_record_first(self):
         here = os.path.join(self.tmp.name, "site")
         os.makedirs(here)

@@ -1213,7 +1213,7 @@ class TestHandover(CrewBase):
 
     def test_handover_act_named_file_in_the_worktree_is_read(self):
         path = os.path.join(self.wt, "notes", "act.md")
-        self.named_act("The act is in `%s`.\nHANDOVER READY" % path, path)
+        self.named_act("Act is in `%s`.\nHANDOVER READY" % path, path)
         self.assertEqual(self.go()["status"], "restarted")
         act = self.j.act_log[0][2]
         self.assertTrue(act.startswith("Act: done B\nNext: C"))
@@ -1227,7 +1227,7 @@ class TestHandover(CrewBase):
 
     def test_handover_act_named_file_outside_is_act_missing(self):
         path = os.path.join(self.dir, "elsewhere", "act.md")
-        self.named_act("See `%s`\nHANDOVER READY" % path, path)
+        self.named_act("`%s`\nHANDOVER READY" % path, path)
         self.assert_act_missing()
 
     def test_handover_act_link_pointing_outside_is_act_missing(self):
@@ -1237,8 +1237,53 @@ class TestHandover(CrewBase):
             fh.write("secret")
         link = os.path.join(self.wt, "act.md")
         os.symlink(target, link)
-        self.named_act("See `%s`\nHANDOVER READY" % link)
+        self.named_act("`%s`\nHANDOVER READY" % link)
         self.assert_act_missing()
+
+    def test_handover_one_line_act_with_a_backtick_is_recorded_as_given(self):
+        self.named_act("Done in `abc123`.\nHANDOVER READY")
+        self.assertEqual(self.go()["status"], "restarted")
+        self.assertTrue(self.j.act_log[0][2].startswith("Done in `abc123`."))
+
+    def test_handover_text_with_a_path_outside_records_the_message(self):
+        path = os.path.join(self.dir, "elsewhere", "act.md")
+        self.named_act("Done: see `%s`\nHANDOVER READY" % path, path)
+        self.assertEqual(self.go()["status"], "restarted")
+        self.assertTrue(self.j.act_log[0][2].startswith("Done: see `%s`" % path))
+
+    def test_handover_long_act_naming_a_file_is_the_act(self):
+        path = os.path.join(self.wt, "act.md")
+        message = "Goal: ship the export\nDone: the writer is in `%s` and tested\nNext: docs" % path
+        self.named_act(message + "\nHANDOVER READY", path)
+        self.assertEqual(self.go()["status"], "restarted")
+        self.assertTrue(self.j.act_log[0][2].startswith("Goal: ship the export"))
+
+    def test_handover_unsafe_named_files_are_act_missing(self):
+        outside = os.path.join(self.dir, "elsewhere")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "act.md"), "w", encoding="utf-8") as fh:
+            fh.write("Act: x")
+        sibling = self.wt + "-2"
+        os.makedirs(sibling)
+        with open(os.path.join(sibling, "act.md"), "w", encoding="utf-8") as fh:
+            fh.write("Act: x")
+        os.makedirs(os.path.join(self.wt, "adir.md"))
+        fifo = os.path.join(self.wt, "fifo.md")
+        os.mkfifo(fifo)
+        cases = {
+            "prefix sibling": os.path.join(sibling, "act.md"),
+            "dot-dot escape": os.path.join(self.wt, "..", "..", "elsewhere", "act.md"),
+            "directory": os.path.join(self.wt, "adir.md"),
+            "fifo": fifo,
+            "missing": os.path.join(self.wt, "missing.md"),
+            "relative": "act.md",  # resolved in the worktree, where there is none
+            "nul": os.path.join(self.wt, "a\x00b.md"),
+        }
+        for label, path in cases.items():
+            with self.subTest(label):
+                self.named_act("`%s`\nHANDOVER READY" % path)
+                self.route("agent list", ok({"agents": [agent_entry()]}))  # not a sequence
+                self.assert_act_missing()
 
     def test_handover_marker_alone_names_no_file_is_act_missing(self):
         self.named_act("HANDOVER READY")
@@ -2784,6 +2829,11 @@ class TestCheckReport(CrewBase):
         text = make_report(sections={"Verification": "## Verification\n" + block},
                            tail="\nResult: delivered\nCommit: %s\n" % self.sha)
         r = crew.check_report(text, ["C1", "C2"], ["src/"], self.wt, live=["C1"])
+        self.assertTrue(r["ok"], r["problems"])
+
+    def test_a_tab_indented_sub_bullet_belongs_to_its_item(self):
+        block = "  - Browser check:\n\t- `npx playwright test` - 3 passed - SKIP: 0\n"
+        r = self.check(text=self.verification_report(block))
         self.assertTrue(r["ok"], r["problems"])
 
     def test_check_report_skip_is_warning(self):

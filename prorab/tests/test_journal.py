@@ -1116,6 +1116,12 @@ class TestAmend(JournalBase):
         self.assertEqual(self.body(n), "b")
         self.assertEqual(journal.acts(n, "answer"), [])
 
+    def test_amend_refuses_a_bead_without_the_work_order_label(self):
+        other = journal.bd(["create", "alien", "-d", "x", "--silent"], json_out=False).strip()
+        with self.assertRaises(journal.JournalError):
+            journal.amend(other, "x")
+        self.assertEqual(self.body(other), "x")
+
     def test_amended_criteria_are_seen_by_criteria_ids(self):
         import crew
         n = journal.create_work_order("o", "T", "- C1: first", {"usd": 10})

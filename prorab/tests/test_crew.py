@@ -100,8 +100,12 @@ class FakeJournal:
     def machine(self):
         return {"parallel_ceiling": self.ceiling}
 
-    def crews(self):
+    def crews(self, kv=None):
         return list(self.active)
+
+    def issues(self, state=None, kv=None):
+        return {k[len("issue."):]: json.loads(v) for k, v in self.kv.items()
+                if k.startswith("issue.")}
 
     def register_crew(self, name):
         if name not in self.active:
@@ -536,6 +540,18 @@ class TestStart(CrewBase):
         self.assertEqual(rec["state"], "issuing")
         self.assertEqual((rec["name"], rec["pane"]), ("a1", "w:p9"))
         self.assertRegex(rec["session_id"], r"^[0-9a-f-]{36}$")
+
+    def test_start_records_the_start_commit(self):
+        repo = self.make_repo()
+        git(repo, "checkout", "-q", "-b", "develop")
+        self.commit(repo, "dev.txt", "d\n", "develop work")
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        sha = git(wt, "rev-parse", "HEAD").strip()
+        self.j.files = {"N1": ["x"]}
+        self.routes_for_start()
+        crew.start(repo, "N1", "a1", "w:p1")
+        self.assertEqual(self.j.issue("N1")["base_commit"], sha)
+        self.assertEqual(self.j.kv["crew.a1.base_commit"], sha)
 
     def test_start_records_worktree_in_issue(self):
         repo = self.make_repo()
@@ -1247,6 +1263,50 @@ class TestHandover(CrewBase):
         import shlex
         cd = [c for c in self.calls() if c.startswith("pane run w:p9 ")][0]
         self.assertEqual(shlex.split(cd[len("pane run w:p9 "):]), ["cd", wt])
+
+
+class TestRecordedBase(CrewBase):
+    """The worktree's start commit is the base of the acceptance checks (final review, I3)."""
+
+    def develop_repo(self):
+        """A site on `develop`, one commit ahead of `main`; returns (repo, worktree, start sha)."""
+        repo = self.make_repo()
+        git(repo, "checkout", "-q", "-b", "develop")
+        self.commit(repo, "dev.txt", "d\n", "develop work")
+        wt = self.add_worktree(repo, "N1", "prorab/N1")
+        return repo, wt, git(wt, "rev-parse", "HEAD").strip()
+
+    def test_evidence_defaults_to_the_recorded_base(self):
+        repo, wt, sha = self.develop_repo()
+        self.commit(wt, "g.txt", "1\n", "one")
+        self.assertEqual(len(crew.evidence(wt)["commits"]), 2)  # no record: main..HEAD (legacy)
+        self.j.issue_set("N1", "issued", worktree=wt, base_commit=sha)
+        ev = crew.evidence(wt)
+        self.assertEqual(len(ev["commits"]), 1)
+        self.assertNotIn("dev.txt", ev["diffstat"])
+        self.assertEqual(len(crew.evidence(wt, base="main")["commits"]), 2)  # explicit wins
+
+    def test_kv_of_the_crew_gives_the_base(self):
+        repo, wt, sha = self.develop_repo()
+        self.j.active = ["a1"]
+        self.j.kv.update({"crew.a1.worktree": wt, "crew.a1.base_commit": sha})
+        self.assertEqual(crew._resolve_base(wt, None), sha)
+
+    def test_handover_facts_use_the_recorded_base(self):
+        repo, wt, sha = self.develop_repo()
+        self.commit(wt, "g.txt", "1\n", "one")
+        self.j.issue_set("N1", "issued", worktree=wt, base_commit=sha)
+        facts = crew._facts(wt, "N1", None)
+        self.assertIn("one", facts)
+        self.assertNotIn("develop work", facts)
+
+    def test_check_report_delivery_uses_the_recorded_base(self):
+        repo, wt, sha = self.develop_repo()
+        self.commit(wt, "g.txt", "1\n", "one")
+        self.j.issue_set("N1", "issued", worktree=wt, base_commit=sha)
+        head = git(wt, "rev-parse", "HEAD").strip()
+        problems = crew._check_delivery(head, ["`g.txt`"], ["g.txt"], wt, None)
+        self.assertEqual([p for p in problems if "outside" in p or "not listed" in p], [])
 
 
 class TestGit(CrewBase):

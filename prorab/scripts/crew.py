@@ -134,9 +134,27 @@ def _kv_of(kv, key):
     return None if v in (None, "") else v
 
 
-def _resolve_base(worktree, base):
-    """`base` when it names a commit; else the site's default branch (main, master, or the
-    branch checked out in the main worktree)."""
+def _recorded_base(worktree):
+    """The commit the crew's worktree started from, as `start` recorded it (kv of the crew
+    working there, else the issue record with that worktree); None for older records."""
+    real = os.path.realpath(worktree)
+    kv = journal.kv_all()
+    for name in journal.crews(kv):
+        wt, base = _kv_of(kv, _kv(name, "worktree")), _kv_of(kv, _kv(name, "base_commit"))
+        if wt and base and os.path.realpath(wt) == real:
+            return base
+    for rec in journal.issues(kv=kv).values():
+        if rec.get("base_commit") and rec.get("worktree") \
+                and os.path.realpath(rec["worktree"]) == real:
+            return rec["base_commit"]
+    return None
+
+
+def _resolve_base(worktree, base=None):
+    """`base` when it names a commit; else the commit the worktree started from (recorded by
+    `start`); else, for records made before that, the site's default branch (main, master, or
+    the branch checked out in the main worktree)."""
+    base = base or _recorded_base(worktree)
     if base and _git_soft(["rev-parse", "--verify", "--quiet", "%s^{commit}" % base],
                      worktree).returncode == 0:
         return base
@@ -524,9 +542,14 @@ def _register_started(site_path, work_order, name, pane, session_id):
         if _git_soft(["branch", "-m", want], worktree).returncode == 0:
             branch = want
 
+    base_commit = None
+    if worktree:
+        p = _git_soft(["rev-parse", "HEAD"], worktree)
+        base_commit = p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
     if worktree:  # so the spend stays attributable after the crew is gone
+        extra = {"base_commit": base_commit} if base_commit else {}
         journal.issue_set(work_order, (journal.issue(work_order) or {}).get("state", "issuing"),
-                          worktree=worktree)
+                          worktree=worktree, **extra)
     journal.register_crew(name)
     fields = [("work_order", work_order), ("site", site_path), ("pane", pane)]
     ident = (journal.issue(work_order) or {}).get("pane_identity")
@@ -534,6 +557,8 @@ def _register_started(site_path, work_order, name, pane, session_id):
         fields.append(("pane_identity", json.dumps(ident)))
     if worktree:
         fields += [("worktree", worktree), ("branch", branch or "")]
+        if base_commit:
+            fields.append(("base_commit", base_commit))
     for field, value in fields:
         journal.kv_set(_kv(name, field), value)
     _set_session(name, worktree, session_id, work_order)
@@ -874,7 +899,7 @@ def _facts(worktree, work_order, base):
         "Open stages (bd show):", _open_stage_statuses(work_order)])
 
 
-def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1, base="main"):
+def complete_handover(name, work_order, work_order_text, timeout_s=60, poll_s=1, base=None):
     if emergency_stop():
         return {"status": _STOPPED}
     a = herdr_cli.agent(name)
@@ -1072,7 +1097,7 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
 
 # ---- git facts --------------------------------------------------------------
 
-def evidence(worktree, base="main"):
+def evidence(worktree, base=None):
     base = _resolve_base(worktree, base)
     branch = _git_soft(["rev-parse", "--abbrev-ref", "HEAD"], worktree).stdout.strip()
     commits = _git_soft(["log", "--oneline", "%s..HEAD" % base], worktree).stdout.splitlines()
@@ -1394,7 +1419,7 @@ def _check_heavy(text, heavy_limit, cleared, heavy_counted, unverifiable=None):
     return problems
 
 
-def check_report(text, criteria, files, worktree, base="main", heavy_limit=None, cleared=False,
+def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, cleared=False,
                  heavy_counted=None, unverifiable=None):
     """Read-only check of a stage report against its work order and the worktree's git."""
     problems, warnings = [], []
@@ -1533,7 +1558,7 @@ def ask_predecessor(work_order, session_id, cwd, question):
     return p.stdout
 
 
-def _check_report_cli(name, work_order, stage=None, base="main"):
+def _check_report_cli(name, work_order, stage=None, base=None):
     worktree = journal.kv_get(_kv(name, "worktree"))
     if not worktree:
         raise ValueError("worktree of the crew %s is unknown" % name)
@@ -1587,14 +1612,14 @@ def main(argv=None):
     cmd("summary", "name")
     cmd("request_handover", "name")
     cmd("complete_handover", "name", "work_order", "work_order_text")
-    cmd("evidence", "worktree", base={"default": "main"})
+    cmd("evidence", "worktree", base={})
     cmd("merge_check", "worktree", accepted={"default": ""})
     cmd("answer", "name", choice={"type": int}, text={})
     cmd("pause", "name")
     cmd("resume", "name")
     cmd("wait_limit", "name")
     cmd("restart", "name", "work_order", "work_order_text", "reason", caller_pane={})
-    cmd("check_report", "name", "work_order", stage={}, base={"default": "main"})
+    cmd("check_report", "name", "work_order", stage={}, base={})
     cmd("spend", "work_order")
     cmd("accept", "work_order", "stage", act_file={"required": True})
     cmd("report_fix", "name", "work_order", "stage", problems_file={"required": True})

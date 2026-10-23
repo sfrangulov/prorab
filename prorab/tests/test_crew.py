@@ -1813,6 +1813,30 @@ class TestRestart(CrewBase):
         self.assertTrue(self.starts()[-1].endswith("--settings %s" % self.settings_path()))
         self.assertTrue(os.path.isfile(self.settings_path()))
 
+    def test_restart_keeps_the_merge_settings(self):
+        self.j.kv["hooks.enabled"] = "1"
+        self.j.issue_set("N1", "issued", main_checkout=True, merge_branch="prorab/x")
+        merge = os.path.join(self.home, ".cache", "prorab", "crew-settings-merge-N1.json")
+        # a resume
+        self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
+        self.assertEqual(self.go()["status"], "resumed")
+        self.assertEqual(self.starts(), [
+            "agent start a1 --kind claude --pane w:p9 -- --resume old-session --add-dir %s "
+            "--settings %s" % (self.files_dir(), merge)])
+        with open(merge, encoding="utf-8") as fh:
+            self.assertIn("guard --merge-branch prorab/x", fh.read())
+        self.assertFalse(os.path.exists(self.settings_path()))  # the shared file is not written
+        # a new session
+        self.write_transcript("/work", "old-session", "x", tokens=(130000, 0, 0))
+        self.j.kv["crew.a1.transcript"] = crew.transcript.transcript_path(
+            "/work", "old-session", self.home)
+        self.assertEqual(self.go()["status"], "restarted")
+        line = self.starts()[-1]
+        self.assertTrue(line.endswith(" --add-dir %s --settings %s" % (self.files_dir(), merge)),
+                        line)
+        self.assertNotIn(" -w ", line)
+        self.assertFalse(os.path.exists(self.settings_path()))
+
     def test_restart_and_handover_pass_no_settings_while_disabled(self):
         self.j.kv["crew.a1.delivered"] = fingerprint("Work order text")
         self.assertEqual(self.go()["status"], "resumed")
@@ -2446,6 +2470,17 @@ class TestWorkOrderSpend(CrewBase):
         self.assertGreater(r["usd"], 0)
         self.assertAlmostEqual(r["usd"], 4.0)
 
+    def test_spend_of_a_main_checkout_work_order_counts_its_sessions_only(self):
+        site = "/home/user/projects/demo-app"
+        self.j.issue_set("N3", "issued", worktree=site, sessions=["merge-s"], main_checkout=True)
+        self.write_usage(site, "merge-s", [("mg1", "claude-opus-5", 1000000, 0)])
+        self.write_usage(site, "customer-s", [("cu1", "claude-opus-5", 1000000, 0)])
+        self.write_usage(site + "/.claude/worktrees/prorab-N9", "other-s",
+                         [("ot1", "claude-opus-5", 1000000, 0)])
+        self.assertAlmostEqual(crew.work_order_spend("N3")["usd"], 4.0)
+        self.j.issue_set("N4", "issued", worktree=site, sessions=["merge-s"])
+        self.assertGreater(crew.work_order_spend("N4")["usd"], 4.0)  # a worktree: the whole folder
+
     def test_work_order_spend_unknown_week_rate(self):
         d = _defaults.load()
         d["rate"]["default_week_usd_per_pp"] = None  # the unknown-week path
@@ -2934,9 +2969,9 @@ class TestExitDialog(CrewBase):
         real_exit = crew._exit
         real_start = crew._start_session
 
-        def start(name, pane, args, want_screen=False):
+        def start(name, pane, args, want_screen=False, **kw):
             fresh.append(self.add_worktree(repo, "N1"))
-            return real_start(name, pane, args, want_screen)
+            return real_start(name, pane, args, want_screen, **kw)
         with mock.patch.object(crew, "_exit", vanish), \
                 mock.patch.object(crew, "_start_session", start):
             res = self.handover()
@@ -3909,6 +3944,295 @@ class TestNewSite(CrewBase):
         self.assertEqual(code, 0)
         n.assert_called_once_with(site_path="/home/user/projects/x", work_order="N1",
                                   caller_pane="w:p1")
+
+
+class TestMainCheckout(CrewBase):
+    """`start --main-checkout`: the crew that merges a branch in the site's main checkout
+    (15.4). Real git for the site, the fake herdr for the pane."""
+
+    DECISION = '[customer decision] merge prorab/x ("merge it into main")'
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.make_repo()
+        git(self.repo, "checkout", "-q", "-b", "prorab/x")
+        self.commit(self.repo, "x.txt", "x\n", "work on x")
+        git(self.repo, "checkout", "-q", "main")
+        self.head = git(self.repo, "rev-parse", "HEAD").strip()
+        self.j.kv["hooks.enabled"] = "1"
+        self.j.files = {"N1": ["x.txt"]}
+        self.j.add_act("N1", "answer", self.DECISION)
+        self.route("pane layout --pane w:p1", ok({"layout": {"panes": [
+            {"pane_id": "w:p1", "rect": {"width": 200, "height": 40}}]}}))
+        self.route("pane split w:p1", ok({"pane": split_pane("w:p9")}))
+        self.route("agent start a1", ok({"agent": agent_entry()}))
+        self.route("agent list", ok({"agents": [agent_entry()]}))
+
+    def go(self, work_order="N1", name="a1"):
+        return crew.start(self.repo, work_order, name, "w:p1", main_checkout=True)
+
+    def refused(self, status):
+        r = self.go()
+        self.assertEqual(r["status"], status)
+        self.assertEqual(self.calls_or_empty(), [])  # nothing was started, not even a pane
+        self.assertIsNone(self.j.issue("N1"))
+        self.assertNotIn("a1", self.j.active)
+        return r
+
+    def start_line(self):
+        return [c for c in self.calls() if c.startswith("agent start a1")][0]
+
+    def shared_settings(self):
+        return os.path.join(self.home, ".cache", "prorab", "crew-settings.json")
+
+    def merge_settings(self, work_order="N1"):
+        return os.path.join(self.home, ".cache", "prorab",
+                            "crew-settings-merge-%s.json" % work_order)
+
+    def test_start_main_checkout_needs_hooks(self):
+        del self.j.kv["hooks.enabled"]
+        self.refused("hooks_off")
+        self.j.kv["hooks.enabled"] = "0"
+        self.refused("hooks_off")
+        self.assertFalse(os.path.exists(self.merge_settings()))
+
+    def test_start_main_checkout_needs_the_merge_decision(self):
+        self.j.act_log.clear()
+        self.refused("no_merge_decision")
+        self.j.add_act("N1", "answer", "[customer decision] drop (customer's words)")
+        self.j.add_act("N1", "handover", self.DECISION)  # only an `answer` act counts
+        self.j.add_act("N2", "answer", self.DECISION)  # only this work order's
+        self.j.add_act("N1", "answer", "[customer decision] mergeprorab/x")  # not the marker
+        self.refused("no_merge_decision")
+
+    def test_start_main_checkout_takes_the_latest_decision(self):
+        git(self.repo, "branch", "prorab/y")
+        self.j.add_act("N1", "answer", "[customer decision] merge prorab/y (changed my mind)")
+        r = self.go()
+        self.assertEqual(r["merge_branch"], "prorab/y")
+        self.assertEqual(self.j.issue("N1")["merge_branch"], "prorab/y")
+
+    def test_start_main_checkout_refuses_a_missing_branch(self):
+        self.j.act_log.clear()
+        self.j.add_act("N1", "answer", "[customer decision] merge prorab/none (words)")
+        self.refused("no_branch")
+        git(self.repo, "branch", "master", "HEAD")
+        for branch in ("main", "master"):
+            self.j.add_act("N1", "answer", "[customer decision] merge %s (words)" % branch)
+            self.refused("no_branch")
+        self.j.add_act("N1", "answer", "[customer decision] merge")
+        self.refused("no_branch")
+
+    def test_start_main_checkout_refuses_an_option_like_branch(self):
+        for bad in ("-x", "--all", "a b", "a;b", "$(x)", "a..b"):
+            self.j.add_act("N1", "answer", "[customer decision] merge %s (words)" % bad)
+            self.refused("no_branch")
+
+    def test_start_main_checkout_refuses_the_checked_out_branch(self):
+        git(self.repo, "checkout", "-q", "prorab/x")
+        self.refused("no_branch")  # no_branch comes before not_default_branch
+
+    def test_start_main_checkout_refuses_a_non_default_checkout(self):
+        git(self.repo, "checkout", "-q", "-b", "develop")
+        self.refused("not_default_branch")
+        git(self.repo, "checkout", "-q", "--detach")
+        self.refused("not_default_branch")
+
+    def test_start_main_checkout_accepts_master(self):
+        git(self.repo, "branch", "-m", "main", "master")
+        self.assertEqual(self.go()["status"], "started")
+
+    def test_start_main_checkout_refuses_a_dirty_main_checkout(self):
+        with open(os.path.join(self.repo, "new.txt"), "w") as fh:
+            fh.write("u\n")
+        self.refused("main_dirty")
+        os.remove(os.path.join(self.repo, "new.txt"))
+        with open(os.path.join(self.repo, "f.txt"), "a") as fh:
+            fh.write("changed\n")
+        self.refused("main_dirty")
+        git(self.repo, "checkout", "--", "f.txt")
+        os.makedirs(os.path.join(self.repo, "sub"))
+        with open(os.path.join(self.repo, "sub", "n.txt"), "w") as fh:
+            fh.write("u\n")
+        self.refused("main_dirty")  # an untracked file inside a new folder is listed by name
+        shutil.rmtree(os.path.join(self.repo, "sub"))
+        # entries under .claude/worktrees/ are the crews' own and do not count
+        os.makedirs(os.path.join(self.repo, ".claude", "worktrees", "x"))
+        with open(os.path.join(self.repo, ".claude", "worktrees", "x", "y.txt"), "w") as fh:
+            fh.write("u\n")
+        self.assertEqual(self.go()["status"], "started")
+
+    def test_start_main_checkout_refuses_a_busy_main_checkout(self):
+        self.j.active = ["b0"]
+        self.j.kv.update({"crew.b0.work_order": "N0", "crew.b0.worktree": self.repo,
+                          "crew.b0.site": self.repo})
+        r = self.refused("main_busy")
+        self.assertEqual(r.get("with"), ["b0"])
+        # a crew in a worktree of the same site does not make it busy
+        wt = self.add_worktree(self.repo, "N0")
+        self.j.kv["crew.b0.worktree"] = wt
+        self.j.files["N0"] = ["other.txt"]
+        self.assertEqual(self.go()["status"], "started")
+
+    def test_start_main_checkout_records_before_agent_start(self):
+        self.route("agent start a1", err("cli_error"), exit_code=1)
+        with self.assertRaises(herdr_cli.HerdrError):
+            self.go()
+        rec = self.j.issue("N1")
+        self.assertEqual(rec["state"], "issuing")
+        self.assertIs(rec["main_checkout"], True)
+        self.assertEqual(rec["merge_branch"], "prorab/x")
+        self.assertEqual(rec["site"], self.repo)
+
+    def test_start_main_checkout_starts_without_w(self):
+        r = self.go()
+        self.assertEqual(r["status"], "started")
+        self.assertEqual((r["worktree"], r["branch"], r["main_checkout"], r["merge_branch"]),
+                         (self.repo, "main", True, "prorab/x"))
+        m = re.match(r"^agent start a1 --kind claude --pane w:p9 -- --session-id (\S+) "
+                     r"--add-dir (\S+) --settings (\S+)$", self.start_line())
+        self.assertIsNotNone(m, self.start_line())
+        self.assertEqual(m.group(2), os.path.join(self.home, ".cache", "prorab", "work-orders"))
+        self.assertEqual(m.group(3), self.merge_settings())
+        self.assertNotIn(" -w ", self.start_line())
+        self.assertIn("pane split w:p1 --direction right --no-focus --cwd %s" % self.repo,
+                      self.calls())
+        self.assertEqual(self.j.kv["crew.a1.worktree"], self.repo)
+        self.assertEqual(self.j.kv["crew.a1.branch"], "main")
+        self.assertEqual(self.j.kv["crew.a1.transcript"],
+                         crew.transcript.transcript_path(self.repo, m.group(1)))
+        self.assertIn("a1", self.j.active)
+        self.assertEqual(self.j.issue("N1")["sessions"], [m.group(1)])
+
+    def test_start_main_checkout_records_head_as_base(self):
+        r = self.go()
+        self.assertEqual(self.j.kv["crew.a1.base_commit"], self.head)
+        rec = self.j.issue("N1")
+        self.assertEqual((rec["base_commit"], rec["worktree"]), (self.head, self.repo))
+        self.assertEqual(r["status"], "started")
+
+    def test_start_main_checkout_merge_settings_do_not_touch_the_shared_file(self):
+        shared = crew.hooks.write_settings()
+        with open(shared, "rb") as fh:
+            before = fh.read()
+        self.go()
+        with open(shared, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        self.assertNotIn(b"--merge-branch", before)
+        self.assertEqual(stat.S_IMODE(os.stat(self.merge_settings()).st_mode), 0o600)
+        with open(self.merge_settings(), encoding="utf-8") as fh:
+            self.assertIn("guard --merge-branch prorab/x", fh.read())
+        # another crew's start passes the shared file, without the option
+        self.add_worktree(self.repo, "N2")
+        self.j.files["N2"] = ["y.txt"]
+        self.route("agent start a2", ok({"agent": agent_entry(name="a2")}))
+        self.route("agent list", ok({"agents": [agent_entry(), agent_entry(name="a2")]}))
+        self.route("pane split w:p1", ok({"pane": split_pane("w:p10")}))
+        r = crew.start(self.repo, "N2", "a2", "w:p1")
+        self.assertEqual(r["status"], "started")
+        line = [c for c in self.calls() if c.startswith("agent start a2")][0]
+        self.assertTrue(line.endswith(" --settings %s" % self.shared_settings()), line)
+        with open(self.shared_settings(), "rb") as fh:
+            self.assertEqual(fh.read(), before)
+
+    def test_start_without_the_flag_forgets_an_earlier_merge_record(self):
+        self.j.issue_set("N1", "not_issued", main_checkout=True, merge_branch="prorab/x")
+        self.add_worktree(self.repo, "N1")
+        r = crew.start(self.repo, "N1", "a1", "w:p1")
+        self.assertEqual(r["status"], "started")
+        self.assertIn(" -w prorab-N1", self.start_line())
+        self.assertFalse(self.j.issue("N1").get("main_checkout"))
+        self.assertTrue(self.start_line().endswith("--settings %s" % self.shared_settings()))
+
+    def test_start_main_checkout_consent_answered_path_registers_the_site(self):
+        self.j.issue_set("N1", "issuing", name="a1", pane="w:p9", session_id="sess-1",
+                         sessions=["sess-1"], site=self.repo, main_checkout=True,
+                         merge_branch="prorab/x")
+        self.route("pane read w:p9 --source visible", "plain screen\n")
+        r = crew.start(self.repo, "N1", "a1", "w:p1")  # the record says what this start is
+        self.assertEqual((r["status"], r["worktree"], r["branch"]), ("started", self.repo, "main"))
+        self.assertEqual(self.j.kv["crew.a1.base_commit"], self.head)
+        self.assertEqual([c for c in self.calls() if c.startswith("agent start")], [])
+        self.assertEqual(self.j.issue("N1")["base_commit"], self.head)
+
+    def test_recorded_base_of_a_second_merge_work_order(self):
+        first = self.head
+        self.j.issue_set("N1", "issued", worktree=self.repo, base_commit=first, main_checkout=True)
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/x")
+        second = git(self.repo, "rev-parse", "HEAD").strip()
+        self.j.issue_set("N2", "issued", worktree=self.repo, base_commit=second,
+                         main_checkout=True)
+        real, kv = os.path.realpath(self.repo), self.j.kv_all()
+        self.assertEqual(crew._recorded_base_of(real, kv, "N1"), first)
+        self.assertEqual(crew._recorded_base_of(real, kv, "N2"), second)
+        self.assertIsNone(crew._recorded_base_of(real, kv))  # no work order: not guessed
+        self.assertIsNone(crew._recorded_base_of(real, kv, "N3"))
+        self.assertEqual(crew._resolve_base(self.repo, None, work_order="N2"), second)
+        self.assertEqual(crew._resolve_base(self.repo, None, work_order="N1"), first)
+
+    def test_cleanup_main_checkout_work_order_touches_no_branch(self):
+        wt = self.add_worktree(self.repo, "N1", "prorab/N1")  # merged, would be removed
+        self.j.issue_set("N1", "issued", name="a1", main_checkout=True, merge_branch="prorab/x")
+        r = crew.cleanup(self.repo, "N1")
+        self.assertEqual(r, {"status": "absent", "work_order_closed": False})
+        self.assertTrue(os.path.isdir(wt))
+        self.assertIn("prorab/N1", git(self.repo, "branch", "--list", "prorab/N1"))
+        self.assertIn("prorab/x", git(self.repo, "branch", "--list", "prorab/x"))
+        self.assertEqual(self.j.closed_work_orders, [])
+        # a drop decision still closes it, and still removes nothing
+        self.j.add_act("N1", "answer", crew.DROP_MARKER + " (customer's words)")
+        r = crew.cleanup(self.repo, "N1")
+        self.assertEqual(r["status"], "absent")
+        self.assertTrue(r["work_order_closed"])
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_check_report_merge_commit_on_main(self):
+        self.j.issue_set("N1", "issued", worktree=self.repo, base_commit=self.head,
+                         main_checkout=True)
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "prorab/x")
+        sha = git(self.repo, "rev-parse", "--short=10", "HEAD").strip()
+        text = make_report(sections={"Changed files": "## Changed files\n- `x.txt` - merged\n"},
+                           tail="\nResult: delivered\nCommit: %s\n" % sha)
+        r = crew.check_report(text, ["C1", "C2"], ["x.txt"], self.repo, work_order="N1")
+        self.assertTrue(r["ok"], r["problems"])
+        # without the work order the base falls back to main itself: nothing to deliver
+        r = crew.check_report(text, ["C1", "C2"], ["x.txt"], self.repo)
+        self.assertFalse(r["ok"])
+
+    def test_cli_start_takes_main_checkout(self):
+        with mock.patch.object(crew, "start", return_value={"status": "started"}) as s, \
+                mock.patch("builtins.print"):
+            self.assertEqual(crew.main(["start", "/home/user/projects/x", "N1", "a1", "w:p1",
+                                        "--main-checkout"]), 0)
+            self.assertEqual(crew.main(["start", "/home/user/projects/x", "N1", "a1", "w:p1"]), 0)
+        self.assertIs(s.call_args_list[0].kwargs["main_checkout"], True)
+        self.assertIs(s.call_args_list[1].kwargs["main_checkout"], False)
+
+    def test_complete_handover_keeps_the_merge_settings(self):
+        self.go()
+        os.remove(self.merge_settings())
+        self.j.kv["crew.a1.delivered"] = "x"
+        with mock.patch.object(crew, "_cd_failure", return_value=None), \
+                mock.patch.object(crew, "deliver", return_value="accepted"):
+            r = crew._restart_after_exit("a1", "N1", "Work order text", self.repo, "w:p9",
+                                         {"usd": 0}, 1, 0.01)
+        self.assertEqual(r["status"], "restarted")
+        line = [c for c in self.calls() if c.startswith("agent start a1")][-1]
+        self.assertNotIn(" -w ", line)
+        self.assertTrue(line.endswith(" --settings %s" % self.merge_settings()), line)
+        with open(self.merge_settings(), encoding="utf-8") as fh:
+            self.assertIn("--merge-branch prorab/x", fh.read())
+
+    def test_restart_without_hooks_starts_no_merge_crew(self):
+        self.go()
+        del self.j.kv["hooks.enabled"]
+        before = [c for c in self.calls() if c.startswith("agent start")]
+        with mock.patch.object(crew, "_cd_failure", return_value=None), \
+                mock.patch.object(crew, "deliver", return_value="accepted"):
+            r = crew._restart_after_exit("a1", "N1", "Work order text", self.repo, "w:p9",
+                                         {"usd": 0}, 1, 0.01)
+        self.assertEqual((r["status"], r["step"]), ("restart_failed", "settings"))
+        self.assertEqual([c for c in self.calls() if c.startswith("agent start")], before)
 
 
 class TestCli(unittest.TestCase):

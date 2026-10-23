@@ -42,11 +42,11 @@ class HooksBase(unittest.TestCase):
             fh.write("ref: refs/heads/%s\n" % branch)
         return repo
 
-    def decide(self, command, cwd="/nowhere", tool="Bash"):
+    def decide(self, command, cwd="/nowhere", tool="Bash", merge_branch=None):
         raw = json.dumps({"tool_name": tool, "tool_input": {"command": command}, "cwd": cwd})
         with mock.patch("subprocess.run", side_effect=AssertionError("a process")), \
                 mock.patch("subprocess.Popen", side_effect=AssertionError("a process")):
-            return hooks.guard_decision(raw, self.d)
+            return hooks.guard_decision(raw, self.d, merge_branch=merge_branch)
 
 
 class TestSettings(HooksBase):
@@ -313,6 +313,161 @@ class TestGuard(HooksBase):
         self.assertEqual(run(json.dumps({"tool_name": "Bash",
                                          "tool_input": {"command": "ls"}})).returncode, 0)
         self.assertEqual(run("garbage").returncode, 2)
+
+
+class TestMergeCrew(HooksBase):
+    """The guard of a main-checkout merge crew (`guard --merge-branch BRANCH`, fix wave 1)."""
+
+    BRANCH = "prorab/x"
+
+    def merge_decide(self, command, cwd):
+        return self.decide(command, cwd=cwd, merge_branch=self.BRANCH)
+
+    def test_guard_merge_branch_allows_only_that_merge(self):
+        repo = self.git_dir(branch="main")
+        for command in ("git merge --no-ff --no-edit prorab/x", "git merge prorab/x",
+                        "git merge --no-ff prorab/x", "git merge --ff-only prorab/x",
+                        "git merge --ff-only --no-edit prorab/x", "git merge --no-edit prorab/x",
+                        "git merge --abort", "git status", "git log --oneline -3",
+                        "git diff prorab/x", "git show HEAD", "git rev-parse HEAD",
+                        "git merge-base main prorab/x", "git ls-files", "git branch",
+                        "git branch --list", "git branch --show-current",
+                        "git status && git log --oneline", "git diff | head -5",
+                        "git -C %s status" % repo, "git --no-pager log -1",
+                        "ls src && python3 -m unittest"):
+            self.assertEqual(self.merge_decide(command, repo), (0, ""), command)
+        for command in ("git merge other", "git merge -X theirs prorab/x",
+                        "git merge prorab/x && git push", "git merge prorab/x; git push",
+                        "git merge --no-ff --no-edit prorab/x && ls",
+                        "git status; git merge prorab/x", "git merge --abort && git status",
+                        "git -C /elsewhere merge prorab/x", "git pull", "git cherry-pick X",
+                        "git commit --allow-empty -m x", "git reset HEAD~1",
+                        "git rebase main", "git push", "git am p.patch", "git revert HEAD",
+                        "git update-ref refs/heads/main HEAD", "git branch -D prorab/x",
+                        "git branch -f main HEAD", "git branch -m x y", "git branch newone",
+                        "git checkout prorab/x", "git switch prorab/x", "git stash",
+                        "git merge prorab/x prorab/y", "git merge --squash prorab/x",
+                        "git merge --no-ff --no-ff prorab/x", "git merge prorab/xx",
+                        "git merge --no-ff --no-edit", "git -c core.pager=x log",
+                        "git log --output=/tmp/x", "git diff --output /tmp/x",
+                        "git config user.name x", "git clean -n", "git tag v1",
+                        "git status > /tmp/x", "echo $(git commit -m x)",
+                        "echo `git commit -m x`", "xargs git commit", "env git commit",
+                        "GIT_DIR=x git commit", "bash -c 'git commit -m x'",
+                        "/usr/bin/git commit -m x", "git"):
+            code, message = self.merge_decide(command, repo)
+            self.assertEqual(code, 2, command)
+            self.assertTrue(message.startswith("prorab guard: "), command)
+
+    def test_guard_merge_branch_master_is_the_same(self):
+        master = self.git_dir("m", branch="master")
+        self.assertEqual(self.merge_decide("git merge --no-ff --no-edit prorab/x", master),
+                         (0, ""))
+        self.assertEqual(self.merge_decide("git merge other", master)[0], 2)
+        self.assertEqual(self.merge_decide("git pull", master)[0], 2)
+
+    def test_guard_merge_branch_from_a_subdirectory(self):
+        repo = self.git_dir()
+        sub = os.path.join(repo, "src")
+        os.makedirs(sub)
+        self.assertEqual(self.merge_decide("git merge --no-ff --no-edit prorab/x", sub), (0, ""))
+        self.assertEqual(self.merge_decide("git -C %s status" % repo, sub), (0, ""))
+        self.assertEqual(self.merge_decide("git -C .. merge prorab/x", sub), (0, ""))
+        self.assertEqual(self.merge_decide("git -C ../.. merge prorab/x", sub)[0], 2)
+        self.assertEqual(self.merge_decide("git commit -m x", sub)[0], 2)
+
+    def test_guard_merge_branch_dash_C_elsewhere_refused(self):
+        main = self.git_dir("main-site")
+        other = self.git_dir("other-site", branch="prorab/wo-1")
+        for target in (other, "/elsewhere", os.path.join(self.tmp.name, "nowhere")):
+            self.assertEqual(self.merge_decide("git -C %s status" % target, main)[0], 2, target)
+            self.assertEqual(self.merge_decide("git -C %s merge prorab/x" % target, main)[0], 2)
+        self.assertEqual(self.merge_decide("git -C %s -C %s status" % (main, other), main)[0], 2)
+
+    def test_guard_merge_branch_keeps_the_rules_for_any_crew(self):
+        repo = self.git_dir()
+        for entry in self.d["hooks"]["deny"]:
+            self.assertEqual(self.merge_decide("echo x && %s origin x" % entry, repo)[0], 2, entry)
+        office = os.path.expanduser("~/projects/prorab/.beads")
+        self.assertEqual(self.merge_decide("ls %s" % office, repo)[0], 2)
+        self.assertEqual(self.merge_decide("", repo), (2, "prorab guard: unreadable hook input"))
+
+    def test_guard_merge_branch_outside_main_follows_the_ordinary_rules(self):
+        work = self.git_dir("w", branch="prorab/wo-1")
+        self.assertEqual(self.merge_decide("git merge main", work), (0, ""))
+        self.assertEqual(self.merge_decide("git commit -m x", work), (0, ""))
+        self.assertEqual(self.merge_decide("git push", work)[0], 2)
+        nogit = os.path.join(self.tmp.name, "plain")
+        os.makedirs(nogit)
+        self.assertEqual(self.merge_decide("git status", nogit)[0], 2)  # cannot tell the branch
+
+    def test_guard_without_the_option_nothing_changes(self):
+        repo = self.git_dir()
+        self.assertEqual(self.decide("git merge --no-ff --no-edit prorab/x", cwd=repo)[0], 2)
+        self.assertEqual(self.decide("git pull", cwd=repo), (0, ""))
+        self.assertEqual(self.decide("git commit -m x", cwd=repo), (0, ""))
+
+    def test_guard_merge_branch_bad_value_is_refused(self):
+        repo = self.git_dir()
+        for bad in ("", "-x", "a b", "a;b", "x\n"):
+            self.assertEqual(self.decide("git status", cwd=repo, merge_branch=bad)[0], 2, bad)
+
+    def test_guard_cli_takes_the_option(self):
+        repo = self.git_dir()
+        run = lambda command, *extra: subprocess.run(
+            [sys.executable, "-I", HOOKS_PY, "guard"] + list(extra),
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command},
+                              "cwd": repo}),
+            capture_output=True, text=True, env=dict(os.environ))
+        self.assertEqual(run("git merge --no-ff --no-edit prorab/x",
+                             "--merge-branch", "prorab/x").returncode, 0)
+        self.assertEqual(run("git merge --no-ff --no-edit prorab/x").returncode, 2)
+        self.assertEqual(run("git pull", "--merge-branch", "prorab/x").returncode, 2)
+
+    def test_merge_settings_carry_the_option_and_nothing_else_changes(self):
+        shared = hooks.settings_dict(self.d)
+        merge = hooks.settings_dict(self.d, merge_branch=self.BRANCH)
+        self.assertNotIn("--merge-branch", json.dumps(shared))
+        (_, bash) = merge["hooks"]["PreToolUse"]
+        self.assertEqual(bash["hooks"][0]["command"],
+                         "python3 -I %s guard --merge-branch %s" % (HOOKS_PY, self.BRANCH))
+        merge["hooks"]["PreToolUse"][1]["hooks"][0]["command"] = "python3 -I %s guard" % HOOKS_PY
+        self.assertEqual(merge, shared)
+        for bad in ("", "-x", "a b", "a;b", "$(x)"):
+            with self.assertRaises(ValueError):
+                hooks.settings_dict(self.d, merge_branch=bad)
+
+    def test_write_merge_settings_is_a_file_per_work_order_beside_the_shared_one(self):
+        shared = hooks.write_settings(self.d)
+        with open(shared, "rb") as fh:
+            before = fh.read()
+        path = hooks.write_settings(self.d, merge_branch=self.BRANCH, work_order="N1")
+        self.assertEqual(path, os.path.join(os.path.dirname(shared),
+                                            "crew-settings-merge-N1.json"))
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(sorted(data), ["feedbackSurveyRate", "hooks", "promptSuggestionEnabled"])
+        self.assertIn("--merge-branch %s" % self.BRANCH, json.dumps(data))
+        with open(shared, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        other = hooks.write_settings(self.d, merge_branch="prorab/y", work_order="N2")
+        self.assertNotEqual(other, path)
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("prorab/x", fh.read())
+        self.assertEqual(sorted(os.listdir(os.path.dirname(shared))),
+                         ["crew-settings-merge-N1.json", "crew-settings-merge-N2.json",
+                          "crew-settings.json"])
+
+    def test_write_merge_settings_refuses_a_bad_work_order_or_a_half_pair(self):
+        for wo in ("", "../x", "a/b", ".x", "a b"):
+            with self.assertRaises(ValueError, msg=wo):
+                hooks.write_settings(self.d, merge_branch=self.BRANCH, work_order=wo)
+        with self.assertRaises(ValueError):
+            hooks.write_settings(self.d, merge_branch=self.BRANCH)
+        with self.assertRaises(ValueError):
+            hooks.write_settings(self.d, work_order="N1")
+        self.assertFalse(os.path.exists(os.path.dirname(self.d["hooks"]["settings_path"])))
 
 
 class TestTap(HooksBase):

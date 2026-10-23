@@ -137,32 +137,36 @@ def _kv_of(kv, key):
     return None if v in (None, "") else v
 
 
-def _recorded_base(worktree):
+def _recorded_base(worktree, work_order=None):
     """The commit the crew's worktree started from, as `start` recorded it (kv of the crew
-    working there, else the issue record with that worktree); None for older records."""
+    working there, else the issue record with that worktree); None for older records. The
+    records of main-checkout work orders share the site as their "worktree": they are found by
+    `work_order` only."""
     try:
-        return _recorded_base_of(os.path.realpath(worktree), journal.kv_all())
+        return _recorded_base_of(os.path.realpath(worktree), journal.kv_all(), work_order)
     except journal.JournalError:  # no journal to ask: the caller falls back to the default branch
         return None
 
 
-def _recorded_base_of(real, kv):
+def _recorded_base_of(real, kv, work_order=None):
     for name in journal.crews(kv):
         wt, base = _kv_of(kv, _kv(name, "worktree")), _kv_of(kv, _kv(name, "base_commit"))
         if wt and base and os.path.realpath(wt) == real:
-            return base
-    for rec in journal.issues(kv=kv).values():
+            if work_order is None or _kv_of(kv, _kv(name, "work_order")) in (None, work_order):
+                return base
+    for wo, rec in journal.issues(kv=kv).items():
         if rec.get("base_commit") and rec.get("worktree") \
-                and os.path.realpath(rec["worktree"]) == real:
+                and os.path.realpath(rec["worktree"]) == real \
+                and (wo == work_order if rec.get("main_checkout") else True):
             return rec["base_commit"]
     return None
 
 
-def _resolve_base(worktree, base=None):
+def _resolve_base(worktree, base=None, work_order=None):
     """`base` when it names a commit; else the commit the worktree started from (recorded by
     `start`); else, for records made before that, the site's default branch (main, master, or
     the branch checked out in the main worktree)."""
-    base = base or _recorded_base(worktree)
+    base = base or _recorded_base(worktree, work_order)
     if base and _git_soft(["rev-parse", "--verify", "--quiet", "%s^{commit}" % base],
                      worktree).returncode == 0:
         return base
@@ -284,10 +288,20 @@ def emergency_stop():
 _STOPPED = "emergency_stop"
 
 
-def _settings_pairs():
+def _settings_pairs(work_order=None):
     """`(("--settings", <path>),)` while kv `hooks.enabled` is `1` (the settings file is
-    written first), else no pair at all: the crew then runs without hooks."""
-    if journal.kv_get("hooks.enabled") != "1":
+    written first), else no pair at all: the crew then runs without hooks. A work order whose
+    record says `main_checkout` gets the settings of its own (`crew-settings-merge-<id>.json`,
+    its guard naming the merge branch) and never runs without them: `ValueError` when the
+    hooks are off or the record names no usable branch."""
+    rec = (journal.issue(work_order) or {}) if work_order else {}
+    on = journal.kv_get("hooks.enabled") == "1"
+    if rec.get("main_checkout"):
+        if not on:
+            raise ValueError("the crew hooks are off: a main-checkout crew needs its guard")
+        return (("--settings", hooks.write_settings(
+            merge_branch=rec.get("merge_branch"), work_order=work_order)),)
+    if not on:
         return ()
     return (("--settings", hooks.write_settings()),)
 
@@ -491,7 +505,65 @@ def _files_overlap(mine, theirs):
     return not mine or not theirs or bool(set(mine) & set(theirs))
 
 
-def start(site_path, work_order, name, caller_pane):
+MERGE_MARKER = "[customer decision] merge"
+_MERGE_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def _merge_decision(work_order):
+    """The branch named by the latest `[customer decision] merge <branch> ...` answer act of
+    the work order: "" when that act names none, None when there is no such act."""
+    found = None
+    for text in journal.acts(work_order, "answer"):
+        rest = text[len(MERGE_MARKER):] if text.startswith(MERGE_MARKER) else None
+        if rest is not None and (not rest or rest[0].isspace()):
+            found = rest.split()[0] if rest.split() else ""
+    return found
+
+
+def _porcelain_path(entry):
+    """The paths of one `git status --porcelain` line (two for a rename or a copy)."""
+    paths = entry[3:].split(" -> ")
+    return [p[1:-1] if len(p) > 1 and p.startswith('"') and p.endswith('"') else p
+            for p in paths]
+
+
+def _main_checkout_refusal(site_path, work_order):
+    """`(refusal result, None)` or `(None, the branch to merge)` for `start --main-checkout`;
+    the checks in order: hooks_off, no_merge_decision, no_branch, not_default_branch,
+    main_dirty, main_busy. Reads only; nothing is started."""
+    if journal.kv_get("hooks.enabled") != "1":
+        return {"status": "hooks_off"}, None
+    branch = _merge_decision(work_order)
+    if branch is None:
+        return {"status": "no_merge_decision"}, None
+    current = _git_soft(["branch", "--show-current"], site_path).stdout.strip()
+    if not _MERGE_BRANCH.match(branch) or branch in ("main", "master", current) \
+            or _git_soft(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % branch],
+                         site_path).returncode != 0:
+        return {"status": "no_branch", "branch": branch}, None
+    if current not in ("main", "master"):
+        return {"status": "not_default_branch", "branch": current}, None
+    p = _git_soft(["status", "--porcelain", "--untracked-files=all"], site_path)
+    if p.returncode != 0:
+        return {"status": "main_dirty", "detail": p.stderr.strip()}, None
+    dirty = [e for e in p.stdout.splitlines() if e.strip()
+             and not all(path.startswith(".claude/worktrees/") for path in _porcelain_path(e))]
+    if dirty:
+        return {"status": "main_dirty", "entries": dirty[:10]}, None
+    real = os.path.realpath(site_path)
+    busy = [c for c in journal.crews()
+            if (journal.kv_get(_kv(c, "worktree")) or "")
+            and os.path.realpath(journal.kv_get(_kv(c, "worktree"))) == real]
+    if busy:
+        return {"status": "main_busy", "with": busy}, None
+    return None, branch
+
+
+def start(site_path, work_order, name, caller_pane, main_checkout=False):
+    """Start a crew for a work order: in a new worktree (`claude -w`), or with `main_checkout`
+    in the site's own main checkout to merge the branch the customer decided on (see
+    `_main_checkout_refusal` for what it refuses). Its record, `main_checkout` and
+    `merge_branch`, is what a consent-answered start, a restart and a handover rebuild from."""
     if emergency_stop():
         return {"status": _STOPPED}
     if not herdr_cli.valid_name(name):
@@ -515,6 +587,11 @@ def start(site_path, work_order, name, caller_pane):
             return {"status": "already_issued", "name": rec.get("name"),
                     "pane_id": rec["pane"]}
         # a foreign session in the pane is left alone: start anew in a new pane
+    merge_branch = None
+    if main_checkout:
+        refusal, merge_branch = _main_checkout_refusal(site_path, work_order)
+        if refusal:
+            return refusal
     active = journal.crews()
     if len(active) >= journal.machine()["parallel_ceiling"]:
         return {"status": "parallel_limit"}
@@ -539,13 +616,22 @@ def start(site_path, work_order, name, caller_pane):
                           site=site_path)
         return {"status": "needs_trust", "pane_id": pane, "site": site_path, "trust": "missing"}
     session_id = str(uuid.uuid4())
-    earlier = list((journal.issue(work_order) or {}).get("sessions") or [])
+    earlier_rec = journal.issue(work_order) or {}
+    earlier = list(earlier_rec.get("sessions") or [])
+    # the record is what a consent-answered start, a restart and a handover rebuild the
+    # session arguments from, so it is written before the agent starts (and a plain start
+    # forgets a merge record an earlier attempt left)
+    mode = {"main_checkout": True, "merge_branch": merge_branch} if main_checkout \
+        else ({"main_checkout": False, "merge_branch": None}
+              if earlier_rec.get("main_checkout") else {})
     journal.issue_set(work_order, "issuing", name=name, pane=pane, session_id=session_id,
-                      sessions=earlier + [session_id], site=site_path)
+                      sessions=earlier + [session_id], site=site_path, **mode)
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
                       + _claude_args(("--session-id", session_id), ("--add-dir", _files_dir()),
-                                     ("-w", "prorab-%s" % work_order), *_settings_pairs()),
+                                     *(() if main_checkout
+                                       else (("-w", "prorab-%s" % work_order),)),
+                                     *_settings_pairs(work_order)),
                       timeout_s=90)
     except herdr_cli.HerdrError as e:
         if e.code not in ("agent_not_ready", "timeout"):
@@ -575,10 +661,25 @@ def _locate_worktree(site_path, work_order):
     return worktree, branch, base_commit
 
 
+def _locate_main_checkout(site_path):
+    """(site path, the branch checked out there, its HEAD): the "worktree" of a main-checkout
+    crew; each None when git cannot tell."""
+    branch = _git_soft(["branch", "--show-current"], site_path).stdout.strip() or None
+    p = _git_soft(["rev-parse", "HEAD"], site_path)
+    head = p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
+    return site_path, branch, head
+
+
 def _register_started(site_path, work_order, name, pane, session_id):
     """The tail of `start` once Claude Code runs in `pane`: find the worktree, name the
-    branch, record the issue, register the crew."""
-    worktree, branch, base_commit = _locate_worktree(site_path, work_order)
+    branch, record the issue, register the crew. For a main-checkout work order (its record
+    says so) the "worktree" is the site itself, the branch the one checked out there and the
+    base the HEAD of the site now, before the crew has the work order."""
+    main = (journal.issue(work_order) or {}).get("main_checkout")
+    if main:
+        worktree, branch, base_commit = _locate_main_checkout(site_path)
+    else:
+        worktree, branch, base_commit = _locate_worktree(site_path, work_order)
     if worktree:  # so the spend stays attributable after the crew is gone
         extra = {"base_commit": base_commit} if base_commit else {}
         journal.issue_set(work_order, (journal.issue(work_order) or {}).get("state", "issuing"),
@@ -597,6 +698,9 @@ def _register_started(site_path, work_order, name, pane, session_id):
     _set_session(name, worktree, session_id, work_order)
     result = {"status": "started" if worktree else "started_no_worktree", "pane_id": pane, "name": name,
               "session_id": session_id, "worktree": worktree, "branch": branch}
+    if main:
+        result.update(main_checkout=True,
+                      merge_branch=(journal.issue(work_order) or {}).get("merge_branch"))
     journal.add_act(work_order, "answer", "crew %s started: pane %s, branch %s, session %s"
                     % (name, pane, branch, session_id))
     return result
@@ -947,9 +1051,13 @@ def _issue_worktree(work_order):
 
 
 def _spend_of(work_order, worktree, d=None, home=None):
-    sessions = (journal.issue(work_order) or {}).get("sessions") or []
+    rec = journal.issue(work_order) or {}
+    sessions = rec.get("sessions") or []
     d = d or _defaults.load()
-    usd = transcript.cost(transcript.work_order_files(worktree, sessions, home), d)["usd"]
+    # a main-checkout work order's "worktree" is the site: only its own sessions are its spend
+    files = transcript.work_order_files(worktree, sessions, home,
+                                        own_only=bool(rec.get("main_checkout")))
+    usd = transcript.cost(files, d)["usd"]
     est = journal.estimate(work_order)
     rates = limits.rates(scheduler.readings(), d, time.time(), home=home)
     return {"usd": usd, "estimate_usd": est["usd"],
@@ -1163,12 +1271,19 @@ def _adopt_new_worktree(name, work_order, worktree, new):
     return found
 
 
-def _start_session(name, pane, claude_args, want_screen=False):
+def _start_session(name, pane, claude_args, want_screen=False, work_order=None):
     """`agent start` in `pane`. Returns (error result or None, screen text). A consent
-    screen maps as in `start`; the screen is read only when it is needed."""
+    screen maps as in `start`; the screen is read only when it is needed. The settings are
+    the shared ones, or the merge crew's own when the work order's record says so; a merge
+    crew with the hooks off is not started."""
+    try:
+        settings = _settings_pairs(work_order)
+    except ValueError as e:
+        return {"status": "restart_failed", "step": "settings", "reason": str(e),
+                "pane_id": pane}, ""
     try:
         herdr_cli.run(["agent", "start", name, "--kind", "claude", "--pane", pane]
-                      + _claude_args(*claude_args, *_settings_pairs()), timeout_s=90)
+                      + _claude_args(*claude_args, *settings), timeout_s=90)
     except herdr_cli.HerdrError as e:
         failed = {"status": "restart_failed", "step": "agent_start", "reason": str(e),
                   "pane_id": pane}
@@ -1195,7 +1310,7 @@ def _open_stage_statuses(work_order):
 
 
 def _facts(worktree, work_order, base):
-    base = _resolve_base(worktree, base)
+    base = _resolve_base(worktree, base, work_order)
 
     def out(args, empty):
         p = _git_soft(args, worktree)
@@ -1274,7 +1389,8 @@ def _restart_after_exit(name, work_order, work_order_text, worktree, pane, spend
         return failed
     session_id = str(uuid.uuid4())
     failed, _screen = _start_session(
-        name, pane, (("--session-id", session_id), ("--add-dir", _files_dir())) + new)
+        name, pane, (("--session-id", session_id), ("--add-dir", _files_dir())) + new,
+        work_order=work_order)
     if failed:
         return failed
     worktree = _adopt_new_worktree(name, work_order, worktree, new)
@@ -1367,7 +1483,8 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
     ctx = _context(old, path, _defaults.load())
     files = ("--add-dir", _files_dir())
     if old and not new and not (ctx and ctx["soft"]):  # a new worktree has no session to resume
-        failed, screen = _start_session(name, pane, (("--resume", old), files), True)
+        failed, screen = _start_session(name, pane, (("--resume", old), files), True,
+                                        work_order=work_order)
         marker = _defaults.load()["screen"]["resume_failed"].lower()
         shown = herdr_cli.bottom_block(screen, _defaults.load()["screen"]["tail_lines"]).lower()
         if marker not in shown:
@@ -1393,7 +1510,8 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
             return {"status": "resumed", "pane_id": pane, "session_id": old,
                     "work_order_sent": changed}
     session_id = str(uuid.uuid4())
-    failed, _screen = _start_session(name, pane, (("--session-id", session_id), files) + new)
+    failed, _screen = _start_session(name, pane, (("--session-id", session_id), files) + new,
+                                     work_order=work_order)
     if failed:
         return failed
     worktree = _adopt_new_worktree(name, work_order, worktree, new)
@@ -1414,8 +1532,8 @@ def _restart(name, work_order, work_order_text, worktree, caller_pane, timeout_s
 
 # ---- git facts --------------------------------------------------------------
 
-def evidence(worktree, base=None):
-    base = _resolve_base(worktree, base)
+def evidence(worktree, base=None, work_order=None):
+    base = _resolve_base(worktree, base, work_order)
     branch = _git_soft(["rev-parse", "--abbrev-ref", "HEAD"], worktree).stdout.strip()
     commits = _git_soft(["log", "--oneline", "%s..HEAD" % base], worktree).stdout.splitlines()
     diffstat = _git_soft(["diff", "--stat", "%s...HEAD" % base], worktree).stdout.strip()
@@ -1635,7 +1753,9 @@ def cleanup(site_path, work_order):
     for key in list(journal.kv_all()):   # a dropped work order leaves no consent watch behind
         if key.startswith("consent.%s." % work_order):
             journal.kv_clear(key)
-    wt = _find_worktree(site_path, work_order)
+    # a main-checkout work order has no worktree and no branch of its own: nothing to remove
+    wt = None if (journal.issue(work_order) or {}).get("main_checkout") \
+        else _find_worktree(site_path, work_order)
     dropped = any(a.startswith(DROP_MARKER) for a in journal.acts(work_order, "answer"))
     if wt is None:
         res = {"status": "absent", "work_order_closed": False}
@@ -1775,8 +1895,9 @@ def _check_stubs(sections, rows, criteria, live):
 
 
 def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, cleared=False,
-                 heavy_counted=None, unverifiable=None, live=()):
-    """Read-only check of a stage report against its work order and the worktree's git."""
+                 heavy_counted=None, unverifiable=None, live=(), work_order=None):
+    """Read-only check of a stage report against its work order and the worktree's git.
+    `work_order` finds the recorded base of a main-checkout work order (see `_recorded_base`)."""
     problems, warnings = [], []
     problems += _check_heavy(text, heavy_limit, cleared, heavy_counted, unverifiable)
     sections = _sections(text)
@@ -1830,14 +1951,14 @@ def check_report(text, criteria, files, worktree, base=None, heavy_limit=None, c
     if outcome == "delivered":
         if checks == 0:
             problems.append("delivered: no check command in Verification")
-        problems += _check_delivery(sha, changed_items, files, worktree, base)
+        problems += _check_delivery(sha, changed_items, files, worktree, base, work_order)
     return {"ok": not problems, "problems": problems, "warnings": warnings,
             "outcome": outcome, "sha": sha}
 
 
-def _check_delivery(sha, changed_items, files, worktree, base):
+def _check_delivery(sha, changed_items, files, worktree, base, work_order=None):
     """Git facts for a `delivered` report: problems only; any git failure is a refusal."""
-    base = _resolve_base(worktree, base)
+    base = _resolve_base(worktree, base, work_order)
     if not sha:
         return ["delivered: no Commit SHA"]
 
@@ -1936,7 +2057,7 @@ def _check_report_cli(name, work_order, stage=None, base=None):
                         journal.work_order_files(work_order), worktree, base,
                         heavy_limit=journal.estimate(work_order)["heavy_runs_per_stage"],
                         cleared=cleared, heavy_counted=counted, unverifiable=missing,
-                        live=live_criteria(description))
+                        live=live_criteria(description), work_order=work_order)
 
 
 def _accept_cli(work_order, stage, act_file):
@@ -1964,7 +2085,8 @@ def main(argv=None):
             p.add_argument("--" + o.replace("_", "-"), **kw)
         return p
 
-    cmd("start", "site_path", "work_order", "name", "caller_pane")
+    cmd("start", "site_path", "work_order", "name", "caller_pane",
+        main_checkout={"action": "store_true"})
     cmd("new_site", "site_path", "work_order", "caller_pane")
     cmd("name_for", "site", "n")
     cmd("send_work_order", "name", "text", work_order={})
@@ -1972,7 +2094,7 @@ def main(argv=None):
     cmd("summary", "name")
     cmd("request_handover", "name")
     cmd("complete_handover", "name", "work_order", "work_order_text")
-    cmd("evidence", "worktree", base={})
+    cmd("evidence", "worktree", base={}, work_order={})
     cmd("merge_check", "worktree", accepted={"default": ""})
     cmd("answer", "name", choice={"type": int}, text={})
     cmd("pause", "name")

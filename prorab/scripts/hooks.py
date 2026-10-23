@@ -26,6 +26,8 @@ TAP_EVENTS = ("Stop", "Notification", "PreCompact", "SessionStart")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _MERGE = re.compile(r"\bgit\b.*\b(?:merge|rebase)\b")
 _HEX_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+# the branch a merge crew may merge (the same shape `crew.py start --main-checkout` accepts)
+_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _OFFICE_FORMS = ("~/projects/prorab/.beads", "$HOME/projects/prorab/.beads",
                  "${HOME}/projects/prorab/.beads")
 
@@ -46,20 +48,30 @@ def _stop_check(stop_path):
         shlex.quote(stop_path), shlex.quote(STOP_REASON))
 
 
-def settings_dict(d=None):
+def _merge_branch_checked(branch):
+    if not isinstance(branch, str) or not _BRANCH.match(branch):
+        raise ValueError("merge branch %r is not a plain branch name" % (branch,))
+    return branch
+
+
+def settings_dict(d=None, merge_branch=None):
     """The crew settings: the hooks, no survey, and the suggestions setting. Nothing about
-    permissions or MCP servers."""
+    permissions or MCP servers. With `merge_branch` the guard runs as `guard --merge-branch
+    BRANCH` (the settings of a main-checkout merge crew); otherwise nothing differs."""
     d = d or _defaults.load()
+    guard_words = ["guard"]
+    if merge_branch is not None:
+        guard_words += ["--merge-branch", _merge_branch_checked(merge_branch)]
     script = os.path.abspath(__file__)
 
-    def entry(kind, matcher=None):
-        item = {"hooks": [{"type": "command", "command": _command(script, kind)}]}
+    def entry(kind, matcher=None, *more):
+        item = {"hooks": [{"type": "command", "command": _command(script, kind, *more)}]}
         if matcher:
             item["matcher"] = matcher
         return item
     stop_check = {"matcher": "*", "hooks": [
         {"type": "command", "command": _stop_check(d["emergency"]["stop_path"])}]}
-    hooks = {"PreToolUse": [stop_check, entry("guard", "Bash")]}
+    hooks = {"PreToolUse": [stop_check, entry("guard", "Bash", *guard_words[1:])]}
     for event in TAP_EVENTS:
         hooks[event] = [entry("tap")]
     out = {"hooks": hooks, "feedbackSurveyRate": 0}
@@ -67,16 +79,26 @@ def settings_dict(d=None):
     return out
 
 
-def write_settings(d=None):
-    """Write `hooks.settings_path` atomically (mode 0600, its directory 0700); returns it."""
+def write_settings(d=None, merge_branch=None, work_order=None):
+    """Write `hooks.settings_path` atomically (mode 0600, its directory 0700); returns it.
+    With `merge_branch` and `work_order` (both or neither) write the settings of that work
+    order's merge crew to `crew-settings-merge-<work order>.json` beside it instead; the shared
+    file is not touched."""
     d = d or _defaults.load()
     path = d["hooks"]["settings_path"]
     folder = os.path.dirname(path)
+    if (merge_branch is None) != (work_order is None):
+        raise ValueError("a merge crew's settings need both the merge branch and the work order")
+    if merge_branch is not None:
+        if not safe_session_id(work_order):
+            raise ValueError("work order %r cannot be used in a file name" % (work_order,))
+        _merge_branch_checked(merge_branch)
+        path = os.path.join(folder, "crew-settings-merge-%s.json" % work_order)
     os.makedirs(folder, mode=0o700, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(settings_dict(d), fh, indent=2)
+            json.dump(settings_dict(d, merge_branch), fh, indent=2)
             fh.write("\n")
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
@@ -150,16 +172,142 @@ def checked_out_branch(start):
     return None
 
 
-def guard_decision(raw, d=None):
+# ---- the guard of a main-checkout merge crew ---------------------------------------------
+# `guard --merge-branch BRANCH`: in a checkout on main/master of such a crew git is allowed
+# only as the one merge it was started for, `git merge --abort` and read-only subcommands.
+
+_GIT_WORD = re.compile(r"(?<![\w.-])git(?![\w.-])")
+_READ_ONLY_GIT = ("status", "log", "diff", "show", "rev-parse", "merge-base", "ls-files")
+_MERGE_FLAGS = ("--no-ff", "--ff-only")
+
+
+def _segments(command):
+    """The command as a list of simple commands (token lists), split at `;`, `&&`, `||`, `|`,
+    `&`, newlines and parentheses; None when it cannot be read. A redirection is kept as a
+    token holding `<` or `>`."""
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    out, cur = [], []
+    for t in tokens:
+        if t and all(c in ";&|()" for c in t):
+            if cur:
+                out.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _is_git(token):
+    return token == "git" or token.endswith("/git")
+
+
+def _same_checkout(a, b):
+    ga, gb = _find_dot_git(a), _find_dot_git(b)
+    return ga is not None and gb is not None and os.path.realpath(ga) == os.path.realpath(gb)
+
+
+def _merge_crew_git(tokens, cwd):
+    """None when this git command is allowed, else the reason. `tokens[0]` is git."""
+    words, target, i = tokens[1:], None, 0
+    while i < len(words) and words[i].startswith("-"):
+        if words[i] == "-C" and target is None and i + 1 < len(words):
+            target = words[i + 1]
+            i += 2
+        elif words[i] == "--no-pager":
+            i += 1
+        else:
+            return "git option %s" % words[i]
+    if target is not None:
+        target = os.path.expanduser(target)
+        target = target if os.path.isabs(target) else os.path.join(cwd, target)
+        if not _same_checkout(target, cwd):
+            return "git -C outside this checkout"
+    words = words[i:]
+    if not words:
+        return "a bare git command"
+    sub, rest = words[0], words[1:]
+    if sub in _READ_ONLY_GIT:
+        if any(w.startswith("--output") for w in rest):
+            return "git %s --output" % sub
+        return None
+    if sub == "branch":
+        return None if all(w in ("--list", "--show-current") for w in rest) \
+            else "git branch with arguments"
+    return "git %s" % sub
+
+
+def _merge_crew_forms_ok(tokens, branch):
+    """Whether a `git ... merge` segment is exactly an allowed merge form."""
+    rest = tokens
+    if rest == ["--abort"]:
+        return True
+    if rest and rest[0] in _MERGE_FLAGS:
+        rest = rest[1:]
+    if rest and rest[0] == "--no-edit":
+        rest = rest[1:]
+    return rest == [branch]
+
+
+def _merge_crew_verdict(command, cwd, branch):
+    """None when the checkout is not main/master (the ordinary rules apply), else
+    `(0, "")` or the refusal (2, message)."""
+    def refuse(what):
+        return 2, ("prorab guard: %s is forbidden in the main checkout of a merge crew; "
+                   "ask the foreman" % what)
+    checked_out = checked_out_branch(cwd)
+    if checked_out is None:
+        return 2, "prorab guard: cannot tell the checked-out branch; ask the foreman"
+    if checked_out not in ("main", "master"):
+        return None
+    if re.search(r"\$\(|`|<\(|>\(", command):
+        return refuse("a command substitution around git")
+    segments = _segments(command)
+    if segments is None:
+        return refuse("a command that cannot be read")
+    merges = 0
+    for tokens in segments:
+        if not _is_git(tokens[0]):
+            if any(_GIT_WORD.search(t) for t in tokens):
+                return refuse("git run through another command")
+            continue
+        if any(re.search(r"[<>]", t) for t in tokens):
+            return refuse("git with a redirection")
+        words, i = tokens[1:], 0
+        # a merge is `git [-C dir] merge ...`; find the subcommand the way _merge_crew_git does
+        while i < len(words) and words[i].startswith("-"):
+            i += 2 if words[i] == "-C" else 1
+        sub = words[i] if i < len(words) else None
+        if sub == "merge":
+            merges += 1
+            problem = _merge_crew_git(tokens[:1] + words[:i] + ["status"], cwd)
+            if problem is None and not _merge_crew_forms_ok(words[i + 1:], branch):
+                problem = "this merge"
+        else:
+            problem = _merge_crew_git(tokens, cwd)
+        if problem is not None:
+            return refuse(problem)
+    if merges and len(segments) > 1:
+        return refuse("a merge in a compound command")
+    return 0, ""
+
+
+def guard_decision(raw, d=None, merge_branch=None):
     """(exit code, message) for the PreToolUse input `raw` (the JSON text). Any unexpected
     error denies: an exit code other than 2 would let the call run."""
     try:
-        return _decide(raw, d)
+        return _decide(raw, d, merge_branch)
     except Exception:
         return 2, "prorab guard: internal error; ask the foreman"
 
 
-def _decide(raw, d):
+def _decide(raw, d, merge_branch=None):
     d = d or _defaults.load()
     unreadable = (2, "prorab guard: unreadable hook input")
     try:
@@ -181,9 +329,20 @@ def _decide(raw, d):
     if any(form in folded for form in _office_journal_forms()):
         return 2, ("prorab guard: the foreman's journal is off limits for crews; "
                    "ask the foreman")
-    if _MERGE.search(folded):
-        cwd = data.get("cwd") if isinstance(data.get("cwd"), str) and data.get("cwd") \
+    def cwd_of():
+        return data.get("cwd") if isinstance(data.get("cwd"), str) and data.get("cwd") \
             else os.getcwd()
+    if merge_branch is not None:
+        try:
+            _merge_branch_checked(merge_branch)
+        except ValueError:
+            return 2, "prorab guard: the merge branch of this crew's settings is not usable"
+        if _GIT_WORD.search(command):
+            verdict = _merge_crew_verdict(command, cwd_of(), merge_branch)
+            if verdict is not None:
+                return verdict
+    if _MERGE.search(folded):
+        cwd = cwd_of()
         target = _dash_c_dir(folded)
         if target:
             target = os.path.expanduser(target)
@@ -197,12 +356,12 @@ def _decide(raw, d):
     return 0, ""
 
 
-def guard(stdin=None):
+def guard(stdin=None, merge_branch=None):
     try:
         raw = (stdin or sys.stdin).read()
     except Exception:
         raw = None   # unreadable input is decided as such
-    code, message = guard_decision(raw)
+    code, message = guard_decision(raw, merge_branch=merge_branch)
     if message:
         print(message, file=sys.stderr)
     return code
@@ -252,9 +411,12 @@ def tap(stdin=None):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("cmd", choices=("settings", "guard", "tap"))
-    cmd = ap.parse_args(argv).cmd
+    ap.add_argument("--merge-branch", help="guard only: the one branch a main-checkout merge "
+                    "crew may merge (git there is otherwise read-only)")
+    args = ap.parse_args(argv)
+    cmd = args.cmd
     if cmd == "guard":
-        return guard()
+        return guard(merge_branch=args.merge_branch)
     if cmd == "tap":
         return tap()
     print(write_settings())

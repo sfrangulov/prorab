@@ -145,3 +145,13 @@ Added a CSV export of the daily report.
 ## Residual risks
 The CSV has not been opened in a spreadsheet application.
 ```
+
+## A merge work order
+
+A crew cannot merge into `main` from its worktree. A merge is its own work order, started only on the customer's decision: the foreman records an `answer` act on the work order that starts with `[customer decision] merge <branch>` and quotes the customer's words, then runs `crew.py start SITE_PATH WORK_ORDER NAME CALLER_PANE --main-checkout` (crew hooks on, the main checkout on `main` or `master` and clean, no other crew in it; the script refuses otherwise and starts nothing). The crew works in the site's main checkout, not in a worktree, with guard settings of its own for this work order. Use the template above with these changes:
+
+- Site: `- Path: <site path>. You work in the site's main checkout on <main or master>, not in a worktree: there is no worktree or branch of your own. The branch to merge is <branch>.`
+- Goal: quote the decision as the foreman recorded it (`[customer decision] merge <branch>` and the customer's words), and say that nothing but this merge is wanted.
+- One stage, with the files the branch changes as its Files, and the stage's work: "Merge exactly `<branch>` into <main or master> with `git merge --no-ff --no-edit <branch>`, run the site's quick checks, change nothing else, push nothing. At a conflict run `git merge --abort` and report `blocked`; resolve nothing by hand."
+- Constraints: replace the first line with "Work only in this checkout and commit nothing but that merge. Never push, open a pull request, release, pull, rebase, cherry-pick, reset or change any other branch or ref." The guard allows of git there only that merge, `git merge --abort` and read-only commands (`status`, `log`, `diff`, `show`, `rev-parse`, `merge-base`, `ls-files`, `branch` without arguments); a refused command is a question for the foreman.
+- Report: `Result: delivered` with the merge commit as `Commit:`; Changed files lists `git diff --name-only <base>...HEAD`, where the base is the commit the main checkout stood at when the crew started (the script records it). A conflict or a failed quick check is `blocked`, with the merge aborted.

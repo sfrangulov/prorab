@@ -359,10 +359,12 @@ def _session_transcript(worktree, session_id, home):
     return find_transcript("", session_id, home)
 
 
-def work_order_files(worktree, sessions=(), home=None):
+def work_order_files(worktree, sessions=(), home=None, own_only=False):
     """Transcripts of a work order: every run in its worktree, plus each crew session by id
-    wherever Claude Code left it (and its subagents). The site's directory is never listed whole."""
-    files = set(worktree_files(worktree, home))
+    wherever Claude Code left it (and its subagents). The site's directory is never listed whole.
+    With `own_only` (a crew in the site's main checkout, whose "worktree" is the site) only the
+    sessions by id are read."""
+    files = set() if own_only else set(worktree_files(worktree, home))
     for session_id in sessions:
         path = _session_transcript(worktree, session_id, home)
         if path:
